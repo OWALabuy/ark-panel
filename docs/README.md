@@ -10,6 +10,7 @@
 
 - [`decisions/engineering-decisions.md`](decisions/engineering-decisions.md)
 - [`decisions/slash-commands.md`](decisions/slash-commands.md)
+- [`decisions/panel-memory.md`](decisions/panel-memory.md)
 
 ## Operations
 

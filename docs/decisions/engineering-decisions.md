@@ -46,6 +46,30 @@ API 统一位于 `/api/v1`。成功响应是 `{ "data": ... }`；失败响应是
 
 清理顺序固定为：先调用官方 `sessions.delete` 注销，再删除 runtime agent 专用 sessions 根目录中、与本次已验证 sessionId 严格匹配的已知 artifact。清理函数只接受服务端刚创建并登记的 UUID；只允许 `.jsonl.deleted.*`、`.trajectory.jsonl`、`.trajectory-path.json` 等经过当前版本验证的类型；拒绝符号链接、目录越界和未知文件。真实 agent 的 sessions 根目录永远不进入清理 allowlist。
 
+## 版本控制与升级维护（2026-07-12）
+
+面板核心数据（transcript JSONL、metadata、index）是自主的、可迁移的，不绑定 OpenClaw。但 2a′ 混合架构对 OpenClaw 保留了一层**软耦合**：更换或升级 OpenClaw 时，这层是唯一需要重新验证/适配的面。集中记录，避免升级时到处找。
+
+### 软耦合面（升级后逐项复核）
+1. **版本门禁**：第一版固定 `2026.6.11`。启动推理前核对 CLI/gateway 版本；不匹配返回 `OPENCLAW_VERSION_UNSUPPORTED`，拒绝推理与清理。升级 = 抬高这个 pin，且必须在抬高前跑完下面的复核。
+2. **transcript 格式**：会话头 `version:3`、`id`/`parentId` 树、content block 类型（text / tool_use / tool_result / thinking / model_change / thinking_level_change / custom）。schema 变了，解析器与 fork 回溯都要改。
+3. **推理桥接 RPC 与流程**：`sessions.create` → 覆盖 transcript → `sessions.send` → 读新增 entry → `sessions.delete` + 受限清理。RPC 名称、参数、一次性 session 行为都可能随版本变。
+4. **握手与鉴权**：operator 角色 + `gateway.auth.token`、跳过设备签名的分支（`roleCanSkipDeviceIdentity`）。
+5. **清理 artifact 类型**：`.jsonl.deleted.*`、`.trajectory.jsonl`、`.trajectory-path.json`。版本若新增/改名 artifact 类型，清理 allowlist 要同步扩充，否则残留累积。
+6. **记忆机制假设**：归档只认 `workspaceDir`、recall store 按 workspace key、promote 阈值、压缩前 flush 的触发条件（见 `panel-memory.md`）。记忆路线 B 与 `scratch` 收窄都建立在这些行为上，升级后须重验。
+7. **打包源码路径**：`~/.nvm/.../node_modules/openclaw/dist/*.js` 的文件名带内容哈希后缀，升级必变；任何靠读 dist 得出的结论都要重查，不能假设文件名不变。
+
+### 升级流程（不在真实 agent 上首验）
+1. 先在隔离的 `paneltest`（无渠道绑定）上装新版本，跑推理桥接冒烟 + 上述 2–6 项复核。
+2. 复核通过后再抬高版本 pin，并更新本文与 `architecture.md §四` 里标注的版本号。
+3. 复核未过时，面板对新版本继续走版本门禁拒绝推理，直到适配完成；期间只读浏览仍可用（只读不依赖桥接）。
+4. OpenClaw 升级与面板自身发布相互独立：面板可在不升 OpenClaw 时发版；升 OpenClaw 必须过版本门禁。
+5. 面板自身依赖（npm 包）用锁文件固定版本；升级依赖后跑 `npm test` 与部署 smoke 再发布。
+
+### 面板自身版本
+- 面板遵循语义化版本；破坏 transcript / metadata / index 存储格式的改动记为不兼容变更，并附带迁移步骤（存储是权威数据，格式变更必须可迁移、可回滚）。
+- 支持的 OpenClaw 版本范围在 README 与本文各记一处，发布说明里点明。
+
 ## 长上下文保护（第一版）
 
 推理适配层在任何 gateway `sessions.create` / `sessions.send` 之前执行上下文预算检查。接口输入是面板将物化的完整 `TranscriptDocument` 与本轮用户消息，输出包括 `estimatedTokens`、`budgetTokens`、`remainingTokens` 和估算方法版本。
