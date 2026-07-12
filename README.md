@@ -18,6 +18,8 @@ Panel-owned sessions support `/model`, `/think`, `/reasoning`, `/new`, `/command
 
 The server currently reports generation lifecycle events over SSE and refreshes the completed message group after the gateway finishes. It does not claim token-by-token streaming.
 
+Message text is rendered as safe Markdown with raw HTML disabled. Whole messages and individual fenced code blocks can be copied from the conversation view.
+
 ## Install and test
 
 ```sh

@@ -3,9 +3,19 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 test("frontend renders untrusted metadata with DOM text nodes", async () => {
-  const source=await readFile("src/frontend/app.js","utf8");
+  const source=await readFile("src/frontend/app.js","utf8"),markdown=await readFile("src/frontend/markdown.js","utf8");
   assert.doesNotMatch(source,/\.innerHTML\s*=/);
+  assert.doesNotMatch(markdown,/\.innerHTML\s*=/);
   assert.match(source,/textContent=/);
+  assert.match(source,/renderMarkdown\(text\)/);
+  assert.match(source,/复制消息/);
+  assert.match(source,/command:"commands",args:\[\]/);
+  assert.match(source,/result\?\.data\?\.commands/);
+  assert.match(markdown,/SAFE_PROTOCOLS=new Set\(\["http:","https:","mailto:"\]\)/);
+  assert.match(markdown,/createTextNode/);
+  assert.match(markdown,/复制代码/);
+  assert.match(markdown,/noopener noreferrer/);
+  assert.doesNotMatch(markdown,/insertAdjacentHTML|document\.write|eval\(/);
   assert.match(source,/text\/event-stream/);
   assert.match(source,/\/search\?q=/);
   assert.match(source,/\/fork/);

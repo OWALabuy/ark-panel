@@ -30,6 +30,18 @@ function event(command: PanelCommandName, value: string | undefined, document: T
 }
 function commandName(input: string): string { return input.startsWith("/") ? input.slice(1) : input; }
 
+function commandCatalog(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const catalog = value as { commands?: unknown };
+  if (!Array.isArray(catalog.commands)) return value;
+  return { ...catalog, commands: catalog.commands.map(item => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return item;
+    const command = item as Record<string, unknown>;
+    const name = typeof command.name === "string" ? commandName(command.name) : "";
+    return { ...command, supported: (PANEL_COMMAND_ALLOWLIST as readonly string[]).includes(name) };
+  }) };
+}
+
 export class PanelCommandApi {
   private readonly levels: readonly string[];
   private readonly operations: SessionOperationCoordinator;
@@ -55,7 +67,7 @@ export class PanelCommandApi {
     if (!(PANEL_COMMAND_ALLOWLIST as readonly string[]).includes(name)) throw new Error("COMMAND_NOT_ALLOWED");
     const command = name as PanelCommandName; if (!Array.isArray(request.args) || request.args.some(arg => typeof arg !== "string")) throw new Error("COMMAND_ARGS_INVALID");
     if (["commands", "help", "status", "models"].includes(command) && request.args.length) throw new Error("COMMAND_ARGS_INVALID");
-    if (command === "commands") return this.result(command, "read", await this.providers.commands());
+    if (command === "commands") return this.result(command, "read", commandCatalog(await this.providers.commands()));
     if (command === "status") return this.result(command, "read", await this.providers.status());
     if (command === "models") return this.result(command, "read", await this.providers.models());
     if (command === "help") return this.result(command, "read", { allowlistVersion: PANEL_COMMAND_ALLOWLIST_VERSION, commands: PANEL_COMMAND_ALLOWLIST });

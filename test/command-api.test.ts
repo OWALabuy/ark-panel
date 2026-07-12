@@ -12,7 +12,7 @@ async function fixture() {
   const created: Array<[string, string | undefined]> = [];
   const api = new PanelCommandApi(root, [agentId], {
     async models() { return [{ key: "provider/model", name: "Model", available: true, tags: ["alias:fast"] }, { key: "missing/model", available: false }]; },
-    async commands() { return [{ name: "dynamic" }]; }, async status() { return { ok: true }; },
+    async commands() { return { commands: [{ name: "think" }, { name: "dynamic-skill", source: "skill" }] }; }, async status() { return { ok: true }; },
     async createPanel(agent, title) { created.push([agent, title]); return { recordId: "new-record" }; }
   });
   return { root, agentId, recordId, api, created };
@@ -56,7 +56,10 @@ test("思考档在派发时通过真实 override provider 校验，切模型会�
 test("C 类命令只读，new 复用面板会话创建能力", async () => {
   const x = await fixture();
   assert.deepEqual((await x.api.dispatch(x.recordId, { command: "status", args: [] })).data, { ok: true });
-  assert.deepEqual((await x.api.dispatch(x.recordId, { command: "commands", args: [] })).data, [{ name: "dynamic" }]);
+  assert.deepEqual((await x.api.dispatch(x.recordId, { command: "commands", args: [] })).data, { commands: [
+    { name: "think", supported: true }, { name: "dynamic-skill", source: "skill", supported: false }
+  ] });
+  await assert.rejects(x.api.dispatch(x.recordId, { command: "dynamic-skill", args: [] }), /COMMAND_NOT_ALLOWED/);
   assert.deepEqual((await x.api.dispatch(x.recordId, { command: "new", args: ["新", "会话"] })).data, { recordId: "new-record" });
   assert.deepEqual(x.created, [[x.agentId, "新 会话"]]);
   const loaded = await loadPanelSession(x.root, x.agentId, x.recordId); assert.equal(loaded.document.entries.length, 0);
