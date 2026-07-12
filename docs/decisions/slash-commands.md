@@ -40,14 +40,14 @@
 
 ### 定位重述：命令大多是面板原生操作，不是「转发给 gateway」
 
-斜杠命令原本是为 **gateway 管理的会话**设计的。而在 2a′ 架构里，面板自建会话的状态由**面板自己拥有**，在 gateway 那边没有持久 session，只有每轮一个的临时 session。所以「支持斜杠命令」的很大一部分，其实是**用用户熟悉的命令名与交互，提供面板原生的等价能力**，而不是真的去 gateway 跑一条 OpenClaw 命令。gateway 的命令引擎只在一处真正被当作引擎用——`/compact`。
+斜杠命令原本是为 **gateway 管理的会话**设计的。而在 2a′ 架构里，面板自建会话的状态由**面板自己拥有**，在 gateway 那边没有持久 session，只有每轮一个的临时 session。所以「支持斜杠命令」的很大一部分，其实是**用用户熟悉的命令名与交互，提供面板原生的等价能力**，而不是真的去 gateway 跑一条 OpenClaw 命令。gateway 的能力只在一处真正被借用——`/compact` 借 gateway 的**压缩引擎**（经 `sessions.compact` typed RPC，仍非命令引擎）。没有任何命令走 gateway 的命令引擎（那要求把 `/xxx` 送进 send 路径，恰是原则 1 禁止的）。
 
 ### 命令四分类（按「谁拥有这个效果」）
 
 | 类 | 命令（举例） | 面板怎么做 | 首版 |
 |---|---|---|---|
 | **A 面板原生** | `/model` `/think` `/reasoning` `/new` | 存进**面板会话 metadata**，每轮推理经 `sessions.create` 参数或 `sessions.patch` 应用到临时 session。`/new` = 新建面板会话（已有）。这顺带实现 §8.6「会话中途换模型」——同一件事。 | ✅ 做 |
-| **B `/compact`（特殊）** | `/compact` | 面板会话无持久 gateway session 可压。做法：物化历史 → 临时 session 跑 `/compact` → **读回压缩后的 transcript → 采纳进面板存储** → 删临时 session。把 gateway 压缩引擎当计算引擎用。**这就是长上下文策略本身**，与之合流。 | 归长上下文 |
+| **B `/compact`（特殊）** | `/compact` | 面板会话无持久 gateway session 可压。做法：物化历史 → 临时 session 上调 **`sessions.compact` typed RPC**（**绝不把 `/compact` 送进 `sessions.send`**，否则违反原则 1/2）→ **读回压缩后的 transcript → 采纳进面板存储** → 删临时 session。把 gateway 压缩引擎当计算引擎用。**这就是长上下文策略本身**，与之合流。 | 归长上下文 |
 | **C 信息类**（只读代理，低风险） | `/help` `/commands` `/status` `/models` `/tools` `/usage` | 调 `commands.list` / `status` 等只读 RPC，面板渲染结果。 | ✅ 做 |
 | **D gateway 管理 / owner 全局** | `/config` `/restart` `/mcp` `/plugins` `/reset` `/bash` | 属于 gateway 管理面。面板是会话 UI，不是 gateway 控制台。`/reset` 对面板会话无对应语义。**`/bash` 例外见下**。 | 默认不做 |
 
