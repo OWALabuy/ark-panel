@@ -17,6 +17,10 @@ test("frontend renders untrusted metadata with DOM text nodes", async () => {
   assert.match(source,/trimStart\(\)\.startsWith\("\/"\)/);
   assert.match(source,/\/auth\/logout/);
   assert.match(source,/\/revisions\?agentId=/);
+  assert.match(source,/block\.input\?\?block\.arguments/);
+  assert.match(source,/block\.text\?\?block\.thinking/);
+  assert.match(source,/function activeBranch\(entries\)/);
+  assert.match(source,/role!=="toolResult"/);
   assert.match(source,/activeRun\.abort\(\)/);
   assert.doesNotMatch(source,/\/compact|\/reset/);
 });
