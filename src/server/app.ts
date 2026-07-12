@@ -88,6 +88,10 @@ export function createPanelServer(options: AppOptions) {
           } catch (error) {
             const aborted = controller.signal.aborted || (error instanceof Error && error.message === "BRIDGE_ABORTED");
             const known = error instanceof Error && ["SESSION_BUSY", "REVISION_CONFLICT", "PANEL_SESSION_NOT_FOUND", "RUNTIME_NOT_CONFIGURED", "IDEMPOTENCY_KEY_REUSED", "SLASH_COMMANDS_UNSUPPORTED"].includes(error.message) ? error.message : error instanceof ContextBudgetExceededError ? error.code : "RUN_FAILED";
+            if (!aborted && known === "RUN_FAILED") {
+              const detail = error instanceof Error ? error.stack ?? error.message : String(error);
+              process.stderr.write(`[ark-panel] generation failed requestId=${requestId} recordId=${targetRecordId}: ${detail}\n`);
+            }
             const userMessages: Record<string, string> = { SESSION_BUSY: "该会话正在生成，请稍后重试。", REVISION_CONFLICT: "会话已在其他窗口更新，请刷新后重试。", PANEL_SESSION_NOT_FOUND: "只有面板自建会话可以在这里继续。", RUNTIME_NOT_CONFIGURED: "该 Agent 尚未配置专用推理 runtime。", IDEMPOTENCY_KEY_REUSED: "重试标识已用于其他消息，请重新发送。", RUN_FAILED: "生成失败，请稍后重试。" };
             event(aborted ? "run.aborted" : "run.failed", { runId, code: aborted ? "RUN_ABORTED" : known,
               ...(error instanceof ContextBudgetExceededError ? { message: error.message, estimate: error.estimate } : {}),
