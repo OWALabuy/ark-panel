@@ -1,7 +1,7 @@
 # ark-panel：需求、架构与实现依据
 
 > 为 Claude agent 自建一个具有 claude.ai 会话管理体验的 Web 面板。
-> **首版范围更新（2026-07-12）：**首版不支持任何 OpenClaw 斜杠命令，并已移除命令快捷入口；以 `/` 开头的输入会在推理桥接前被拒绝。真实活会话与 reset 归档在面板中只读，只有 panel 自建或 fork 会话可从面板继续。后续命令适配以 [`decisions/slash-commands.md`](decisions/slash-commands.md) 为准。
+> **范围更新（2026-07-12）：**已上线的 v1 不支持斜杠命令；下一实现批次为 panel 自建 / fork 会话提供 A 类面板原生命令与首批 C 类只读命令（`/commands`、`/help`、`/status`、`/models`）。普通消息接口仍永久拒绝以 `/` 开头的输入，命令只走独立结构化派发接口。真实 active 会话与 reset 归档保持只读。完整范围见 [`decisions/slash-commands.md`](decisions/slash-commands.md)。
 > 本文档记录当前有效的需求、设计决定和实现依据，供 Owl 与 Codex 共同维护。
 > 最近更新 2026-07-11（需求、架构和 fork 实现方向均已确定，后端行为已经过实际环境验证，见 §5）。
 >
@@ -234,9 +234,9 @@ gateway 的会话索引属于其内部状态：它仅使用进程内锁，也没
 - **适配方向（2026-07-12 源码核实后确定）**：命令在 gateway 是「带内」执行的——没有命令执行 RPC，`/xxx` 是作为普通消息文本喂给 `sessions.send` 才触发分派。而面板当前以 `operator.admin` scope 连接，任何漏进桥接的 `/` 文本都会被自动授权执行。因此拒绝 `/` 进入普通消息路径是**必需的隔离防线**，不是保守。
 - **重定位**：斜杠命令原本是为 gateway 管理的会话设计的；在 2a′ 里面板自建会话的状态由面板自己拥有。所以「支持命令」的大部分其实是**用命令名与交互提供面板原生的等价能力**，而非转发给 gateway。命令按「谁拥有这个效果」分四类：
   - **A 面板原生**（`/model` `/think` `/new`）：存进面板会话 metadata，推理时应用到临时 session；顺带实现 §8.6「会话中途换模型」。首版做。
-  - **B `/compact`**：面板会话无持久 gateway session 可压，做法是「跑一次压缩推理、读回压缩后的 transcript、采纳进面板存储」——即长上下文策略本身，与之合流。
-  - **C 信息类**（`/help` `/status` `/models` 等）：调只读 RPC（`commands.list` / `status`）渲染。首版做。
-  - **D gateway 管理 / owner 全局**（`/config` `/restart` `/reset` 等）：属 gateway 控制台范畴，面板默认不做；`/bash` 例外，作为部署可选（默认关）功能。
+  - **B `/compact`**：面板会话无持久 gateway session 可压，做法是「物化临时 session、调用 `sessions.compact` typed RPC、读回压缩后的 transcript、采纳进面板存储」——即长上下文策略本身，与之合流。
+  - **C 信息类**：首批做 `/commands`、`/help`、`/status`、`/models`；`/tools`、`/usage` 在数据来源与 DTO 核实后再扩展 allowlist。
+  - **D gateway 管理 / owner 全局**（`/config` `/restart` `/reset` 等）：属 gateway 控制台范畴，面板默认不做。`/bash` 仅记录为未来可能的面板原生进程执行能力，当前不实现、无启用开关。
 - **交互**：输入框敲 `/` 触发命令补全（因 skill 命令动态注册、列表点选不实用），选中后走**独立的命令派发路径**，不经拒绝 `/` 的普通消息接口。两条路径隔离是安全前提。
 - 命令目录、权限和执行必须来自 gateway 官方分派，不在面板硬编码或复刻命令逻辑。完整分类适配设计与源码依据见 [`decisions/slash-commands.md`](decisions/slash-commands.md)。
 

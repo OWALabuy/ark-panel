@@ -4,9 +4,9 @@
 
 ## 结论
 
-首版会话面板不实现 OpenClaw 斜杠命令。面板移除 `/reset`、`/compact` 快捷入口，并拒绝把以 `/` 开头的输入当作普通模型消息发送。
+已上线的 v1 不实现斜杠命令；下一实现批次适配 A 类面板原生命令（`/model`、`/think`、`/reasoning`、`/new`）与首批 C 类只读命令（`/commands`、`/help`、`/status`、`/models`）。普通消息接口永久拒绝把以 `/` 开头的输入当作模型消息发送；命令只从独立结构化派发接口进入。
 
-这不是只推迟两个命令。OpenClaw `2026.6.11` 当前运行时注册了 48 个核心命令、59 个文本别名；此外还有随渠道、插件和 skill 动态变化的命令。命令可用性还受配置、surface、owner 身份和当前 run 状态影响，不能在面板里硬编码一份静态子集。
+这不是只处理两个命令。OpenClaw `2026.6.11` 当前运行时注册了 48 个核心命令、59 个文本别名；此外还有随渠道、插件和 skill 动态变化的命令。动态目录用于展示和补全，不能被直接视为可执行清单；面板实际执行范围必须是一份经过评审、版本化、default-deny 的静态 allowlist。
 
 ## 当前面板为什么不能透明支持命令
 
@@ -48,33 +48,33 @@
 |---|---|---|---|
 | **A 面板原生** | `/model` `/think` `/reasoning` `/new` | 存进**面板会话 metadata**，每轮推理经 `sessions.create` 参数或 `sessions.patch` 应用到临时 session。`/new` = 新建面板会话（已有）。这顺带实现 §8.6「会话中途换模型」——同一件事。 | ✅ 做 |
 | **B `/compact`（特殊）** | `/compact` | 面板会话无持久 gateway session 可压。做法：物化历史 → 临时 session 上调 **`sessions.compact` typed RPC**（**绝不把 `/compact` 送进 `sessions.send`**，否则违反原则 1/2）→ **读回压缩后的 transcript → 采纳进面板存储** → 删临时 session。把 gateway 压缩引擎当计算引擎用。**这就是长上下文策略本身**，与之合流。 | 归长上下文 |
-| **C 信息类**（只读代理，低风险） | `/help` `/commands` `/status` `/models` `/tools` `/usage` | 调 `commands.list` / `status` 等只读 RPC，面板渲染结果。 | ✅ 做 |
-| **D gateway 管理 / owner 全局** | `/config` `/restart` `/mcp` `/plugins` `/reset` `/bash` | 属于 gateway 管理面。面板是会话 UI，不是 gateway 控制台。`/reset` 对面板会话无对应语义。**`/bash` 例外见下**。 | 默认不做 |
+| **C 信息类**（只读代理，低风险） | 首批 `/help` `/commands` `/status` `/models`；待侦察 `/tools` `/usage` | 调已核实的只读 RPC/CLI，或由面板基于 allowlist 生成。数据来源未核实的命令不进入 allowlist。 | 首批做 4 个 |
+| **D gateway 管理 / owner 全局** | `/config` `/restart` `/mcp` `/plugins` `/reset` | 属于 gateway 管理面。面板是会话 UI，不是 gateway 控制台；`/reset` 对面板会话无对应语义。 | 默认不做 |
 
 - 对**真实活会话**执行任何命令，等同于向活会话写入其与 IM 共享的上下文桶，属于「向活会话发消息」的安全边界（architecture §6.7），随该边界一起推迟，不在本设计范围。
 
-### `/bash` 的处理：面板原生能力，部署时可选（默认关）
+### `/bash` 的处理：未来可能的面板原生能力，当前不实现
 
 **先纠正一处定位错误。** 早先把 `/bash` 归到「D 类经独立派发路径」是矛盾的：gateway **没有 `commands.execute` 这类命令执行 RPC**（见前文「关键机制发现」），命令的唯一执行方式是把 `/xxx` 送进 send 路径——而那恰是原则 1 禁止的。所以 `/bash` 不可能「映射到一个 typed RPC」；把 `/bash` 送进 gateway 又违反原则 1。**唯一自洽的实现是：面板自己执行 shell。**
 
 因此 `/bash` **重新定义为一项面板原生能力**（与「面板拥有会话文件」同性质），不是对某条 gateway 命令的代理。`/bash` 只是这项能力沿用的、用户熟悉的**触发名**（type-to-invoke 入口），执行体在面板服务内。
 
-- 面板是单用户、登录 + SSH 隧道后的自用工具，用户信任自己的机器，直接执行 shell 有真实用处，故作为**部署可选功能**开放。
-- 默认**关闭**；由部署配置显式开启（如 `PANEL_ENABLE_BASH=1`）。
+- 面板是单用户、登录 + SSH 隧道后的自用工具，进程执行能力可能有用，但当前只记录立项方向。
+- 当前没有启用开关，也不进入 allowlist；任何 `/bash` 派发都拒绝。未来只有在 §5.6 的执行模型和数值约束全部拍板后，才增加部署开关。
 - 明确接受的权衡：一旦开启，「面板登录失守」在后果上等同于「shell 访问」。因此开启 bash 时，登录强度（慢哈希口令、限速、SameSite=Strict cookie、仅 localhost 监听 + SSH 隧道）是前提，不是可选项。
-- 不违反原则 1/2：`/bash` 既不经普通消息路径，也不把任何命令字符串送进推理桥接的 `sessions.send`；它走独立派发接口，落到面板自己的 shell 执行器。
-- **需要独立安全设计（本文件不展开，见 implementation-spec §5.6）**：shell 选择、cwd、环境变量、超时、输出上限、进程终止、并发上限、审计日志、参数编码（防注入）、以及「开启 bash 要求登录已启用」的启动期校验。在这份安全设计落定前，`/bash` 不进入实现批次。
+- 若未来实现，仍不得违反原则 1/2：`/bash` 不经普通消息路径，也不把任何命令字符串送进推理桥接的 `sessions.send`；它走独立派发接口，落到届时经过安全评审的面板进程执行器。
+- **需要独立安全设计（本文件不展开，见 implementation-spec §5.6）**：进程执行还是 shell 文本、cwd、环境变量、超时、输出上限、进程终止、并发上限、审计日志，以及「开启要求登录已启用」的启动期校验。在这份安全设计落定前，`/bash` 不进入实现批次。
 
 ### 交互形态：打命令（type-to-invoke），不是点菜单
 
 - Owl 已定：输入框敲 `/` 触发命令，而非纯下拉列表。理由是 **skill 命令是动态注册的**（`skill:<name>`），数量与名称随装配变化，列表点选不实用；打字补全更顺手。
-- 客户端在输入框敲 `/` 时做**命令补全**（来源 `commands.list` + 面板原生命令），供用户挑选。
+- 客户端在输入框敲 `/` 时做**命令补全**（来源 `commands.list` + 面板原生命令）。allowlist 内命令可选择执行；其余命令灰显并标注「仅 OpenClaw 原生渠道可用」，客户端不派发。
 - 选中命令后，**走独立的命令派发 API**（例如 `POST /api/v1/sessions/<id>/command`），**不是**普通消息发送接口。这条独立路径在服务端按四分类校验并映射到原生操作或 typed RPC。
 - **不变量**：普通消息发送接口永远拒绝 `/`；命令永远从独立派发路径进入。两条路径的隔离，是「admin 连接不成为脚枪」的结构性保证——只要隔离守住，就无需为安全而降权连接（降权记为后续可选加固，非必需）。
 
 ### 仍需遵守（沿用并细化原「原则」）
 
-1. 命令目录来自 gateway `commands.list`（含 skill/plugin 动态命令），面板不硬编码命令清单；owner/surface/run 三类可用性 gateway **不在 list 里返回**，由面板按分类判断或在派发时由 gateway 执行层裁决。
+1. 展示目录来自 gateway `commands.list`（含 skill/plugin 动态命令）；实际可执行范围使用面板显式、版本化、default-deny 的服务端 allowlist。owner/surface/run 三类可用性 gateway **不在 list 里返回**，未评审命令默认不可执行。
 2. 命令效果由 typed RPC 或面板原生操作实现，面板不复刻命令业务逻辑（`/compact` 用 gateway 压缩引擎，不自研压缩算法）。
 3. 保留 gateway 的配置开关、owner 权限和 surface 限制：面板不绕过它们，D 类命令即便有 admin scope 也默认不暴露入口。
 4. A 类会话设置持久化在**面板会话 metadata**，而不是依赖临时 session 或长期 runtime session。
