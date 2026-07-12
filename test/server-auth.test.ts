@@ -5,13 +5,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { passwordHash } from "../src/server/auth.js";
-import { createPanelServer, type ReadApi } from "../src/server/app.js";
+import { createPanelServer, type CommandApi, type ReadApi } from "../src/server/app.js";
 import { ContextBudgetExceededError } from "../src/domain/context-budget.js";
 import { ForkError } from "../src/domain/fork.js";
 
-async function fixture(generation?: { generate(recordId: string, message: string, signal: AbortSignal, runId: string): Promise<{ runId: string; entries: unknown[] }> }, reads?: ReadApi) {
+async function fixture(generation?: { generate(recordId: string, message: string, signal: AbortSignal, runId: string): Promise<{ runId: string; entries: unknown[] }> }, reads?: ReadApi, commands?: CommandApi) {
   const publicDir = await mkdtemp(join(tmpdir(), "panel-web-")); await writeFile(join(publicDir, "index.html"), "ok");
-  const server = createPanelServer({ auth: { username: "owl", passwordHash: passwordHash("correct", "0011223344556677"), sessionSecret: "test-secret-long-enough" }, publicDir, mock: reads ? false : true, ...(generation ? { generation } : {}), ...(reads ? { reads } : {}) });
+  const server = createPanelServer({ auth: { username: "owl", passwordHash: passwordHash("correct", "0011223344556677"), sessionSecret: "test-secret-long-enough" }, publicDir, mock: reads ? false : true, ...(generation ? { generation } : {}), ...(reads ? { reads } : {}), ...(commands ? { commands } : {}) });
   server.listen(0, "127.0.0.1"); await once(server, "listening");
   const address = server.address(); if (!address || typeof address === "string") throw new Error("no address");
   return { server, base: `http://127.0.0.1:${address.port}` };
@@ -37,6 +37,15 @@ test("generation endpoint returns one runId across the SSE lifecycle", async t =
   const loginBody=await login.json() as {data:{csrfToken:string}}; const cookies=login.headers.getSetCookie().map(v=>v.split(";",1)[0]).join("; ");
   const response=await fetch(`${x.base}/api/v1/sessions/record-1/messages`,{method:"POST",headers:{cookie:cookies,origin:x.base,"x-csrf-token":loginBody.data.csrfToken,"content-type":"application/json"},body:JSON.stringify({message:"虚构消息"})});
   assert.equal(response.headers.get("content-type"), "text/event-stream; charset=utf-8"); const events=await response.text(); assert.match(events,/event: run.started/); assert.match(events,/event: run.completed/); const ids=[...events.matchAll(/"runId":"([^"]+)"/g)].map(value=>value[1]); assert.equal(ids.length,2); assert.equal(ids[0],ids[1]);
+});
+
+test("结构化命令接口受登录和 CSRF 保护并委托命令派发器", async t => {
+  const calls: unknown[] = []; const x = await fixture(undefined, undefined, { async dispatch(recordId, request) { calls.push([recordId, request]); return { effect: "read" }; } }); t.after(() => x.server.close());
+  const unauthenticated = await fetch(`${x.base}/api/v1/sessions/record/command`, { method: "POST", headers: { origin: x.base, "content-type": "application/json" }, body: JSON.stringify({ command: "status", args: [] }) }); assert.equal(unauthenticated.status, 401);
+  const login = await fetch(`${x.base}/api/v1/auth/login`, { method: "POST", headers: { origin: x.base, "content-type": "application/json" }, body: JSON.stringify({ username: "owl", password: "correct" }) });
+  const loginBody = await login.json() as { data: { csrfToken: string } }; const cookies = login.headers.getSetCookie().map(value => value.split(";", 1)[0]).join("; ");
+  const response = await fetch(`${x.base}/api/v1/sessions/record/command`, { method: "POST", headers: { cookie: cookies, origin: x.base, "x-csrf-token": loginBody.data.csrfToken, "content-type": "application/json" }, body: JSON.stringify({ command: "status", args: [] }) });
+  assert.equal(response.status, 200); assert.deepEqual(calls, [["record", { command: "status", args: [] }]]);
 });
 
 test("fixed Host policy, logout, request limit, and static symlink boundary", async t => {

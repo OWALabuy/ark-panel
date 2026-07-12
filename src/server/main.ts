@@ -6,20 +6,37 @@ import { PanelGenerationApi } from "./generation-api.js";
 import { SessionReadData } from "./read-data.js";
 import { parsePanelConfig, validateAndInitializeConfig } from "./config.js";
 import { ConservativeContextBudget } from "../domain/context-budget.js";
+import { PanelCommandApi } from "./command-api.js";
+import { SessionOperationCoordinator } from "./session-operation.js";
 
 const config = parsePanelConfig(process.env, import.meta.url); await validateAndInitializeConfig(config);
 const readApi = config.dataRoot && config.readAgents.length ? new SessionReadData(config.readAgents, config.dataRoot) : undefined;
+const roots = new Map<string, string>();
+for (const value of config.runtimes.values()) roots.set(value.runtimeAgentId, value.sessionsRoot);
+const gateway = new OpenClawCliClient({ sessionsRoots: roots });
+const operations = new SessionOperationCoordinator();
 let generationApi: PanelGenerationApi | undefined;
+const bridge = new BridgeService(gateway, new FileBridgeMaterializer(), roots);
 if (config.dataRoot && config.runtimes.size) {
-  const runtimeByAgent = new Map<string, string>(), roots = new Map<string, string>();
-  for (const [agentId, value] of config.runtimes) { runtimeByAgent.set(agentId, value.runtimeAgentId); roots.set(value.runtimeAgentId, value.sessionsRoot); }
-  generationApi = new PanelGenerationApi(new BridgeService(new OpenClawCliClient({ sessionsRoots: roots }), new FileBridgeMaterializer(), roots),
-    { dataRoot: config.dataRoot, runtimeByAgent, contextBudget: new ConservativeContextBudget(config.contextHistoryBudgetTokens) });
+  const runtimeByAgent = new Map<string, string>();
+  for (const [agentId, value] of config.runtimes) runtimeByAgent.set(agentId, value.runtimeAgentId);
+  generationApi = new PanelGenerationApi(bridge,
+    { dataRoot: config.dataRoot, runtimeByAgent, contextBudget: new ConservativeContextBudget(config.contextHistoryBudgetTokens), operations });
 }
+const commandApi = config.dataRoot && readApi ? new PanelCommandApi(config.dataRoot, config.readAgents.map(agent => agent.agentId), {
+  models: async () => (await gateway.listModels()).models,
+  commands: async () => await gateway.listCommands(),
+  status: async () => await gateway.status(),
+  createPanel: async (agentId, title) => await readApi.createPanel(agentId, title),
+  validateOverrides: async (agentId, overrides) => {
+    const runtimeAgentId = config.runtimes.get(agentId)?.runtimeAgentId; if (!runtimeAgentId) throw new Error("RUNTIME_NOT_CONFIGURED");
+    await bridge.validateOverrides(runtimeAgentId, overrides);
+  }
+}, operations) : undefined;
 const allowedHosts = [`127.0.0.1:${config.port}`, `localhost:${config.port}`];
 const server = createPanelServer({ auth: { username: config.username, passwordHash: config.passwordHash, sessionSecret: config.sessionSecret, secureCookie: config.secureCookie },
   publicDir: config.publicDir, mock: config.mock, allowedHosts, publicOrigins: allowedHosts.map(value => `http://${value}`),
-  ...(generationApi ? { generation: generationApi } : {}), ...(readApi ? { reads: readApi } : {}) });
+  ...(generationApi ? { generation: generationApi } : {}), ...(commandApi ? { commands: commandApi } : {}), ...(readApi ? { reads: readApi } : {}) });
 server.listen(config.port, config.host, () => process.stdout.write(`会话面板监听 http://${config.host}:${config.port}\n`));
 
 let stopping = false;

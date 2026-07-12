@@ -14,7 +14,7 @@ ark-panel is a self-hosted session panel for OpenClaw — a claude.ai-like home 
 
 ark-panel runs locally on Node.js 22 and listens on `127.0.0.1` by default. Existing OpenClaw agent session directories are read-only data sources. New sessions, forks, edited branches, and generated replies are stored under `PANEL_DATA_DIR`.
 
-The first version does not support OpenClaw slash commands. Inputs beginning with `/` are rejected before reaching the gateway. See [the slash-command decision](docs/decisions/slash-commands.md) for the rationale and future integration boundary.
+Panel-owned sessions support `/model`, `/think`, `/reasoning`, `/new`, `/commands`, `/help`, `/status`, and `/models` through a separate structured command API. Inputs beginning with `/` are still rejected by the ordinary message API and never forwarded to the gateway's in-band command dispatcher. See [the slash-command decision](docs/decisions/slash-commands.md) for the boundary.
 
 The server currently reports generation lifecycle events over SSE and refreshes the completed message group after the gateway finishes. It does not claim token-by-token streaming.
 

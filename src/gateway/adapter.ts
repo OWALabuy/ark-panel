@@ -3,6 +3,48 @@ import type { TranscriptDocument } from "../domain/transcript.js";
 export const SUPPORTED_OPENCLAW_VERSION = "2026.6.11";
 
 export interface CreatedSession { sessionId: string; sessionKey: string; transcriptPath: string }
+export interface SessionOverrides {
+  modelOverride?: string;
+  thinkingLevel?: string;
+  reasoningLevel?: "on" | "off" | "stream";
+}
+
+export interface CommandChoice { value: string; label?: string }
+export interface CommandArgument {
+  name: string;
+  description?: string;
+  type?: string;
+  required?: boolean;
+  dynamic?: boolean;
+  choices?: CommandChoice[];
+}
+export interface GatewayCommand {
+  name: string;
+  nativeName?: string;
+  textAliases: string[];
+  description?: string;
+  category?: string;
+  source?: string;
+  scope?: string;
+  acceptsArgs: boolean;
+  args?: CommandArgument[];
+}
+export interface CommandsCatalog { commands: GatewayCommand[] }
+
+export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
+export type GatewayStatus = { [key: string]: JsonValue };
+
+export interface OpenClawModel {
+  key: string;
+  name: string;
+  input: string;
+  contextWindow: number;
+  available: boolean;
+  tags: string[];
+  missing: boolean;
+}
+export interface ModelsCatalog { count: number; models: OpenClawModel[] }
+
 export interface GatewayClient {
   version(): Promise<string>;
   createSession(runtimeAgentId: string): Promise<CreatedSession>;
@@ -10,6 +52,10 @@ export interface GatewayClient {
   waitForCompletion(sessionId: string, runId: string): Promise<void>;
   abort(sessionKey: string, runId?: string): Promise<void>;
   deleteSession(sessionKey: string): Promise<void>;
+  applySessionOverrides?(sessionKey: string, overrides: SessionOverrides): Promise<void>;
+  listCommands?(): Promise<CommandsCatalog>;
+  status?(): Promise<GatewayStatus>;
+  listModels?(): Promise<ModelsCatalog>;
 }
 
 export interface BridgeRequest {
@@ -18,6 +64,7 @@ export interface BridgeRequest {
   latestUserMessage: string;
   latestUserEntryId: string;
   idempotencyKey: string;
+  overrides?: SessionOverrides;
   signal?: AbortSignal;
 }
 
@@ -41,6 +88,10 @@ export async function runBridge(client: GatewayClient, materializer: BridgeMater
   assertSupportedVersion(await client.version());
   const created = await client.createSession(request.runtimeAgentId);
   const previousCount = await materializer.replaceCreatedTranscript(created, request.historyThroughPreviousRun);
+  if (request.overrides && Object.keys(request.overrides).length > 0) {
+    if (!client.applySessionOverrides) throw new Error("GATEWAY_SESSION_OVERRIDES_UNSUPPORTED");
+    await client.applySessionOverrides(created.sessionKey, request.overrides);
+  }
   const { runId } = await client.send(created.sessionKey, request.latestUserMessage, request.idempotencyKey);
   const abort = () => { void client.abort(created.sessionKey, runId); };
   request.signal?.addEventListener("abort", abort, { once: true });

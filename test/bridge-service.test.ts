@@ -33,3 +33,19 @@ test("连续 20 轮 fixture 生成后无 transcript/trajectory artifact 累积",
   for(let i=0;i<20;i++){const result=await service.generate({runtimeAgentId:"runtime",historyThroughPreviousRun:{header:{type:"session"},entries:[]},latestUserMessage:"fixture",latestUserEntryId:`u${i}`,idempotencyKey:`k${i}`});assert.equal(result.entries.length,1)}
   assert.deepEqual(await readdir(root),["sessions.json"]);assert.equal(await readFile(join(root,"sessions.json"),"utf8"),"{}");
 });
+
+test("bridge 在发送前把会话 override 以 patch 应用到临时 session", async () => {
+  const root = await mkdtemp(join(tmpdir(), "bridge-overrides-"));
+  const id = "22222222-2222-4222-8222-222222222222";
+  const created: CreatedSession = { sessionId: id, sessionKey: "agent:runtime:key", transcriptPath: join(root, `${id}.jsonl`) };
+  await writeFile(join(root, `${id}.jsonl.deleted.fixture`), "x");
+  const events: string[] = [];
+  const client: GatewayClient = { async version() { return "2026.6.11"; }, async createSession() { events.push("create"); return created; },
+    async applySessionOverrides(key, overrides) { assert.equal(key, created.sessionKey); assert.deepEqual(overrides, { modelOverride: "provider/model", thinkingLevel: "high", reasoningLevel: "stream" }); events.push("patch"); },
+    async send() { events.push("send"); return { runId: "run" }; }, async waitForCompletion() {}, async abort() {}, async deleteSession() { events.push("delete"); } };
+  const materializer: BridgeMaterializer = { async replaceCreatedTranscript() { events.push("materialize"); return 0; }, async readNewEntries() { return []; }, verifyAndStripSubmittedUser(entries) { return entries; } };
+  const service = new BridgeService(client, materializer, new Map([["runtime", root]]));
+  await service.generate({ runtimeAgentId: "runtime", historyThroughPreviousRun: { header: { type: "session" }, entries: [] }, latestUserMessage: "hello", latestUserEntryId: "user", idempotencyKey: "key",
+    overrides: { modelOverride: "provider/model", thinkingLevel: "high", reasoningLevel: "stream" } });
+  assert.deepEqual(events.slice(0, 4), ["create", "materialize", "patch", "send"]);
+});

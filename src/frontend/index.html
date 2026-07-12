@@ -28,6 +28,7 @@
       <header><button id="back-sessions" class="mobile" aria-label="返回会话列表">‹ 会话</button><div><h2 id="title">选择一个会话</h2><small id="subtitle" aria-live="polite"></small></div></header>
       <div id="messages" class="messages" role="log" aria-label="消息记录"><div class="empty">从左侧选择会话</div></div>
       <form id="composer" class="composer">
+        <div id="command-menu" class="commands" role="listbox" aria-label="斜杠命令" hidden></div>
         <textarea id="message" aria-label="消息" rows="1" placeholder="继续这段会话…"></textarea>
         <div class="composer-foot"><span id="composer-hint">Enter 发送 · Shift+Enter 换行</span><button id="send" aria-label="发送">↑</button></div>
       </form>

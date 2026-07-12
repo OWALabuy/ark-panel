@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { lstat, mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { createPanelSession, loadPanelSession } from "../src/storage/panel-sessions.js";
+import { createPanelSession, loadPanelSession, updatePanelMetadata } from "../src/storage/panel-sessions.js";
 import { PanelGenerationApi } from "../src/server/generation-api.js";
 import { ConservativeContextBudget } from "../src/domain/context-budget.js";
 
@@ -25,6 +25,17 @@ test("bridge 失败不写入 user entry", async () => {
   const api = new PanelGenerationApi({ async generate() { throw new Error("failed"); } }, { dataRoot: root, runtimeByAgent: new Map([["claude", "runtime"]]) });
   await assert.rejects(api.generate(metadata.recordId, "不会提交", new AbortController().signal), /failed/);
   assert.equal((await loadPanelSession(root, "claude", metadata.recordId)).document.entries.length, 0);
+});
+
+test("GenerationApi 把持久化会话设置传给下一轮 bridge", async () => {
+  const root = await mkdtemp(join(tmpdir(), "generation-overrides-"));
+  const metadata = await createPanelSession(root, "claude", { header: { type: "session" }, entries: [] });
+  await updatePanelMetadata(root, "claude", metadata.recordId, current => ({ ...current, modelOverride: "provider/model", thinkingLevel: "high", reasoningLevel: "stream" }));
+  let seen: unknown;
+  const api = new PanelGenerationApi({ async generate(request) { seen = request.overrides; return { runId: request.idempotencyKey, sessionId: "temp", entries: [] }; } },
+    { dataRoot: root, runtimeByAgent: new Map([["claude", "runtime"]]) });
+  await api.generate(metadata.recordId, "hello", new AbortController().signal);
+  assert.deepEqual(seen, { modelOverride: "provider/model", thinkingLevel: "high", reasoningLevel: "stream" });
 });
 
 test("同一 idempotency key 共享并缓存结果，其他并发写被拒绝", async () => {

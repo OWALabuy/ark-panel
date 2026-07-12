@@ -6,9 +6,10 @@ import { commitPanelTranscript, listPanelSessions, loadPanelSession } from "../s
 import type { BridgeRequest, BridgeResult } from "../gateway/adapter.js";
 import type { GenerationApi } from "./app.js";
 import { ConservativeContextBudget, type ContextBudgetEstimator } from "../domain/context-budget.js";
+import { SessionOperationCoordinator } from "./session-operation.js";
 
 interface BridgeRunner { generate(request: BridgeRequest): Promise<BridgeResult> }
-export interface GenerationConfig { dataRoot: string; runtimeByAgent: ReadonlyMap<string, string>; completedCacheLimit?: number; contextBudget?: ContextBudgetEstimator }
+export interface GenerationConfig { dataRoot: string; runtimeByAgent: ReadonlyMap<string, string>; completedCacheLimit?: number; contextBudget?: ContextBudgetEstimator; operations?: SessionOperationCoordinator }
 
 function latestEntryId(document: TranscriptDocument): string | null {
   for (let index = document.entries.length - 1; index >= 0; index--) if (typeof document.entries[index]!.id === "string") return document.entries[index]!.id as string;
@@ -17,11 +18,12 @@ function latestEntryId(document: TranscriptDocument): string | null {
 
 export class PanelGenerationApi implements GenerationApi {
   private static readonly MAX_COMPLETED = 512;
-  private readonly busy = new Set<string>();
+  private readonly operations: SessionOperationCoordinator;
   private readonly completed = new Map<string, { recordId: string; message: string; value: { runId: string; entries: unknown[]; revision?: string } }>();
   private readonly inflight = new Map<string, { recordId: string; message: string; promise: Promise<{ runId: string; entries: unknown[]; revision?: string }> }>();
   constructor(private readonly bridge: BridgeRunner, private readonly config: GenerationConfig) {
     if (config.completedCacheLimit !== undefined && (!Number.isInteger(config.completedCacheLimit) || config.completedCacheLimit < 1)) throw new Error("completedCacheLimit 必须是正整数");
+    this.operations = config.operations ?? new SessionOperationCoordinator();
   }
   completedCacheSize(): number { return this.completed.size; }
 
@@ -44,8 +46,7 @@ export class PanelGenerationApi implements GenerationApi {
 
   private async generateOnce(recordId: string, message: string, signal: AbortSignal, runId: string, expectedRevision?: string): Promise<{ runId: string; entries: unknown[]; revision?: string }> {
     if (message.trimStart().startsWith("/")) throw new Error("SLASH_COMMANDS_UNSUPPORTED");
-    if (this.busy.has(recordId)) throw new Error("SESSION_BUSY"); this.busy.add(recordId);
-    try {
+    return await this.operations.runGeneration(recordId, async () => {
       let agentId: string | undefined;
       for (const candidate of this.config.runtimeByAgent.keys()) {
         if ((await listPanelSessions(this.config.dataRoot, candidate)).some((metadata) => metadata.recordId === recordId)) { agentId = candidate; break; }
@@ -61,10 +62,13 @@ export class PanelGenerationApi implements GenerationApi {
       const userEntry: JsonObject = { type: "message", id: userId, parentId: latestEntryId(document), timestamp: now,
         message: { role: "user", content: [{ type: "text", text: message }], timestamp: Date.now() } };
       const result = await this.bridge.generate({ runtimeAgentId, historyThroughPreviousRun: document, latestUserMessage: message,
-        latestUserEntryId: userId, idempotencyKey: runId, signal });
+        latestUserEntryId: userId, idempotencyKey: runId,
+        overrides: { ...(metadata.modelOverride ? { modelOverride: metadata.modelOverride } : {}),
+          ...(metadata.thinkingLevel ? { thinkingLevel: metadata.thinkingLevel } : {}),
+          ...(metadata.reasoningLevel ? { reasoningLevel: metadata.reasoningLevel } : {}) }, signal });
       const committed: TranscriptDocument = { header: document.header, entries: [...document.entries, userEntry, ...result.entries] };
       await commitPanelTranscript(this.config.dataRoot, metadata, committed);
       const afterStat = await lstat(transcriptPath); return { runId, entries: result.entries, revision: `${afterStat.size}:${afterStat.mtimeMs}` };
-    } finally { this.busy.delete(recordId); }
+    });
   }
 }

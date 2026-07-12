@@ -7,6 +7,19 @@ import { assertWithin, atomicWrite } from "./atomic.js";
 export interface PanelMetadata {
   version: 1; recordId: string; agentId: string; createdAt: string;
   parentRecordId?: string; forkedFromMessageId?: string;
+  modelOverride?: string; thinkingLevel?: string; reasoningLevel?: "on" | "off" | "stream";
+}
+
+const metadataUpdates = new Map<string, Promise<void>>();
+
+function validateMetadata(value: unknown, agentId: string, recordId: string): PanelMetadata {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("panel metadata 格式无效");
+  const metadata = value as Partial<PanelMetadata>;
+  if (metadata.version !== 1 || metadata.recordId !== recordId || metadata.agentId !== agentId || typeof metadata.createdAt !== "string") throw new Error("panel metadata 与请求不一致");
+  if (metadata.modelOverride !== undefined && typeof metadata.modelOverride !== "string") throw new Error("panel metadata modelOverride 格式无效");
+  if (metadata.thinkingLevel !== undefined && typeof metadata.thinkingLevel !== "string") throw new Error("panel metadata thinkingLevel 格式无效");
+  if (metadata.reasoningLevel !== undefined && !["on", "off", "stream"].includes(metadata.reasoningLevel)) throw new Error("panel metadata reasoningLevel 格式无效");
+  return metadata as PanelMetadata;
 }
 
 async function readRegular(path: string): Promise<string> {
@@ -38,8 +51,7 @@ export async function listPanelSessions(dataRoot: string, agentId: string): Prom
     for (const name of await readdir(root)) {
       const directory = assertWithin(root, join(root, name)); const stat = await lstat(directory);
       if (!stat.isDirectory() || stat.isSymbolicLink()) continue;
-      const metadata = JSON.parse(await readRegular(join(directory, "metadata.json"))) as PanelMetadata;
-      if (metadata.version !== 1 || metadata.recordId !== name || metadata.agentId !== agentId) throw new Error("panel metadata 与目录不一致");
+      const metadata = validateMetadata(JSON.parse(await readRegular(join(directory, "metadata.json"))), agentId, name);
       parseTranscript(await readRegular(join(directory, "transcript.jsonl")));
       records.push(metadata);
     }
@@ -55,10 +67,24 @@ export async function commitPanelTranscript(dataRoot: string, metadata: PanelMet
   await atomicWrite(path, serializeTranscript(document));
 }
 
+export async function updatePanelMetadata(dataRoot: string, agentId: string, recordId: string,
+  update: (metadata: PanelMetadata) => PanelMetadata): Promise<PanelMetadata> {
+  const key = `${agentId}\0${recordId}`; const previous = metadataUpdates.get(key) ?? Promise.resolve();
+  let release!: () => void; const current = new Promise<void>(resolve => { release = resolve; });
+  const queued = previous.then(() => current); metadataUpdates.set(key, queued); await previous;
+  try {
+    const path = assertWithin(dataRoot, join(dataRoot, "sessions", agentId, recordId, "metadata.json"));
+    const metadata = validateMetadata(JSON.parse(await readRegular(path)), agentId, recordId);
+    const next = validateMetadata(update({ ...metadata }), agentId, recordId);
+    await atomicWrite(path, JSON.stringify(next, null, 2) + "\n"); return next;
+  } finally {
+    release(); if (metadataUpdates.get(key) === queued) metadataUpdates.delete(key);
+  }
+}
+
 export async function loadPanelSession(dataRoot: string, agentId: string, recordId: string): Promise<{ metadata: PanelMetadata; document: TranscriptDocument }> {
   const directory = assertWithin(dataRoot, join(dataRoot, "sessions", agentId, recordId));
   const stat = await lstat(directory); if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("panel 会话目录不安全");
-  const metadata = JSON.parse(await readRegular(join(directory, "metadata.json"))) as PanelMetadata;
-  if (metadata.version !== 1 || metadata.agentId !== agentId || metadata.recordId !== recordId) throw new Error("panel metadata 与请求不一致");
+  const metadata = validateMetadata(JSON.parse(await readRegular(join(directory, "metadata.json"))), agentId, recordId);
   return { metadata, document: parseTranscript(await readRegular(join(directory, "transcript.jsonl"))) };
 }

@@ -2,7 +2,7 @@
 
 本地会话面板服务。Node.js 22，默认只监听 `127.0.0.1`。真实 OpenClaw agent 的 sessions 目录只作为只读数据源；所有新建、fork、编辑重发和后续推理结果只写入 `PANEL_DATA_DIR`。
 
-首版不支持 OpenClaw 斜杠命令。以 `/` 开头的输入会在调用 gateway 前被拒绝；命令请暂时在原有 OpenClaw 渠道执行。原因和后续适配原则见[斜杠命令决定](../decisions/slash-commands.md)。
+面板自建 / fork 会话支持首批面板原生命令和只读信息命令。普通消息接口仍会在调用 gateway 前拒绝以 `/` 开头的输入；命令必须走独立结构化派发接口。支持范围和隔离原则见[斜杠命令决定](../decisions/slash-commands.md)。
 
 首版已完成能力、明确不做的范围和上线前需要用户参与的事项见 [首版完成状态](../v1-completion.md)。当前 SSE 提供 run 生命周期状态，gateway 完成后整组刷新消息，不宣称逐 token 输出。
 

@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { CreatedSession, GatewayClient } from "./adapter.js";
+import type { CommandArgument, CommandsCatalog, CreatedSession, GatewayClient, GatewayCommand, GatewayStatus, ModelsCatalog, OpenClawModel, SessionOverrides } from "./adapter.js";
 
 interface CliOptions { executable?: string; sessionsRoots: ReadonlyMap<string, string>; requestTimeoutMs?: number; runTimeoutMs?: number }
 
@@ -23,6 +23,69 @@ function runCommand(executable: string, args: string[], timeoutMs: number): Prom
 }
 
 function payload(value: unknown): string { return JSON.stringify(value); }
+
+function object(value: unknown, context: string): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`OPENCLAW_INVALID_${context}`);
+  return value as Record<string, unknown>;
+}
+function string(value: unknown, context: string): string {
+  if (typeof value !== "string") throw new Error(`OPENCLAW_INVALID_${context}`);
+  return value;
+}
+function optionalString(value: unknown): string | undefined { return typeof value === "string" ? value : undefined; }
+function stringArray(value: unknown): string[] { return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : []; }
+
+function parseArgument(value: unknown): CommandArgument {
+  const raw = object(value, "COMMAND_ARGUMENT");
+  const choices = Array.isArray(raw.choices) ? raw.choices.map((choice) => {
+    const item = object(choice, "COMMAND_CHOICE");
+    return { value: string(item.value, "COMMAND_CHOICE_VALUE"), ...(optionalString(item.label) ? { label: item.label as string } : {}) };
+  }) : undefined;
+  return { name: string(raw.name, "COMMAND_ARGUMENT_NAME"), ...(optionalString(raw.description) ? { description: raw.description as string } : {}),
+    ...(optionalString(raw.type) ? { type: raw.type as string } : {}), ...(typeof raw.required === "boolean" ? { required: raw.required } : {}),
+    ...(typeof raw.dynamic === "boolean" ? { dynamic: raw.dynamic } : {}),
+    ...(choices ? { choices } : {}) };
+}
+
+export function parseCommandsCatalog(value: unknown): CommandsCatalog {
+  const raw = object(value, "COMMANDS_LIST");
+  if (!Array.isArray(raw.commands)) throw new Error("OPENCLAW_INVALID_COMMANDS_LIST");
+  const commands: GatewayCommand[] = raw.commands.map((value) => {
+    const item = object(value, "COMMAND");
+    const args = Array.isArray(item.args) ? item.args.map(parseArgument) : undefined;
+    return { name: string(item.name, "COMMAND_NAME"), textAliases: stringArray(item.textAliases), acceptsArgs: item.acceptsArgs === true,
+      ...(optionalString(item.nativeName) ? { nativeName: item.nativeName as string } : {}),
+      ...(optionalString(item.description) ? { description: item.description as string } : {}),
+      ...(optionalString(item.category) ? { category: item.category as string } : {}),
+      ...(optionalString(item.source) ? { source: item.source as string } : {}), ...(optionalString(item.scope) ? { scope: item.scope as string } : {}),
+      ...(args ? { args } : {}) };
+  });
+  return { commands };
+}
+
+export function parseGatewayStatus(value: unknown): GatewayStatus {
+  return object(value, "STATUS") as GatewayStatus;
+}
+
+export function parseModelsCatalog(value: unknown): ModelsCatalog {
+  const raw = object(value, "MODELS_LIST");
+  if (!Array.isArray(raw.models)) throw new Error("OPENCLAW_INVALID_MODELS_LIST");
+  const models: OpenClawModel[] = raw.models.map((value) => {
+    const item = object(value, "MODEL");
+    if (typeof item.contextWindow !== "number" || !Number.isFinite(item.contextWindow) || typeof item.available !== "boolean" || typeof item.missing !== "boolean") {
+      throw new Error("OPENCLAW_INVALID_MODEL");
+    }
+    return { key: string(item.key, "MODEL_KEY"), name: string(item.name, "MODEL_NAME"), input: string(item.input, "MODEL_INPUT"),
+      contextWindow: item.contextWindow, available: item.available, tags: stringArray(item.tags), missing: item.missing };
+  });
+  return { count: models.length, models };
+}
+
+export function sessionPatchParams(sessionKey: string, overrides: SessionOverrides): Record<string, string> {
+  return { key: sessionKey, ...(overrides.modelOverride ? { model: overrides.modelOverride } : {}),
+    ...(overrides.thinkingLevel ? { thinkingLevel: overrides.thinkingLevel } : {}),
+    ...(overrides.reasoningLevel ? { reasoningLevel: overrides.reasoningLevel } : {}) };
+}
 
 interface TrajectoryEnd {
   runId?: unknown;
@@ -65,6 +128,19 @@ export class OpenClawCliClient implements GatewayClient {
     if (!found?.sessionId) throw new Error("sessions.create 后找不到 sessionId");
     this.keysBySessionId.set(found.sessionId, sessionKey);
     return { sessionId: found.sessionId, sessionKey, transcriptPath: join(root, `${found.sessionId}.jsonl`) };
+  }
+  async applySessionOverrides(sessionKey: string, overrides: SessionOverrides): Promise<void> {
+    await this.call("sessions.patch", sessionPatchParams(sessionKey, overrides));
+  }
+  async listCommands(): Promise<CommandsCatalog> {
+    return parseCommandsCatalog(await this.call<unknown>("commands.list", {}));
+  }
+  async status(): Promise<GatewayStatus> {
+    return parseGatewayStatus(await this.call<unknown>("status", {}));
+  }
+  async listModels(): Promise<ModelsCatalog> {
+    const output = await runCommand(this.executable, ["models", "list", "--json"], this.requestTimeoutMs);
+    return parseModelsCatalog(JSON.parse(output) as unknown);
   }
   async send(sessionKey: string, message: string, idempotencyKey: string): Promise<{ runId: string }> {
     return await this.call("sessions.send", { key: sessionKey, agentId: sessionKey.split(":")[1], message, timeoutMs: this.runTimeoutMs, idempotencyKey });

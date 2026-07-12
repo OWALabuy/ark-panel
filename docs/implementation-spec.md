@@ -3,7 +3,7 @@
 > 设计依据、备选方案的取舍与侦察过程见 [`architecture.md`](architecture.md)，本文集中说明“建什么、怎么建、怎么验收”。
 > 面向 Codex 无人监督时的自主开发：每个任务都带一个 Codex 自己能跑、能判断通过或失败的验收方式。
 > 写于 2026-07-11。
-> **范围更新（2026-07-12）：**真实 active 会话与 reset 归档只读；只有 panel 自建/fork 会话可写。已上线的 v1 不支持斜杠命令；下一实现批次做 A 类面板原生命令与首批 C 类只读命令（`/commands`、`/help`、`/status`、`/models`）。普通消息接口仍永久拒绝 `/...`，命令只走独立结构化派发接口。见 [`decisions/slash-commands.md`](decisions/slash-commands.md)。
+> **范围更新（2026-07-12）：**真实 active 会话与 reset 归档只读；只有 panel 自建/fork 会话可写。当前实现已提供 A 类面板原生命令与首批 C 类只读命令（`/commands`、`/help`、`/status`、`/models`）。普通消息接口仍永久拒绝 `/...`，命令只走独立结构化派发接口。见 [`decisions/slash-commands.md`](decisions/slash-commands.md)。
 
 ---
 
