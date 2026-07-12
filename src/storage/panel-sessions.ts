@@ -8,6 +8,7 @@ export interface PanelMetadata {
   version: 1; recordId: string; agentId: string; createdAt: string;
   parentRecordId?: string; forkedFromMessageId?: string;
   modelOverride?: string; thinkingLevel?: string; reasoningLevel?: "on" | "off" | "stream";
+  title?: string; archived?: boolean; hidden?: boolean; memoryDisposition?: "eligible" | "scratch";
 }
 
 const metadataUpdates = new Map<string, Promise<void>>();
@@ -19,7 +20,11 @@ function validateMetadata(value: unknown, agentId: string, recordId: string): Pa
   if (metadata.modelOverride !== undefined && typeof metadata.modelOverride !== "string") throw new Error("panel metadata modelOverride 格式无效");
   if (metadata.thinkingLevel !== undefined && typeof metadata.thinkingLevel !== "string") throw new Error("panel metadata thinkingLevel 格式无效");
   if (metadata.reasoningLevel !== undefined && !["on", "off", "stream"].includes(metadata.reasoningLevel)) throw new Error("panel metadata reasoningLevel 格式无效");
-  return metadata as PanelMetadata;
+  if (metadata.title !== undefined && (typeof metadata.title !== "string" || !metadata.title.trim() || metadata.title.length > 120)) throw new Error("panel metadata title 格式无效");
+  if (metadata.archived !== undefined && typeof metadata.archived !== "boolean") throw new Error("panel metadata archived 格式无效");
+  if (metadata.hidden !== undefined && typeof metadata.hidden !== "boolean") throw new Error("panel metadata hidden 格式无效");
+  if (metadata.memoryDisposition !== undefined && !["eligible", "scratch"].includes(metadata.memoryDisposition)) throw new Error("panel metadata memoryDisposition 格式无效");
+  return { archived: false, hidden: false, memoryDisposition: "scratch", ...metadata } as PanelMetadata;
 }
 
 async function readRegular(path: string): Promise<string> {
@@ -29,9 +34,10 @@ async function readRegular(path: string): Promise<string> {
 }
 
 export async function createPanelSession(dataRoot: string, agentId: string, document: TranscriptDocument,
-  source?: { parentRecordId?: string; forkedFromMessageId?: string; recordId?: string; createdAt?: string }): Promise<PanelMetadata> {
+  source?: { parentRecordId?: string; forkedFromMessageId?: string; recordId?: string; createdAt?: string; title?: string }): Promise<PanelMetadata> {
   const recordId = source?.recordId ?? newPanelRecordId(); const createdAt = source?.createdAt ?? new Date().toISOString();
   const metadata: PanelMetadata = { version: 1, recordId, agentId, createdAt,
+    archived: false, hidden: false, memoryDisposition: "scratch", ...(source?.title ? { title: source.title } : {}),
     ...(source?.parentRecordId && source.forkedFromMessageId ? { parentRecordId: source.parentRecordId, forkedFromMessageId: source.forkedFromMessageId } : {}) };
   const directory = assertWithin(dataRoot, join(dataRoot, "sessions", agentId, recordId));
   await mkdir(directory, { recursive: true, mode: 0o700 });

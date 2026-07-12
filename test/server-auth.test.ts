@@ -71,6 +71,7 @@ test("search、fork 和编辑重发 HTTP 接口委托给受限数据层", async 
     async agents(){return []}, async sessions(){return []}, async conversation(){return null},
     async search(query, agentId){calls.push(`search:${query}:${agentId}`);return [{safe:true}]},
     async createPanel(agentId,title){calls.push(`create:${agentId}:${title}`);return {recordId:"panel-new"}},
+    async updateSession(recordId,patch){calls.push(`update:${recordId}:${patch.title}:${patch.archived}`);return {recordId,...patch}},
     async fork(recordId,messageId){if(recordId==="missing")throw new Error("SESSION_NOT_FOUND");if(messageId==="bad")throw new ForkError("FORK_BOUNDARY_INVALID","该 entry 不是合法 fork 边界");calls.push(`fork:${recordId}:${messageId}`);return {recordId:"panel-fork"}},
     async editAndFork(recordId,messageId,replacement){if(messageId==="assistant")throw new Error("EDIT_TARGET_NOT_USER");calls.push(`edit:${recordId}:${messageId}:${replacement}`);return {recordId:"panel-edit"}}
   };
@@ -80,12 +81,13 @@ test("search、fork 和编辑重发 HTTP 接口委托给受限数据层", async 
   const auth={cookie:cookieHeader,origin:x.base,"x-csrf-token":loginBody.data.csrfToken,"content-type":"application/json"};
   assert.equal((await fetch(`${x.base}/api/v1/search?q=needle&agentId=safe`,{headers:{cookie:cookieHeader}})).status,200);
   assert.equal((await fetch(`${x.base}/api/v1/sessions`,{method:"POST",headers:auth,body:JSON.stringify({agentId:"safe",title:"New"})})).status,201);
+  assert.equal((await fetch(`${x.base}/api/v1/sessions/source`,{method:"PATCH",headers:auth,body:JSON.stringify({title:"Renamed",archived:true})})).status,200);
   assert.equal((await fetch(`${x.base}/api/v1/sessions/source/fork`,{method:"POST",headers:auth,body:JSON.stringify({messageId:"a1"})})).status,201);
   assert.equal((await fetch(`${x.base}/api/v1/sessions/source/messages/u1/resend`,{method:"POST",headers:auth,body:JSON.stringify({message:"replacement"})})).status,201);
   const missing=await fetch(`${x.base}/api/v1/sessions/missing/fork`,{method:"POST",headers:auth,body:JSON.stringify({messageId:"a1"})});assert.equal(missing.status,404);assert.equal((await missing.json()).error.code,"SESSION_NOT_FOUND");
   const boundary=await fetch(`${x.base}/api/v1/sessions/source/fork`,{method:"POST",headers:auth,body:JSON.stringify({messageId:"bad"})});assert.equal(boundary.status,409);assert.equal((await boundary.json()).error.code,"FORK_BOUNDARY_INVALID");
   const edit=await fetch(`${x.base}/api/v1/sessions/source/messages/assistant/resend`,{method:"POST",headers:auth,body:JSON.stringify({message:"replacement"})});assert.equal(edit.status,409);assert.equal((await edit.json()).error.code,"EDIT_TARGET_NOT_USER");
-  assert.deepEqual(calls,["search:needle:safe","create:safe:New","fork:source:a1","edit:source:u1:replacement"]);
+  assert.deepEqual(calls,["search:needle:safe","create:safe:New","update:source:Renamed:true","fork:source:a1","edit:source:u1:replacement"]);
 });
 
 test("上下文超预算通过 SSE 返回稳定错误码和中文说明", async t => {

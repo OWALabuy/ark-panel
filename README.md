@@ -20,6 +20,8 @@ The server currently reports generation lifecycle events over SSE and refreshes 
 
 Message text is rendered as safe Markdown with raw HTML disabled. Whole messages and individual fenced code blocks can be copied from the conversation view.
 
+Messages show local date/time. All session sources can be renamed and moved into or out of the archive; metadata for read-only OpenClaw sources is stored in panel-owned sidecars and never written back to source transcripts.
+
 ## Install and test
 
 ```sh

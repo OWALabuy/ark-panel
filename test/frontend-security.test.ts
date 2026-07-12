@@ -11,6 +11,10 @@ test("frontend renders untrusted metadata with DOM text nodes", async () => {
   assert.match(source,/复制消息/);
   assert.match(source,/command:"commands",args:\[\]/);
   assert.match(source,/result\?\.data\?\.commands/);
+  assert.match(source,/Intl\.DateTimeFormat/);
+  assert.match(source,/method:"PATCH"/);
+  assert.match(source,/archived=\$\{viewingArchived\}/);
+  assert.match(source,/重命名会话/);
   assert.match(markdown,/SAFE_PROTOCOLS=new Set\(\["http:","https:","mailto:"\]\)/);
   assert.match(markdown,/createTextNode/);
   assert.match(markdown,/复制代码/);

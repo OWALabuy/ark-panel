@@ -6,11 +6,14 @@ import { externalRecordId } from "../domain/record-id.js";
 import { parseTranscript, TranscriptError, type JsonObject, type TranscriptDocument } from "../domain/transcript.js";
 import { assertWithin } from "../storage/atomic.js";
 import { createPanelSession, listPanelSessions, loadPanelSession } from "../storage/panel-sessions.js";
+import { loadReadonlyMetadata, updateReadonlyMetadata, type ReadonlySourceIdentity } from "../storage/readonly-metadata.js";
+import { updatePanelMetadata } from "../storage/panel-sessions.js";
 
 export interface ReadAgentConfig { agentId: string; sessionsRoot: string; label?: string }
 export interface ConversationRecord {
   recordId: string; agentId: string; sourceKind: "active" | "reset" | "panel"; sourceKey: string;
   revision: string; updatedAt: string; messageCount: number; title: string;
+  archived: boolean; hidden: boolean;
 }
 
 const ACTIVE = /^([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.jsonl$/i;
@@ -80,8 +83,11 @@ export class SessionReadData {
       try { document = (active ? parseActive : parseTranscript)(await readFile(path, "utf8")); }
       catch (error) { if (active && (error instanceof TranscriptError)) continue; throw error; }
       const sourceKind = active ? "active" as const : "reset" as const; const sourceKey = active ? active[1]! : name;
+      const identity: ReadonlySourceIdentity = { sourceKind, agentId: agent.agentId, sourceSessionId: (active ?? reset)![1]!, ...(reset ? { resetTimestamp: reset[2]! } : {}) };
+      const metadata = await loadReadonlyMetadata(this.dataRoot, identity);
       records.push({ recordId: externalRecordId(agent.agentId, sourceKind, sourceKey), agentId: agent.agentId, sourceKind, sourceKey,
-        revision: `${stat.size}:${stat.mtimeMs}`, updatedAt: stat.mtime.toISOString(), messageCount: document.entries.filter(entry => entry.type === "message").length, title: documentTitle(document) });
+        revision: `${stat.size}:${stat.mtimeMs}`, updatedAt: stat.mtime.toISOString(), messageCount: document.entries.filter(entry => entry.type === "message").length,
+        title: metadata.title ?? documentTitle(document), archived: metadata.archived, hidden: metadata.hidden });
     }
     return records;
   }
@@ -92,20 +98,21 @@ export class SessionReadData {
       const loaded = await loadPanelSession(this.dataRoot, agentId, metadata.recordId);
       const path = assertWithin(this.dataRoot, join(this.dataRoot, "sessions", agentId, metadata.recordId, "transcript.jsonl")); const stat = await lstat(path);
       result.push({ recordId: metadata.recordId, agentId, sourceKind: "panel", sourceKey: metadata.recordId,
-        revision: `${stat.size}:${stat.mtimeMs}`, updatedAt: stat.mtime.toISOString(), messageCount: loaded.document.entries.filter(entry => entry.type === "message").length, title: documentTitle(loaded.document) });
+        revision: `${stat.size}:${stat.mtimeMs}`, updatedAt: stat.mtime.toISOString(), messageCount: loaded.document.entries.filter(entry => entry.type === "message").length,
+        title: metadata.title ?? documentTitle(loaded.document), archived: metadata.archived ?? false, hidden: metadata.hidden ?? false });
     }
     return result;
   }
 
-  async sessions(agentId?: string): Promise<ConversationRecord[]> {
+  async sessions(agentId?: string, archived: boolean | null = false, includeHidden = false): Promise<ConversationRecord[]> {
     const agents = agentId ? [this.agentsById.get(agentId)].filter((item): item is ReadAgentConfig => !!item) : [...this.agentsById.values()];
     if (agentId && agents.length === 0) return [];
     const records = (await Promise.all(agents.map(async agent => [...await this.externalRecords(agent), ...await this.panelRecords(agent.agentId)]))).flat();
-    return records.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    return records.filter(record => (includeHidden || !record.hidden) && (archived === null || record.archived === archived)).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   }
 
   private async load(recordId: string): Promise<{ record: ConversationRecord; document: TranscriptDocument } | undefined> {
-    const record = (await this.sessions()).find(item => item.recordId === recordId); if (!record) return undefined;
+    const record = (await this.sessions(undefined, null, true)).find(item => item.recordId === recordId); if (!record) return undefined;
     if (record.sourceKind === "panel") return { record, document: (await loadPanelSession(this.dataRoot, record.agentId, record.recordId)).document };
     const agent = this.agentsById.get(record.agentId)!; await this.assertRoot(agent);
     const name = record.sourceKind === "active" ? `${record.sourceKey}.jsonl` : record.sourceKey;
@@ -132,14 +139,15 @@ export class SessionReadData {
   async createPanel(agentId: string, title?: string): Promise<unknown> {
     if (!this.agentsById.has(agentId)) throw new Error("AGENT_NOT_ALLOWED");
     const now = new Date().toISOString(), recordId = randomUUID();
-    const metadata = await createPanelSession(this.dataRoot, agentId, { header: { type: "session", version: 3, id: randomUUID(), timestamp: now, cwd: ".", panel: { recordId, createdAt: now, ...(title ? { title: title.slice(0, 120) } : {}) } }, entries: [] }, { recordId, createdAt: now });
+    const safeTitle = title?.slice(0, 120);
+    const metadata = await createPanelSession(this.dataRoot, agentId, { header: { type: "session", version: 3, id: randomUUID(), timestamp: now, cwd: ".", panel: { recordId, createdAt: now, ...(safeTitle ? { title: safeTitle } : {}) } }, entries: [] }, { recordId, createdAt: now, ...(safeTitle ? { title: safeTitle } : {}) });
     const record = (await this.panelRecords(agentId)).find(item => item.recordId === metadata.recordId);
     if (!record) throw new Error("PANEL_SESSION_CREATE_FAILED"); return record;
   }
 
   async search(query: string, agentId?: string): Promise<unknown[]> {
     const needle = query.trim().toLocaleLowerCase(); if (!needle) return [];
-    const records = await this.sessions(agentId); const matches: unknown[] = [];
+    const records = await this.sessions(agentId, null); const matches: unknown[] = [];
     for (const record of records) {
       const loaded = await this.load(record.recordId); if (!loaded) continue;
       const hits = loaded.document.entries.flatMap(entry => {
@@ -149,6 +157,21 @@ export class SessionReadData {
       if (hits.length) matches.push({ ...record, hits });
     }
     return matches;
+  }
+
+  async updateSession(recordId: string, patch: { title?: string; archived?: boolean }): Promise<ConversationRecord> {
+    if (patch.title === undefined && patch.archived === undefined) throw new Error("SESSION_UPDATE_EMPTY");
+    const title = patch.title?.trim(); if (patch.title !== undefined && (!title || title.length > 120)) throw new Error("SESSION_TITLE_INVALID");
+    const loaded = await this.load(recordId); if (!loaded) throw new Error("SESSION_NOT_FOUND");
+    if (loaded.record.sourceKind === "panel") {
+      await updatePanelMetadata(this.dataRoot, loaded.record.agentId, recordId, current => ({ ...current, ...(title ? { title } : {}), ...(patch.archived !== undefined ? { archived: patch.archived } : {}) }));
+    } else {
+      const match = loaded.record.sourceKind === "active" ? [loaded.record.sourceKey, undefined] : (() => { const parsed = RESET.exec(loaded.record.sourceKey); return [parsed?.[1], parsed?.[2]]; })();
+      if (!match[0]) throw new Error("SESSION_SOURCE_INVALID");
+      const identity: ReadonlySourceIdentity = { sourceKind: loaded.record.sourceKind, agentId: loaded.record.agentId, sourceSessionId: match[0], ...(match[1] ? { resetTimestamp: match[1] } : {}) };
+      await updateReadonlyMetadata(this.dataRoot, identity, current => ({ ...current, ...(title ? { title } : {}), ...(patch.archived !== undefined ? { archived: patch.archived } : {}) }));
+    }
+    const updated = (await this.sessions(undefined, null, true)).find(item => item.recordId === recordId); if (!updated) throw new Error("SESSION_NOT_FOUND"); return updated;
   }
 
   async fork(recordId: string, messageId: string): Promise<unknown> {
