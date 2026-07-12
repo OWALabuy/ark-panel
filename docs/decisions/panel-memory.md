@@ -44,13 +44,11 @@
   2. 或让 `scratch` 会话在**独立一次性 workspace** 下推理，从 workspace key 层面切断渗入。
 - **权衡**：方式 2 更彻底（记忆只认 workspace key，换 workspace 即换 store），但失去共用 workspace 的记忆注入；方式 1 保留注入但依赖「少调 memory_search」这一较弱保证。
 
-### ⚠️ 待 Owl 拍板：`memoryDisposition` 默认值
+### `memoryDisposition` 默认值：`scratch`（Owl 已定 2026-07-12）
 
-新建 / fork 面板会话的默认倾向未定。两种取向：
-- **默认 `scratch`（保守，建议）**：默认不碰记忆，想沉淀的会话手动标 `eligible`。避免调试污染，代价是要主动标记有价值的会话。
-- **默认 `eligible`（积极）**：默认可进记忆，调试会话手动标 `scratch`。方便沉淀，代价是容易漏标而污染。
-
-在 Owl 确定前，实现按 `scratch` 兜底（不主动写记忆更安全）。
+新建 / fork 面板会话默认 `scratch`（不碰记忆），想沉淀的会话由用户手动标 `eligible`。
+- 取此默认的理由：避免调试 / 草稿对话不受控地污染真实 agent 的长期记忆；「想留」是明确意图，交给用户显式开启，比「想丢」要主动标记更安全。
+- 代价（接受）：有价值的会话需要用户主动开一下 `eligible` 才会进记忆归档。
 
 ## 按需叠加：路线 B（喂原生 promote，首版可不做）
 
