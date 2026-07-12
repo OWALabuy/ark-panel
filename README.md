@@ -82,3 +82,7 @@ When serving through an HTTPS reverse proxy, set `PANEL_SECURE_COOKIE=1`. The fi
 - [Development archive](docs/archive/development-notes/)
 
 Operational and acceptance documents are still being consolidated as the first production deployment is completed.
+
+## License
+
+ark-panel is available under the [MIT License](LICENSE).
