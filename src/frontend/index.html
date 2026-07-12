@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>ark-panel</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main id="login" class="login">
+    <form id="login-form" class="login-card">
+      <div class="mark">A</div><h1>ark-panel</h1><p>把每一段会话带上船。</p>
+      <label>账号<input name="username" autocomplete="username" required></label>
+      <label>密码<input name="password" type="password" autocomplete="current-password" required></label>
+      <button>登录</button><output id="login-error"></output>
+    </form>
+  </main>
+  <aside id="error" class="error-bar" role="alert" hidden>
+    <span id="error-message"></span><button id="retry" type="button">重试</button><button id="dismiss-error" type="button" aria-label="关闭">×</button>
+  </aside>
+  <main id="app" class="shell" hidden>
+    <aside class="agents"><header><span class="mark small" aria-hidden="true">A</span></header><nav id="agents" aria-label="Agent 列表"></nav><button id="logout" class="logout" type="button">退出</button></aside>
+    <aside class="sessions">
+      <header><button id="back-agents" class="mobile" aria-label="返回 Agent 列表">‹ Agents</button><h1>会话</h1><button id="new-session" class="new" title="新建会话" aria-label="新建会话">＋</button></header>
+      <label class="search"><span aria-hidden="true">⌕</span><input id="search" aria-label="搜索会话" placeholder="搜索会话"></label><nav id="sessions" aria-label="会话列表"></nav>
+    </aside>
+    <section class="conversation">
+      <header><button id="back-sessions" class="mobile" aria-label="返回会话列表">‹ 会话</button><div><h2 id="title">选择一个会话</h2><small id="subtitle" aria-live="polite"></small></div></header>
+      <div id="messages" class="messages" role="log" aria-label="消息记录"><div class="empty">从左侧选择会话</div></div>
+      <form id="composer" class="composer">
+        <textarea id="message" aria-label="消息" rows="1" placeholder="继续这段会话…"></textarea>
+        <div class="composer-foot"><span id="composer-hint">Enter 发送 · Shift+Enter 换行</span><button id="send" aria-label="发送">↑</button></div>
+      </form>
+    </section>
+  </main>
+  <dialog id="editor-dialog" class="editor-dialog" aria-labelledby="editor-title" aria-describedby="editor-help editor-error">
+    <form id="editor-form" novalidate>
+      <h2 id="editor-title"></h2><p id="editor-help"></p>
+      <label id="editor-label" for="editor-input"></label>
+      <input id="editor-input" maxlength="120">
+      <textarea id="editor-textarea" rows="7" maxlength="16384" hidden></textarea>
+      <output id="editor-error" class="field-error" aria-live="polite"></output>
+      <div class="dialog-actions"><button id="editor-cancel" type="button" class="secondary">取消</button><button id="editor-submit" type="submit">确认</button></div>
+    </form>
+  </dialog>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

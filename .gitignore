@@ -1,0 +1,19 @@
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+data/
+coverage/
+*.log
+*.pid
+.DS_Store
+
+# Private conversation exports, backups, and runtime state must never be committed.
+raw-export/
+exports/
+backups/
+sessions/
+*.zip
+*.tar
+*.tar.gz

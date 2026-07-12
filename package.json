@@ -1,0 +1,23 @@
+{
+  "name": "ark-panel",
+  "version": "0.1.0",
+  "description": "A self-hosted web panel for OpenClaw",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22 <23" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/src/server/main.js",
+    "healthcheck": "node -e \"fetch('http://127.0.0.1:'+(process.env.PANEL_PORT||'8790')+'/api/v1/health').then(async r=>{if(!r.ok)throw new Error('HTTP '+r.status);console.log(await r.text())})\"",
+    "backup": "node dist/src/ops/backup-cli.js",
+    "test:deployment": "npm run build && PANEL_ALLOW_DEPLOYMENT_DRY_RUN=1 node dist/src/ops/deployment-smoke.js",
+    "password-hash": "node -e \"const c=require('node:crypto');const s=c.randomBytes(16).toString('hex');console.log('scrypt:'+s+':'+c.scryptSync(process.argv[1],s,32).toString('hex'))\"",
+    "test": "npm run build && node --test dist/test/**/*.test.js",
+    "test:paneltest": "npm run build && PANEL_ALLOW_PANELTEST_INTEGRATION=1 node dist/src/gateway/paneltest-smoke.js",
+    "test:runtime-acceptance": "npm run build && PANEL_ALLOW_RUNTIME_ACCEPTANCE=1 node dist/src/gateway/runtime-acceptance-cli.js",
+    "test:app-paneltest": "npm run build && PANEL_ALLOW_PANELTEST_INTEGRATION=1 node dist/src/server/paneltest-app-smoke.js",
+    "test:panel-claude-runtime": "npm run build && PANEL_ALLOW_CLAUDE_RUNTIME_ACCEPTANCE=1 node dist/src/server/panel-claude-runtime-smoke.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": { "@types/node": "^22.15.0", "typescript": "^5.8.3" }
+}
