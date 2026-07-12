@@ -7,6 +7,7 @@ Type=simple
 # Copy this example to ~/.config/systemd/user/ and replace USER/repository paths.
 WorkingDirectory=/home/USER/awa/ark-panel
 EnvironmentFile=/home/USER/.config/ark-panel/panel.env
+Environment=PATH=/home/USER/.nvm/versions/node/v22.22.0/bin:/usr/local/bin:/usr/bin
 ExecStart=/usr/bin/env node /home/USER/awa/ark-panel/dist/src/server/main.js
 Restart=on-failure
 RestartSec=3
