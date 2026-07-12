@@ -21,6 +21,9 @@ test("frontend renders untrusted metadata with DOM text nodes", async () => {
   assert.match(source,/block\.text\?\?block\.thinking/);
   assert.match(source,/function activeBranch\(entries\)/);
   assert.match(source,/role!=="toolResult"/);
+  assert.match(source,/calls\.get\(result\.callId\)/);
+  assert.match(source,/call\.result=result/);
+  assert.match(source,/block\.result\.isError/);
   assert.match(source,/activeRun\.abort\(\)/);
   assert.doesNotMatch(source,/\/compact|\/reset/);
 });

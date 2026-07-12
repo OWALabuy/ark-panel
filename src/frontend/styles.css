@@ -7,4 +7,5 @@
 @media(max-width:760px){.actions{opacity:1}.logout{position:absolute;right:20px;top:20px}.agents nav{flex:none}}
 .shell{overflow:hidden}.conversation,.messages{min-height:0}.conversation{overflow:hidden}.sessions>header,.conversation>header,.composer{flex:none}
 .message p{white-space:pre-wrap}
+.tool-result-label{display:block;padding:10px 13px 0;border-top:1px solid var(--line);color:var(--muted);font-size:12px}.tool-result-label.error{color:#a4382d}.block pre.tool-result{padding-top:8px}
 @media(min-width:761px){.agents,.sessions{overflow:hidden}.agents nav{min-height:0;overflow-y:auto;align-content:start}.sessions nav{flex:1;min-height:0}}
