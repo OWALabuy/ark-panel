@@ -13,8 +13,15 @@ function textOfUser(entry: JsonObject): string | undefined {
 }
 
 export class FileBridgeMaterializer implements BridgeMaterializer {
+  constructor(private readonly now: () => Date = () => new Date()) {}
+
   async replaceCreatedTranscript(created: CreatedSession, history: TranscriptDocument): Promise<number> {
-    const document = { header: { ...history.header, id: created.sessionId }, entries: history.entries };
+    // OpenClaw derives session freshness from the transcript header when its
+    // newly-created registry entry has no sessionStartedAt yet. Keeping the
+    // panel session's original timestamp here can therefore trigger the daily
+    // reset policy immediately: OpenClaw rotates to another sessionId while the
+    // bridge keeps polling the file belonging to `created.sessionId`.
+    const document = { header: { ...history.header, id: created.sessionId, timestamp: this.now().toISOString() }, entries: history.entries };
     await atomicWrite(created.transcriptPath, serializeTranscript(document)); return history.entries.length;
   }
   async readNewEntries(created: CreatedSession, previousEntryCount: number): Promise<JsonObject[]> {

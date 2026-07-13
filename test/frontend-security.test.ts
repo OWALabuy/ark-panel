@@ -12,6 +12,10 @@ test("frontend renders untrusted metadata with DOM text nodes", async () => {
   assert.match(source,/command:"commands",args:\[\]/);
   assert.match(source,/result\?\.data\?\.commands/);
   assert.match(source,/Intl\.DateTimeFormat/);
+  assert.match(source,/className="message-body"/);
+  assert.match(source,/className="message-meta"/);
+  const styles=await readFile("src/frontend/styles.css","utf8");
+  assert.match(styles,/\.composer textarea:placeholder-shown\{height:auto!important\}/);
   assert.match(source,/method:"PATCH"/);
   assert.match(source,/archived=\$\{viewingArchived\}/);
   assert.match(source,/重命名会话/);
