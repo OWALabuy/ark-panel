@@ -16,6 +16,8 @@ export interface ReadonlyMetadata extends ReadonlySourceIdentity {
   archived: boolean;
   hidden: boolean;
   memoryDisposition: "eligible" | "scratch";
+  pinned?: boolean;
+  project?: string;
   updatedAt: string;
 }
 
@@ -39,6 +41,8 @@ function validate(value: unknown, identity: ReadonlySourceIdentity): ReadonlyMet
   if (item.version !== 1 || item.agentId !== identity.agentId || item.sourceKind !== identity.sourceKind || item.sourceSessionId !== identity.sourceSessionId ||
     item.resetTimestamp !== identity.resetTimestamp) throw new Error("只读会话 metadata 与来源不一致");
   if (item.title !== undefined && (typeof item.title !== "string" || !item.title.trim() || item.title.length > 120)) throw new Error("只读会话标题格式无效");
+  if (item.pinned !== undefined && typeof item.pinned !== "boolean") throw new Error("只读会话置顶格式无效");
+  if (item.project !== undefined && (typeof item.project !== "string" || !item.project.trim() || item.project.length > 60 || /[\u0000-\u001f\u007f]/.test(item.project))) throw new Error("只读会话 project 格式无效");
   if (typeof item.archived !== "boolean" || typeof item.hidden !== "boolean" || !["eligible", "scratch"].includes(item.memoryDisposition ?? "") || typeof item.updatedAt !== "string") {
     throw new Error("只读会话 metadata 字段无效");
   }

@@ -14,7 +14,9 @@ export interface ReadApi {
   fork?(recordId: string, messageId: string): Promise<unknown>;
   editAndFork?(recordId: string, messageId: string, replacement: string): Promise<unknown>;
   createPanel?(agentId: string, title?: string): Promise<unknown>;
-  updateSession?(recordId: string, patch: { title?: string; archived?: boolean }): Promise<unknown>;
+  updateSession?(recordId: string, patch: { title?: string; archived?: boolean; pinned?: boolean; project?: string | null }): Promise<unknown>;
+  deleteSession?(recordId: string, confirmed: boolean): Promise<unknown>;
+  exportMarkdown?(recordId: string): Promise<{ filename: string; markdown: string } | null>;
 }
 export interface AppOptions { auth: AuthConfig; publicDir: string; mock?: boolean; now?: () => number; generation?: GenerationApi; commands?: CommandApi; reads?: ReadApi; allowedHosts?: readonly string[]; publicOrigins?: readonly string[] }
 const jsonHeaders = { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" };
@@ -59,11 +61,26 @@ export function createPanelServer(options: AppOptions) {
         }
         if (req.method === "PATCH" && /^\/api\/v1\/sessions\/[^/]+$/.test(url.pathname)) {
           if (!options.reads?.updateSession) return fail(res, 501, "DATA_NOT_CONNECTED", "数据层尚未接入", requestId);
-          const value = await body(req) as { title?: unknown; archived?: unknown };
-          if (value.title === undefined && value.archived === undefined) return fail(res, 400, "SESSION_UPDATE_EMPTY", "没有需要修改的字段", requestId);
+          const value = await body(req) as { title?: unknown; archived?: unknown; pinned?: unknown; project?: unknown };
+          if (value.title === undefined && value.archived === undefined && value.pinned === undefined && value.project === undefined) return fail(res, 400, "SESSION_UPDATE_EMPTY", "没有需要修改的字段", requestId);
           if (value.title !== undefined && (typeof value.title !== "string" || !value.title.trim() || value.title.trim().length > 120)) return fail(res, 400, "SESSION_TITLE_INVALID", "标题格式无效", requestId);
           if (value.archived !== undefined && typeof value.archived !== "boolean") return fail(res, 400, "SESSION_ARCHIVED_INVALID", "归档状态格式无效", requestId);
-          const recordId = decodeURIComponent(url.pathname.slice("/api/v1/sessions/".length)); return send(res, 200, { data: await options.reads.updateSession(recordId, { ...(typeof value.title === "string" ? { title: value.title.trim() } : {}), ...(typeof value.archived === "boolean" ? { archived: value.archived } : {}) }) });
+          if (value.pinned !== undefined && typeof value.pinned !== "boolean") return fail(res, 400, "SESSION_PINNED_INVALID", "置顶状态格式无效", requestId);
+          if (value.project !== undefined && value.project !== null && (typeof value.project !== "string" || !value.project.trim() || value.project.trim().length > 60 || /[\u0000-\u001f\u007f]/.test(value.project))) return fail(res, 400, "SESSION_PROJECT_INVALID", "project 格式无效", requestId);
+          const recordId = decodeURIComponent(url.pathname.slice("/api/v1/sessions/".length)); return send(res, 200, { data: await options.reads.updateSession(recordId, { ...(typeof value.title === "string" ? { title: value.title.trim() } : {}), ...(typeof value.archived === "boolean" ? { archived: value.archived } : {}), ...(typeof value.pinned === "boolean" ? { pinned: value.pinned } : {}), ...(typeof value.project === "string" || value.project === null ? { project: value.project } : {}) }) });
+        }
+        if (req.method === "DELETE" && /^\/api\/v1\/sessions\/[^/]+$/.test(url.pathname)) {
+          if (!options.reads?.deleteSession) return fail(res, 501, "DATA_NOT_CONNECTED", "数据层尚未接入", requestId);
+          const value = await body(req) as { confirm?: unknown };
+          if (value.confirm !== true) return fail(res, 400, "SESSION_DELETE_CONFIRMATION_REQUIRED", "删除需要明确确认", requestId);
+          const recordId = decodeURIComponent(url.pathname.slice("/api/v1/sessions/".length)); return send(res, 200, { data: await options.reads.deleteSession(recordId, true) });
+        }
+        if (req.method === "GET" && /^\/api\/v1\/sessions\/[^/]+\/export\.md$/.test(url.pathname)) {
+          if (!options.reads?.exportMarkdown) return fail(res, 501, "DATA_NOT_CONNECTED", "数据层尚未接入", requestId);
+          const recordId = decodeURIComponent(url.pathname.slice("/api/v1/sessions/".length, -"/export.md".length)); const exported = await options.reads.exportMarkdown(recordId);
+          if (!exported) return fail(res, 404, "SESSION_NOT_FOUND", "会话不存在", requestId);
+          const ascii = exported.filename.replace(/[^\x20-\x7e]/g, "_").replace(/["\\]/g, "_");
+          res.writeHead(200, { "content-type": "text/markdown; charset=utf-8", "content-disposition": `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(exported.filename)}`, "cache-control": "no-store", "x-content-type-options": "nosniff" }); res.end(exported.markdown); return;
         }
         if (req.method === "GET" && /^\/api\/v1\/sessions\/[^/]+$/.test(url.pathname)) { const recordId = decodeURIComponent(url.pathname.slice("/api/v1/sessions/".length)); return send(res, 200, { data: options.mock ? mockConversation : await options.reads?.conversation(recordId) ?? null }); }
         if (req.method === "POST" && /^\/api\/v1\/sessions\/[^/]+\/fork$/.test(url.pathname)) {
@@ -125,7 +142,7 @@ export function createPanelServer(options: AppOptions) {
       try { const [root, resolved] = await Promise.all([realpath(options.publicDir), realpath(file)]); const fromRoot = relative(root, resolved); if (fromRoot === ".." || fromRoot.startsWith(`..${sep}`) || fromRoot.startsWith(sep)) throw new Error("STATIC_PATH_ESCAPE"); const data = await readFile(resolved); res.writeHead(200, { "content-type": types[extname(resolved)] ?? "application/octet-stream", "cache-control": pathname === "index.html" ? "no-store" : "public, max-age=3600", "x-content-type-options": "nosniff", "content-security-policy": "default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'" }); res.end(data); }
       catch { fail(res, 404, "NOT_FOUND", "页面不存在", requestId); }
     } catch (error) {
-      const known: Record<string, [number, string]> = { AGENT_NOT_ALLOWED: [403, "Agent 不在允许列表中"], SESSION_NOT_FOUND: [404, "会话不存在"], SESSION_UPDATE_EMPTY: [400, "没有需要修改的字段"], SESSION_TITLE_INVALID: [400, "标题格式无效"], PANEL_SESSION_NOT_FOUND: [404, "面板会话不存在"], EDIT_TARGET_NOT_USER: [409, "只能编辑用户消息"], PANEL_SESSION_CREATE_FAILED: [500, "面板会话创建失败"], COMMAND_NOT_ALLOWED: [403, "该命令未获面板允许"], COMMAND_ARGS_INVALID: [400, "命令参数无效"], MODEL_NOT_AVAILABLE: [400, "模型不可用"], THINKING_LEVEL_INVALID: [400, "思考等级无效"], THINKING_LEVEL_UNSUPPORTED: [409, "当前模型不支持该思考等级"], REASONING_LEVEL_INVALID: [400, "推理显示模式无效"] };
+      const known: Record<string, [number, string]> = { AGENT_NOT_ALLOWED: [403, "Agent 不在允许列表中"], SESSION_NOT_FOUND: [404, "会话不存在"], SESSION_UPDATE_EMPTY: [400, "没有需要修改的字段"], SESSION_TITLE_INVALID: [400, "标题格式无效"], SESSION_DELETE_CONFIRMATION_REQUIRED: [400, "删除需要明确确认"], SESSION_NOT_ARCHIVED: [409, "面板会话必须先归档才能彻底删除"], PANEL_SESSION_DELETE_UNSAFE: [409, "会话目录包含未知内容，已拒绝删除"], PANEL_SESSION_NOT_FOUND: [404, "面板会话不存在"], EDIT_TARGET_NOT_USER: [409, "只能编辑用户消息"], PANEL_SESSION_CREATE_FAILED: [500, "面板会话创建失败"], COMMAND_NOT_ALLOWED: [403, "该命令未获面板允许"], COMMAND_ARGS_INVALID: [400, "命令参数无效"], MODEL_NOT_AVAILABLE: [400, "模型不可用"], THINKING_LEVEL_INVALID: [400, "思考等级无效"], THINKING_LEVEL_UNSUPPORTED: [409, "当前模型不支持该思考等级"], REASONING_LEVEL_INVALID: [400, "推理显示模式无效"] };
       const code = error instanceof ForkError ? error.code : error instanceof Error ? error.message : "INVALID_REQUEST"; const mapped = known[code];
       const status = error instanceof HttpError ? error.status : error instanceof SyntaxError ? 400 : error instanceof ForkError ? 409 : mapped?.[0] ?? 500;
       fail(res, status, error instanceof HttpError ? error.code : error instanceof ForkError ? error.code : mapped ? code : "INVALID_REQUEST", error instanceof ForkError ? error.message : mapped?.[1] ?? "请求无法处理", requestId);

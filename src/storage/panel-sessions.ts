@@ -1,4 +1,4 @@
-import { mkdir, open, readdir, readFile, lstat } from "node:fs/promises";
+import { mkdir, open, readdir, readFile, lstat, unlink, rmdir } from "node:fs/promises";
 import { join } from "node:path";
 import { newPanelRecordId } from "../domain/record-id.js";
 import { parseTranscript, serializeTranscript, type TranscriptDocument } from "../domain/transcript.js";
@@ -9,6 +9,7 @@ export interface PanelMetadata {
   parentRecordId?: string; forkedFromMessageId?: string;
   modelOverride?: string; thinkingLevel?: string; reasoningLevel?: "on" | "off" | "stream";
   title?: string; archived?: boolean; hidden?: boolean; memoryDisposition?: "eligible" | "scratch";
+  pinned?: boolean; project?: string;
 }
 
 const metadataUpdates = new Map<string, Promise<void>>();
@@ -23,6 +24,8 @@ function validateMetadata(value: unknown, agentId: string, recordId: string): Pa
   if (metadata.title !== undefined && (typeof metadata.title !== "string" || !metadata.title.trim() || metadata.title.length > 120)) throw new Error("panel metadata title 格式无效");
   if (metadata.archived !== undefined && typeof metadata.archived !== "boolean") throw new Error("panel metadata archived 格式无效");
   if (metadata.hidden !== undefined && typeof metadata.hidden !== "boolean") throw new Error("panel metadata hidden 格式无效");
+  if (metadata.pinned !== undefined && typeof metadata.pinned !== "boolean") throw new Error("panel metadata pinned 格式无效");
+  if (metadata.project !== undefined && (typeof metadata.project !== "string" || !metadata.project.trim() || metadata.project.length > 60 || /[\u0000-\u001f\u007f]/.test(metadata.project))) throw new Error("panel metadata project 格式无效");
   if (metadata.memoryDisposition !== undefined && !["eligible", "scratch"].includes(metadata.memoryDisposition)) throw new Error("panel metadata memoryDisposition 格式无效");
   return { archived: false, hidden: false, memoryDisposition: "scratch", ...metadata } as PanelMetadata;
 }
@@ -93,4 +96,18 @@ export async function loadPanelSession(dataRoot: string, agentId: string, record
   const stat = await lstat(directory); if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("panel 会话目录不安全");
   const metadata = validateMetadata(JSON.parse(await readRegular(join(directory, "metadata.json"))), agentId, recordId);
   return { metadata, document: parseTranscript(await readRegular(join(directory, "transcript.jsonl"))) };
+}
+
+export async function deletePanelSession(dataRoot: string, agentId: string, recordId: string): Promise<void> {
+  const directory = assertWithin(dataRoot, join(dataRoot, "sessions", agentId, recordId));
+  const stat = await lstat(directory); if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("panel 会话目录不安全");
+  const names = (await readdir(directory)).sort();
+  if (names.length !== 2 || names[0] !== "metadata.json" || names[1] !== "transcript.jsonl") throw new Error("PANEL_SESSION_DELETE_UNSAFE");
+  const loaded = await loadPanelSession(dataRoot, agentId, recordId);
+  if (!loaded.metadata.archived) throw new Error("SESSION_NOT_ARCHIVED");
+  for (const name of names) {
+    const path = assertWithin(directory, join(directory, name)); const file = await lstat(path);
+    if (!file.isFile() || file.isSymbolicLink()) throw new Error("PANEL_SESSION_DELETE_UNSAFE");
+  }
+  await unlink(join(directory, "transcript.jsonl")); await unlink(join(directory, "metadata.json")); await rmdir(directory);
 }

@@ -22,6 +22,12 @@ test("non-mock reads are delegated without connecting a real agent", async t => 
   const login=await fetch(`${x.base}/api/v1/auth/login`,{method:"POST",headers:{origin:x.base,"content-type":"application/json"},body:JSON.stringify({username:"owl",password:"correct"})});const cookies=login.headers.getSetCookie().map(value=>value.split(";",1)[0]).join("; ");
   assert.deepEqual((await (await fetch(`${x.base}/api/v1/agents`,{headers:{cookie:cookies}})).json()).data,[{id:"safe"}]); assert.deepEqual((await (await fetch(`${x.base}/api/v1/sessions?agentId=safe`,{headers:{cookie:cookies}})).json()).data,[{recordId:"record"}]); assert.deepEqual((await (await fetch(`${x.base}/api/v1/sessions/record`,{headers:{cookie:cookies}})).json()).data,{title:"safe"});
 });
+test("Markdown 导出需要登录并使用安全附件响应", async t => {
+  const reads: ReadApi = { async agents(){return[]}, async sessions(){return[]}, async conversation(){return null}, async exportMarkdown(recordId){assert.equal(recordId,"record");return{filename:"中文标题.md",markdown:"# safe\n"}} };
+  const x=await fixture(undefined,reads);t.after(()=>x.server.close());assert.equal((await fetch(`${x.base}/api/v1/sessions/record/export.md`)).status,401);
+  const login=await fetch(`${x.base}/api/v1/auth/login`,{method:"POST",headers:{origin:x.base,"content-type":"application/json"},body:JSON.stringify({username:"owl",password:"correct"})});const cookies=login.headers.getSetCookie().map(value=>value.split(";",1)[0]).join("; ");
+  const response=await fetch(`${x.base}/api/v1/sessions/record/export.md`,{headers:{cookie:cookies}});assert.equal(response.status,200);assert.equal(response.headers.get("content-type"),"text/markdown; charset=utf-8");assert.match(response.headers.get("content-disposition")||"",/^attachment;/);assert.match(response.headers.get("content-disposition")||"",/filename\*=UTF-8''/);assert.equal(await response.text(),"# safe\n");
+});
 test("active/reset sources are rejected before generation",async t=>{let calls=0;const reads:ReadApi={async agents(){return[]},async sessions(){return[]},async conversation(){return{sourceKind:"active"}}};const x=await fixture({async generate(_record,_message,_signal,runId){calls++;return{runId,entries:[]}}},reads);t.after(()=>x.server.close());const login=await fetch(`${x.base}/api/v1/auth/login`,{method:"POST",headers:{origin:x.base,"content-type":"application/json"},body:JSON.stringify({username:"owl",password:"correct"})});const body=await login.json()as{data:{csrfToken:string}};const cookies=login.headers.getSetCookie().map(value=>value.split(";",1)[0]).join("; ");const response=await fetch(`${x.base}/api/v1/sessions/active/messages`,{method:"POST",headers:{cookie:cookies,origin:x.base,"x-csrf-token":body.data.csrfToken,"content-type":"application/json"},body:JSON.stringify({message:"must not run"})});assert.equal(response.status,409);assert.equal((await response.json()).error.code,"SOURCE_READ_ONLY");assert.equal(calls,0)});
 test("login issues hardened cookies and permits reads", async t => {
   const x = await fixture(); t.after(()=>x.server.close());
@@ -72,6 +78,7 @@ test("search、fork 和编辑重发 HTTP 接口委托给受限数据层", async 
     async search(query, agentId){calls.push(`search:${query}:${agentId}`);return [{safe:true}]},
     async createPanel(agentId,title){calls.push(`create:${agentId}:${title}`);return {recordId:"panel-new"}},
     async updateSession(recordId,patch){calls.push(`update:${recordId}:${patch.title}:${patch.archived}`);return {recordId,...patch}},
+    async deleteSession(recordId,confirmed){calls.push(`delete:${recordId}:${confirmed}`);return {action:"deleted"}},
     async fork(recordId,messageId){if(recordId==="missing")throw new Error("SESSION_NOT_FOUND");if(messageId==="bad")throw new ForkError("FORK_BOUNDARY_INVALID","该 entry 不是合法 fork 边界");calls.push(`fork:${recordId}:${messageId}`);return {recordId:"panel-fork"}},
     async editAndFork(recordId,messageId,replacement){if(messageId==="assistant")throw new Error("EDIT_TARGET_NOT_USER");calls.push(`edit:${recordId}:${messageId}:${replacement}`);return {recordId:"panel-edit"}}
   };
@@ -82,12 +89,14 @@ test("search、fork 和编辑重发 HTTP 接口委托给受限数据层", async 
   assert.equal((await fetch(`${x.base}/api/v1/search?q=needle&agentId=safe`,{headers:{cookie:cookieHeader}})).status,200);
   assert.equal((await fetch(`${x.base}/api/v1/sessions`,{method:"POST",headers:auth,body:JSON.stringify({agentId:"safe",title:"New"})})).status,201);
   assert.equal((await fetch(`${x.base}/api/v1/sessions/source`,{method:"PATCH",headers:auth,body:JSON.stringify({title:"Renamed",archived:true})})).status,200);
+  assert.equal((await fetch(`${x.base}/api/v1/sessions/source`,{method:"DELETE",headers:auth,body:JSON.stringify({confirm:true})})).status,200);
+  const unconfirmed=await fetch(`${x.base}/api/v1/sessions/source`,{method:"DELETE",headers:auth,body:JSON.stringify({})});assert.equal(unconfirmed.status,400);assert.equal((await unconfirmed.json()).error.code,"SESSION_DELETE_CONFIRMATION_REQUIRED");
   assert.equal((await fetch(`${x.base}/api/v1/sessions/source/fork`,{method:"POST",headers:auth,body:JSON.stringify({messageId:"a1"})})).status,201);
   assert.equal((await fetch(`${x.base}/api/v1/sessions/source/messages/u1/resend`,{method:"POST",headers:auth,body:JSON.stringify({message:"replacement"})})).status,201);
   const missing=await fetch(`${x.base}/api/v1/sessions/missing/fork`,{method:"POST",headers:auth,body:JSON.stringify({messageId:"a1"})});assert.equal(missing.status,404);assert.equal((await missing.json()).error.code,"SESSION_NOT_FOUND");
   const boundary=await fetch(`${x.base}/api/v1/sessions/source/fork`,{method:"POST",headers:auth,body:JSON.stringify({messageId:"bad"})});assert.equal(boundary.status,409);assert.equal((await boundary.json()).error.code,"FORK_BOUNDARY_INVALID");
   const edit=await fetch(`${x.base}/api/v1/sessions/source/messages/assistant/resend`,{method:"POST",headers:auth,body:JSON.stringify({message:"replacement"})});assert.equal(edit.status,409);assert.equal((await edit.json()).error.code,"EDIT_TARGET_NOT_USER");
-  assert.deepEqual(calls,["search:needle:safe","create:safe:New","update:source:Renamed:true","fork:source:a1","edit:source:u1:replacement"]);
+  assert.deepEqual(calls,["search:needle:safe","create:safe:New","update:source:Renamed:true","delete:source:true","fork:source:a1","edit:source:u1:replacement"]);
 });
 
 test("上下文超预算通过 SSE 返回稳定错误码和中文说明", async t => {

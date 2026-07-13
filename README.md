@@ -33,12 +33,14 @@ Legend: ✅ available · 🚧 scheduled · 💡 candidate (not scheduled) · ⛔
 | Sessions | Create and continue panel-owned sessions | ✅ | Generation uses a dedicated, channel-free runtime for each agent |
 | Sessions | Full-text search and source/agent filtering | ✅ | Search includes archived sessions; the current view controls which results are shown |
 | Sessions | Rename, archive, and restore any session source | ✅ | Read-only sources use panel-owned metadata sidecars |
-| Sessions | Permanently delete panel sessions / hide read-only sessions | 🚧 | Panel sessions will require archive plus explicit confirmation; OpenClaw source files will never be deleted |
+| Sessions | Permanently delete panel sessions / hide read-only sessions | ✅ | Panel sessions require archive plus explicit confirmation; OpenClaw source files are never deleted |
+| Sessions | Pin and group sessions by project | ✅ | Stored only in panel metadata; works for panel-owned and read-only sources |
 | Branching | Fork from a valid message boundary | ✅ | Preserves tool-call groups and never mutates the source transcript |
 | Branching | Edit a user message and resend as a new branch | ✅ | The original branch remains available |
 | Messages | Safe Markdown rendering | ✅ | Headings, lists, quotes, tables, links, inline code and fenced code; raw HTML is not executed |
 | Messages | Copy a whole message or fenced code block | ✅ | Available directly in the conversation view |
 | Messages | Local timestamps | ✅ | Displayed using the browser's local time zone |
+| Messages | Export the current branch as Markdown | ✅ | Includes timestamps, thinking, tool calls and tool results without internal paths or metadata |
 | Messages | Thinking, tool calls, and tool results | ✅ | Structured, collapsible rendering including command output |
 | Generation | Run lifecycle, stop, retry, and idempotent sending | ✅ | SSE reports lifecycle events; completed message groups refresh atomically |
 | Generation | Token-by-token streaming | ⛔ | The current gateway integration does not promise incremental token output |
@@ -50,9 +52,9 @@ Legend: ✅ available · 🚧 scheduled · 💡 candidate (not scheduled) · ⛔
 | Memory | Store per-session `scratch` / `eligible` disposition | ✅ | Defaults to `scratch`; the control is not exposed in the UI yet |
 | Memory | Memory-disposition UI and scratch isolation during inference | 🚧 | Isolation behavior will be selected through `paneltest` runtime acceptance |
 | Operations | Backup, integrity verification, restore, health check, and systemd example | ✅ | Includes deployment smoke and fixture-based browser acceptance coverage |
-| Extras | Pin sessions, export Markdown, attachments/multimodal input, local drafts | 💡 | Recorded for future evaluation; not currently scheduled |
+| Extras | Attachments/multimodal input and local drafts | 💡 | Recorded for future evaluation; not currently scheduled |
 
-The near-term order is session deletion/hiding, memory disposition and isolation, then the long-context strategy with `/compact`. OpenClaw compatibility remains ongoing maintenance. Detailed constraints and acceptance criteria live in the [implementation specification](docs/implementation-spec.md).
+The near-term order is memory disposition and isolation, then the long-context strategy with `/compact`. OpenClaw compatibility remains ongoing maintenance. Detailed constraints and acceptance criteria live in the [implementation specification](docs/implementation-spec.md).
 
 ## Install and test
 

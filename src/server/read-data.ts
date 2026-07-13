@@ -5,15 +5,16 @@ import { deriveFork } from "../domain/fork.js";
 import { externalRecordId } from "../domain/record-id.js";
 import { parseTranscript, TranscriptError, type JsonObject, type TranscriptDocument } from "../domain/transcript.js";
 import { assertWithin } from "../storage/atomic.js";
-import { createPanelSession, listPanelSessions, loadPanelSession } from "../storage/panel-sessions.js";
+import { createPanelSession, deletePanelSession, listPanelSessions, loadPanelSession } from "../storage/panel-sessions.js";
 import { loadReadonlyMetadata, updateReadonlyMetadata, type ReadonlySourceIdentity } from "../storage/readonly-metadata.js";
 import { updatePanelMetadata } from "../storage/panel-sessions.js";
+import { exportTranscriptMarkdown, markdownFilename } from "../domain/markdown-export.js";
 
 export interface ReadAgentConfig { agentId: string; sessionsRoot: string; label?: string }
 export interface ConversationRecord {
   recordId: string; agentId: string; sourceKind: "active" | "reset" | "panel"; sourceKey: string;
   revision: string; updatedAt: string; messageCount: number; title: string;
-  archived: boolean; hidden: boolean;
+  archived: boolean; hidden: boolean; pinned: boolean; project?: string;
 }
 
 const ACTIVE = /^([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.jsonl$/i;
@@ -87,7 +88,8 @@ export class SessionReadData {
       const metadata = await loadReadonlyMetadata(this.dataRoot, identity);
       records.push({ recordId: externalRecordId(agent.agentId, sourceKind, sourceKey), agentId: agent.agentId, sourceKind, sourceKey,
         revision: `${stat.size}:${stat.mtimeMs}`, updatedAt: stat.mtime.toISOString(), messageCount: document.entries.filter(entry => entry.type === "message").length,
-        title: metadata.title ?? documentTitle(document), archived: metadata.archived, hidden: metadata.hidden });
+        title: metadata.title ?? documentTitle(document), archived: metadata.archived, hidden: metadata.hidden,
+        pinned: metadata.pinned ?? false, ...(metadata.project ? { project: metadata.project } : {}) });
     }
     return records;
   }
@@ -99,7 +101,8 @@ export class SessionReadData {
       const path = assertWithin(this.dataRoot, join(this.dataRoot, "sessions", agentId, metadata.recordId, "transcript.jsonl")); const stat = await lstat(path);
       result.push({ recordId: metadata.recordId, agentId, sourceKind: "panel", sourceKey: metadata.recordId,
         revision: `${stat.size}:${stat.mtimeMs}`, updatedAt: stat.mtime.toISOString(), messageCount: loaded.document.entries.filter(entry => entry.type === "message").length,
-        title: metadata.title ?? documentTitle(loaded.document), archived: metadata.archived ?? false, hidden: metadata.hidden ?? false });
+        title: metadata.title ?? documentTitle(loaded.document), archived: metadata.archived ?? false, hidden: metadata.hidden ?? false,
+        pinned: metadata.pinned ?? false, ...(metadata.project ? { project: metadata.project } : {}) });
     }
     return result;
   }
@@ -108,7 +111,8 @@ export class SessionReadData {
     const agents = agentId ? [this.agentsById.get(agentId)].filter((item): item is ReadAgentConfig => !!item) : [...this.agentsById.values()];
     if (agentId && agents.length === 0) return [];
     const records = (await Promise.all(agents.map(async agent => [...await this.externalRecords(agent), ...await this.panelRecords(agent.agentId)]))).flat();
-    return records.filter(record => (includeHidden || !record.hidden) && (archived === null || record.archived === archived)).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    return records.filter(record => (includeHidden || !record.hidden) && (archived === null || record.archived === archived))
+      .sort((a, b) => Number(b.pinned) - Number(a.pinned) || b.updatedAt.localeCompare(a.updatedAt));
   }
 
   private async load(recordId: string): Promise<{ record: ConversationRecord; document: TranscriptDocument } | undefined> {
@@ -136,6 +140,11 @@ export class SessionReadData {
     return { ...loaded.record, document: { header: safeHeader, entries: safeEntries } };
   }
 
+  async exportMarkdown(recordId: string): Promise<{ filename: string; markdown: string } | null> {
+    const loaded = await this.load(recordId); if (!loaded) return null;
+    return { filename: markdownFilename(loaded.record.title), markdown: exportTranscriptMarkdown(loaded.document, loaded.record.title, loaded.record.agentId) };
+  }
+
   async createPanel(agentId: string, title?: string): Promise<unknown> {
     if (!this.agentsById.has(agentId)) throw new Error("AGENT_NOT_ALLOWED");
     const now = new Date().toISOString(), recordId = randomUUID();
@@ -159,19 +168,33 @@ export class SessionReadData {
     return matches;
   }
 
-  async updateSession(recordId: string, patch: { title?: string; archived?: boolean }): Promise<ConversationRecord> {
-    if (patch.title === undefined && patch.archived === undefined) throw new Error("SESSION_UPDATE_EMPTY");
+  async updateSession(recordId: string, patch: { title?: string; archived?: boolean; pinned?: boolean; project?: string | null }): Promise<ConversationRecord> {
+    if (patch.title === undefined && patch.archived === undefined && patch.pinned === undefined && patch.project === undefined) throw new Error("SESSION_UPDATE_EMPTY");
     const title = patch.title?.trim(); if (patch.title !== undefined && (!title || title.length > 120)) throw new Error("SESSION_TITLE_INVALID");
+    const project = patch.project?.trim(); if (patch.project !== undefined && patch.project !== null && (!project || project.length > 60 || /[\u0000-\u001f\u007f]/.test(project))) throw new Error("SESSION_PROJECT_INVALID");
     const loaded = await this.load(recordId); if (!loaded) throw new Error("SESSION_NOT_FOUND");
     if (loaded.record.sourceKind === "panel") {
-      await updatePanelMetadata(this.dataRoot, loaded.record.agentId, recordId, current => ({ ...current, ...(title ? { title } : {}), ...(patch.archived !== undefined ? { archived: patch.archived } : {}) }));
+      await updatePanelMetadata(this.dataRoot, loaded.record.agentId, recordId, current => { const next = { ...current, ...(title ? { title } : {}), ...(patch.archived !== undefined ? { archived: patch.archived } : {}), ...(patch.pinned !== undefined ? { pinned: patch.pinned } : {}), ...(project ? { project } : {}) }; if (patch.project === null) delete next.project; return next; });
     } else {
       const match = loaded.record.sourceKind === "active" ? [loaded.record.sourceKey, undefined] : (() => { const parsed = RESET.exec(loaded.record.sourceKey); return [parsed?.[1], parsed?.[2]]; })();
       if (!match[0]) throw new Error("SESSION_SOURCE_INVALID");
       const identity: ReadonlySourceIdentity = { sourceKind: loaded.record.sourceKind, agentId: loaded.record.agentId, sourceSessionId: match[0], ...(match[1] ? { resetTimestamp: match[1] } : {}) };
-      await updateReadonlyMetadata(this.dataRoot, identity, current => ({ ...current, ...(title ? { title } : {}), ...(patch.archived !== undefined ? { archived: patch.archived } : {}) }));
+      await updateReadonlyMetadata(this.dataRoot, identity, current => { const next = { ...current, ...(title ? { title } : {}), ...(patch.archived !== undefined ? { archived: patch.archived } : {}), ...(patch.pinned !== undefined ? { pinned: patch.pinned } : {}), ...(project ? { project } : {}) }; if (patch.project === null) delete next.project; return next; });
     }
     const updated = (await this.sessions(undefined, null, true)).find(item => item.recordId === recordId); if (!updated) throw new Error("SESSION_NOT_FOUND"); return updated;
+  }
+
+  async deleteSession(recordId: string, confirmed: boolean): Promise<{ action: "deleted" | "hidden" }> {
+    if (!confirmed) throw new Error("SESSION_DELETE_CONFIRMATION_REQUIRED");
+    const loaded = await this.load(recordId); if (!loaded) throw new Error("SESSION_NOT_FOUND");
+    if (loaded.record.sourceKind === "panel") {
+      if (!loaded.record.archived) throw new Error("SESSION_NOT_ARCHIVED");
+      await deletePanelSession(this.dataRoot, loaded.record.agentId, recordId); return { action: "deleted" };
+    }
+    const match = loaded.record.sourceKind === "active" ? [loaded.record.sourceKey, undefined] : (() => { const parsed = RESET.exec(loaded.record.sourceKey); return [parsed?.[1], parsed?.[2]]; })();
+    if (!match[0]) throw new Error("SESSION_SOURCE_INVALID");
+    const identity: ReadonlySourceIdentity = { sourceKind: loaded.record.sourceKind, agentId: loaded.record.agentId, sourceSessionId: match[0], ...(match[1] ? { resetTimestamp: match[1] } : {}) };
+    await updateReadonlyMetadata(this.dataRoot, identity, current => ({ ...current, hidden: true })); return { action: "hidden" };
   }
 
   async fork(recordId: string, messageId: string): Promise<unknown> {
