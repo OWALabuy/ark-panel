@@ -1,4 +1,18 @@
 const SAFE_PROTOCOLS=new Set(["http:","https:","mailto:"]);
+const LANGUAGE_ALIASES={javascript:"js",jsx:"js",typescript:"ts",tsx:"ts",shell:"bash",sh:"bash",zsh:"bash",py:"python",yml:"yaml",html:"markup",xml:"markup",svg:"markup"};
+const LANGUAGE_LABELS={js:"JavaScript",ts:"TypeScript",json:"JSON",bash:"Shell",python:"Python",css:"CSS",markup:"HTML",sql:"SQL",yaml:"YAML",diff:"Diff"};
+const KEYWORDS={
+  js:new Set("as async await break case catch class const continue debugger default delete do else export extends false finally for from function get if import in instanceof let new null of return set static super switch this throw true try typeof undefined var void while with yield".split(" ")),
+  ts:new Set("abstract any as asserts async await bigint boolean break case catch class const constructor continue declare default delete do else enum export extends false finally for from function get if implements import in infer instanceof interface is keyof let module namespace never new null number object of override private protected public readonly require return satisfies set static string super switch symbol this throw true try type typeof undefined unique unknown var void while with yield".split(" ")),
+  python:new Set("and as assert async await break class continue def del elif else except False finally for from global if import in is lambda None nonlocal not or pass raise return True try while with yield".split(" ")),
+  bash:new Set("case do done elif else esac fi for function if in select then time until while".split(" ")),
+  sql:new Set("add all alter and any as asc begin between by case check column commit create database default delete desc distinct drop else end exists foreign from full grant group having in index inner insert into is join key left like limit not null on or order outer primary references right rollback row select set table then union unique update values view when where with".toUpperCase().split(" "))
+};
+function languageName(raw){const normalized=String(raw||"").toLowerCase().replace(/^language-/,"");return LANGUAGE_ALIASES[normalized]||normalized}
+function token(root,type,text){const node=document.createElement("span");node.className=`syntax-${type}`;node.textContent=text;root.append(node)}
+function highlightGeneric(root,text,language){const keywords=KEYWORDS[language],pattern=language==="python"||language==="bash"?/(\/\*[\s\S]*?\*\/|\/\/[^\n]*|#[^\n]*|--[^\n]*)|("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`)|(\b(?:0x[\da-f]+|\d+(?:\.\d+)?)\b)|([A-Za-z_$][\w$]*)/gi:/(\/\*[\s\S]*?\*\/|\/\/[^\n]*|--[^\n]*)|("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`)|(\b(?:0x[\da-f]+|\d+(?:\.\d+)?)\b)|([A-Za-z_$][\w$]*)/gi;let cursor=0,match;while((match=pattern.exec(text))){if(match.index>cursor)root.append(document.createTextNode(text.slice(cursor,match.index)));if(match[1])token(root,"comment",match[0]);else if(match[2])token(root,"string",match[0]);else if(match[3])token(root,"number",match[0]);else if(keywords?.has(language==="sql"?match[0].toUpperCase():match[0]))token(root,"keyword",match[0]);else root.append(document.createTextNode(match[0]));cursor=pattern.lastIndex}if(cursor<text.length)root.append(document.createTextNode(text.slice(cursor)))}
+function highlightMarkup(root,text){const pattern=/(<!--[\s\S]*?-->)|(<\/?)([\w:-]+)|([\w:-]+)(\s*=\s*)("[^"]*"|'[^']*')/g;let cursor=0,match;while((match=pattern.exec(text))){if(match.index>cursor)root.append(document.createTextNode(text.slice(cursor,match.index)));if(match[1])token(root,"comment",match[1]);else if(match[2]){token(root,"punctuation",match[2]);token(root,"tag",match[3])}else{token(root,"attribute",match[4]);root.append(document.createTextNode(match[5]));token(root,"string",match[6])}cursor=pattern.lastIndex}if(cursor<text.length)root.append(document.createTextNode(text.slice(cursor)))}
+function highlightCode(code,text,rawLanguage){const language=languageName(rawLanguage);code.dataset.language=language;if(language==="markup")highlightMarkup(code,text);else if(language==="json"||language==="yaml"||language==="css"||KEYWORDS[language])highlightGeneric(code,text,language);else if(language==="diff")for(const [index,line] of text.split("\n").entries()){if(index)code.append(document.createTextNode("\n"));token(code,line.startsWith("+")?"inserted":line.startsWith("-")?"deleted":"plain",line)}else code.textContent=text;return language}
 
 function appendInline(root,text){
   const pattern=/(`+)([\s\S]*?)\1|!\[([^\]]*)\]\(([^\s)]+)(?:\s+["'][^"']*["'])?\)|\[([^\]]+)\]\(([^\s)]+)(?:\s+["'][^"']*["'])?\)|\*\*([^*]+)\*\*|__([^_]+)__|~~([^~]+)~~|(?<!\*)\*([^*\n]+)\*(?!\*)|(?<!_)_([^_\n]+)_(?!_)/g;
@@ -32,8 +46,8 @@ function codeBlock(lines,start){
   return{end:index<lines.length?index+1:index,language:opening[2]||"",text:body.join("\n")};
 }
 
-function addCodeCopy(pre,text){
-  const wrap=document.createElement("div"),button=document.createElement("button");wrap.className="code-block";button.type="button";button.className="copy-code";button.textContent="复制代码";button.onclick=()=>copyText(text,button,"已复制");wrap.append(button,pre);return wrap;
+function addCodeCopy(pre,text,language){
+  const wrap=document.createElement("div"),button=document.createElement("button");wrap.className="code-block";if(language){const label=document.createElement("span");label.className="code-language";label.textContent=LANGUAGE_LABELS[language]||language;wrap.append(label)}button.type="button";button.className="copy-code";button.textContent="复制代码";button.onclick=()=>copyText(text,button,"已复制");wrap.append(button,pre);return wrap;
 }
 
 export async function copyText(text,button,success="已复制"){
@@ -49,7 +63,7 @@ export function renderMarkdown(text){
   while(index<lines.length){
     if(!lines[index].trim()){index++;continue}
     const fenced=codeBlock(lines,index);
-    if(fenced){const pre=document.createElement("pre"),code=document.createElement("code");if(fenced.language)code.dataset.language=fenced.language;code.textContent=fenced.text;pre.append(code);root.append(addCodeCopy(pre,fenced.text));index=fenced.end;continue}
+    if(fenced){const pre=document.createElement("pre"),code=document.createElement("code"),language=fenced.language?highlightCode(code,fenced.text,fenced.language):(code.textContent=fenced.text,"");pre.append(code);root.append(addCodeCopy(pre,fenced.text,language));index=fenced.end;continue}
     const heading=/^(#{1,6})\s+(.+)$/.exec(lines[index]);
     if(heading){const node=document.createElement(`h${heading[1].length}`);appendInline(node,heading[2]);root.append(node);index++;continue}
     if(/^>\s?/.test(lines[index])){const quote=document.createElement("blockquote"),parts=[];while(index<lines.length&&/^>\s?/.test(lines[index]))parts.push(lines[index++].replace(/^>\s?/,""));quote.append(renderMarkdown(parts.join("\n")));root.append(quote);continue}

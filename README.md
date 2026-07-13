@@ -34,14 +34,17 @@ Legend: ✅ available · 🚧 scheduled · 💡 candidate (not scheduled) · ⛔
 | Sessions | Full-text search and source/agent filtering | ✅ | Search includes archived sessions; the current view controls which results are shown |
 | Sessions | Rename, archive, and restore any session source | ✅ | Read-only sources use panel-owned metadata sidecars |
 | Sessions | Permanently delete panel sessions / hide read-only sessions | ✅ | Panel sessions require archive plus explicit confirmation; OpenClaw source files are never deleted |
-| Sessions | Pin and group sessions by project | ✅ | Stored only in panel metadata; works for panel-owned and read-only sources |
+| Sessions | Pin and group sessions by project | ✅ | Project groups can be collapsed locally; list items expose quick pin, archive, and export actions |
 | Branching | Fork from a valid message boundary | ✅ | Preserves tool-call groups and never mutates the source transcript |
 | Branching | Edit a user message and resend as a new branch | ✅ | The original branch remains available |
 | Messages | Safe Markdown rendering | ✅ | Headings, lists, quotes, tables, links, inline code and fenced code; raw HTML is not executed |
+| Messages | Fenced-code syntax highlighting | ✅ | Uses explicit language tags, displays the language, and safely falls back to plain text |
 | Messages | Copy a whole message or fenced code block | ✅ | Available directly in the conversation view |
 | Messages | Local timestamps | ✅ | Displayed using the browser's local time zone |
 | Messages | Export the current branch as Markdown | ✅ | Includes timestamps, thinking, tool calls and tool results without internal paths or metadata |
 | Messages | Thinking, tool calls, and tool results | ✅ | Structured, collapsible rendering including command output |
+| Composer | Per-session local drafts | ✅ | Browser-local only; restored after refresh and retained when sending fails |
+| Conversation | Long-thread scroll following | ✅ | Preserves the reading position and shows a new-message control when the user has scrolled up |
 | Generation | Run lifecycle, stop, retry, and idempotent sending | ✅ | SSE reports lifecycle events; completed message groups refresh atomically |
 | Generation | Token-by-token streaming | ⛔ | The current gateway integration does not promise incremental token output |
 | Context | Configurable context-budget protection | ✅ | Rejects oversized requests before generation instead of silently truncating history |
@@ -52,7 +55,7 @@ Legend: ✅ available · 🚧 scheduled · 💡 candidate (not scheduled) · ⛔
 | Memory | Store per-session `scratch` / `eligible` disposition | ✅ | Defaults to `scratch`; the control is not exposed in the UI yet |
 | Memory | Memory-disposition UI and scratch isolation during inference | 🚧 | Isolation behavior will be selected through `paneltest` runtime acceptance |
 | Operations | Backup, integrity verification, restore, health check, and systemd example | ✅ | Includes deployment smoke and fixture-based browser acceptance coverage |
-| Extras | Attachments/multimodal input and local drafts | 💡 | Recorded for future evaluation; not currently scheduled |
+| Extras | Attachments/multimodal input | 💡 | Recorded for future evaluation; not currently scheduled |
 
 The near-term order is memory disposition and isolation, then the long-context strategy with `/compact`. OpenClaw compatibility remains ongoing maintenance. Detailed constraints and acceptance criteria live in the [implementation specification](docs/implementation-spec.md).
 
