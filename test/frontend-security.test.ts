@@ -63,7 +63,9 @@ test("frontend renders untrusted metadata with DOM text nodes", async () => {
   assert.match(source,/calls\.get\(result\.callId\)/);
   assert.match(source,/call\.result=result/);
   assert.match(source,/block\.result\.isError/);
-  assert.match(source,/activeRun\.abort\(\)/);
+  assert.match(source,/controller\.abort\(\)/);
+  assert.match(source,/\/runs\/\$\{encodeURIComponent\(runId\)\}\/abort/);
+  assert.match(source,/streamDropped/);
   assert.match(source,/DRAFT_PREFIX="ark-panel:draft:v1:"/);
   assert.match(source,/localStorage\.setItem/);
   assert.match(source,/localStorage\.removeItem/);

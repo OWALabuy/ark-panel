@@ -6,7 +6,7 @@ import { mockAgents, mockConversation, mockSessions } from "./mock-data.js";
 import { ContextBudgetExceededError } from "../domain/context-budget.js";
 import { ForkError } from "../domain/fork.js";
 
-export interface GenerationApi { generate(recordId: string, message: string, signal: AbortSignal, runId: string, expectedRevision?: string): Promise<{ runId: string; entries: unknown[]; revision?: string }> }
+export interface GenerationApi { generate(recordId: string, message: string, signal: AbortSignal, runId: string, expectedRevision?: string): Promise<{ runId: string; entries: unknown[]; revision?: string }>; abort(runId: string): boolean }
 export interface CommandApi { dispatch(recordId: string, request: { command: string; args: string[] }): Promise<unknown> }
 export interface ReadApi {
   agents(): Promise<unknown[]>; sessions(agentId?: string, archived?: boolean): Promise<unknown[]>; conversation(recordId: string): Promise<unknown | null>;
@@ -101,6 +101,13 @@ export function createPanelServer(options: AppOptions) {
           const value = await body(req) as { message?: unknown }; if (typeof value.message !== "string" || !value.message.trim()) return fail(res, 400, "MESSAGE_REQUIRED", "消息不能为空", requestId);
           return send(res, 201, { data: await options.reads.editAndFork(decodeURIComponent(match[1]!), decodeURIComponent(match[2]!), value.message) });
         }
+        if (req.method === "POST" && /^\/api\/v1\/runs\/[^/]+\/abort$/.test(url.pathname)) {
+          if (!options.generation) return fail(res, 501, "GATEWAY_NOT_CONNECTED", "推理适配器尚未接入", requestId);
+          const runId = decodeURIComponent(url.pathname.slice("/api/v1/runs/".length, -"/abort".length));
+          if (!/^[0-9a-f-]{36}$/i.test(runId)) return fail(res, 400, "RUN_ID_INVALID", "runId 格式错误", requestId);
+          // 幂等：run 可能已完成或从未存在，一律返回 ok，只报告是否命中了进行中的 run。
+          return send(res, 200, { data: { aborted: options.generation.abort(runId) } });
+        }
         if (req.method === "POST" && url.pathname.endsWith("/messages")) {
           if (!options.generation) return send(res, 501, { error: { code: "GATEWAY_NOT_CONNECTED", message: "推理适配器尚未接入", requestId } });
           const match = /^\/api\/v1\/sessions\/([^/]+)\/messages$/.exec(url.pathname); if (!match) return fail(res, 404, "NOT_FOUND", "接口不存在", requestId);
@@ -110,17 +117,19 @@ export function createPanelServer(options: AppOptions) {
           if (value.revision !== undefined && typeof value.revision !== "string") return fail(res, 400, "REVISION_INVALID", "revision 格式错误", requestId);
           const retryKey = req.headers["idempotency-key"];
           if (retryKey !== undefined && (typeof retryKey !== "string" || !/^[0-9a-f-]{36}$/i.test(retryKey))) return fail(res, 400, "IDEMPOTENCY_KEY_INVALID", "Idempotency-Key 格式错误", requestId);
-          const controller = new AbortController(); req.once("aborted", () => controller.abort()); res.once("close", () => { if (!res.writableEnded) controller.abort(); });
           res.writeHead(200, { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-store", connection: "keep-alive", "x-accel-buffering": "no" });
-          const event = (name: string, data: unknown) => res.write(`event: ${name}\ndata: ${JSON.stringify(data)}\n\n`);
-          const runId = typeof retryKey === "string" ? retryKey : crypto.randomUUID(); event("run.started", { runId });
+          // 连接断开只停止向该客户端推流，不中断推理：run 由 generation 按 runId 独立持有，
+          // 仅显式 /runs/:runId/abort 接口能停止它。因此这里不再把连接关闭绑定到 abort。
+          const event = (name: string, data: unknown) => { if (!res.writableEnded && !res.destroyed) res.write(`event: ${name}\ndata: ${JSON.stringify(data)}\n\n`); };
+          const runId = typeof retryKey === "string" ? retryKey : crypto.randomUUID();
           const heartbeat = setInterval(() => { if (!res.destroyed) res.write(": heartbeat\n\n"); }, 15_000); heartbeat.unref(); res.once("close", () => clearInterval(heartbeat));
+          event("run.started", { runId });
           try {
-            const result = await options.generation.generate(targetRecordId, value.message, controller.signal, runId, typeof value.revision === "string" ? value.revision : undefined);
+            const result = await options.generation.generate(targetRecordId, value.message, new AbortController().signal, runId, typeof value.revision === "string" ? value.revision : undefined);
             if (result.runId !== runId) throw new Error("RUN_ID_MISMATCH");
             event("run.completed", { runId, entries: result.entries, revision: result.revision });
           } catch (error) {
-            const aborted = controller.signal.aborted || (error instanceof Error && error.message === "BRIDGE_ABORTED");
+            const aborted = error instanceof Error && error.message === "BRIDGE_ABORTED";
             const known = error instanceof Error && ["SESSION_BUSY", "REVISION_CONFLICT", "PANEL_SESSION_NOT_FOUND", "RUNTIME_NOT_CONFIGURED", "IDEMPOTENCY_KEY_REUSED", "SLASH_COMMANDS_UNSUPPORTED"].includes(error.message) ? error.message : error instanceof ContextBudgetExceededError ? error.code : "RUN_FAILED";
             if (!aborted && known === "RUN_FAILED") {
               const detail = error instanceof Error ? error.stack ?? error.message : String(error);

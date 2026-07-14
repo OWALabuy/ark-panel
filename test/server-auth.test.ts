@@ -9,9 +9,9 @@ import { createPanelServer, type CommandApi, type ReadApi } from "../src/server/
 import { ContextBudgetExceededError } from "../src/domain/context-budget.js";
 import { ForkError } from "../src/domain/fork.js";
 
-async function fixture(generation?: { generate(recordId: string, message: string, signal: AbortSignal, runId: string): Promise<{ runId: string; entries: unknown[] }> }, reads?: ReadApi, commands?: CommandApi) {
+async function fixture(generation?: { generate(recordId: string, message: string, signal: AbortSignal, runId: string): Promise<{ runId: string; entries: unknown[] }>; abort?(runId: string): boolean }, reads?: ReadApi, commands?: CommandApi) {
   const publicDir = await mkdtemp(join(tmpdir(), "panel-web-")); await writeFile(join(publicDir, "index.html"), "ok");
-  const server = createPanelServer({ auth: { username: "owl", passwordHash: passwordHash("correct", "0011223344556677"), sessionSecret: "test-secret-long-enough" }, publicDir, mock: reads ? false : true, ...(generation ? { generation } : {}), ...(reads ? { reads } : {}), ...(commands ? { commands } : {}) });
+  const server = createPanelServer({ auth: { username: "owl", passwordHash: passwordHash("correct", "0011223344556677"), sessionSecret: "test-secret-long-enough" }, publicDir, mock: reads ? false : true, ...(generation ? { generation: { abort: () => false, ...generation } } : {}), ...(reads ? { reads } : {}), ...(commands ? { commands } : {}) });
   server.listen(0, "127.0.0.1"); await once(server, "listening");
   const address = server.address(); if (!address || typeof address === "string") throw new Error("no address");
   return { server, base: `http://127.0.0.1:${address.port}` };
@@ -57,7 +57,7 @@ test("结构化命令接口受登录和 CSRF 保护并委托命令派发器", as
 test("fixed Host policy, logout, request limit, and static symlink boundary", async t => {
   const publicDir=await mkdtemp(join(tmpdir(),"panel-web-secure-")), outside=join(await mkdtemp(join(tmpdir(),"panel-outside-")),"secret.txt"); await writeFile(join(publicDir,"index.html"),"ok"); await writeFile(outside,"secret"); await symlink(outside,join(publicDir,"escape.txt"));
   const auth={username:"owl",passwordHash:passwordHash("correct","0011223344556677"),sessionSecret:"test-secret-long-enough"};
-  const allowedHosts:string[]=[],publicOrigins:string[]=[]; const server=createPanelServer({auth,publicDir,allowedHosts,publicOrigins,generation:{async generate(_recordId,_message,_signal,runId){return {runId,entries:[]}}}}); server.listen(0,"127.0.0.1"); await once(server,"listening"); t.after(()=>server.close()); const address=server.address(); if(!address||typeof address==="string")throw new Error("no address"); const base=`http://127.0.0.1:${address.port}`;
+  const allowedHosts:string[]=[],publicOrigins:string[]=[]; const server=createPanelServer({auth,publicDir,allowedHosts,publicOrigins,generation:{async generate(_recordId,_message,_signal,runId){return {runId,entries:[]}},abort(){return false}}}); server.listen(0,"127.0.0.1"); await once(server,"listening"); t.after(()=>server.close()); const address=server.address(); if(!address||typeof address==="string")throw new Error("no address"); const base=`http://127.0.0.1:${address.port}`;
   assert.equal((await fetch(`${base}/`)).status,421); allowedHosts.push(`127.0.0.1:${address.port}`,"panel.test"); publicOrigins.push(base,"http://panel.test");
   assert.equal((await fetch(`${base}/escape.txt`,{headers:{host:"panel.test"}})).status,404);
   const login=await fetch(`${base}/api/v1/auth/login`,{method:"POST",headers:{host:"panel.test",origin:"http://panel.test","content-type":"application/json"},body:JSON.stringify({username:"owl",password:"correct"})}); const value=await login.json() as {data:{csrfToken:string}}; const cookieHeader=login.headers.getSetCookie().map(v=>v.split(";",1)[0]).join("; ");
@@ -106,10 +106,26 @@ test("上下文超预算通过 SSE 返回稳定错误码和中文说明", async 
   assert.match(events,/"code":"CONTEXT_BUDGET_EXCEEDED"/);assert.match(events,/第一版不会自动删减/);assert.match(events,/"estimatedTokens":120/);
 });
 
-test("SSE 客户端断线会触发 AbortSignal 且不会伪报完成", async t => {
-  let observed!:()=>void;const seen=new Promise<void>(resolve=>{observed=resolve});let aborted=false;
-  const x=await fixture({async generate(_recordId,_message,signal,runId){observed();await new Promise<void>((_resolve,reject)=>signal.addEventListener("abort",()=>{aborted=true;reject(new Error("BRIDGE_ABORTED"))},{once:true}));return{runId,entries:[]}}});t.after(()=>x.server.close());
+test("SSE 客户端断线不再中断推理，run 由 generation 独立跑完", async t => {
+  let observed!:()=>void;const seen=new Promise<void>(resolve=>{observed=resolve});let aborted=false,completed=false;let release!:()=>void;const gate=new Promise<void>(resolve=>{release=resolve});
+  const x=await fixture({async generate(_recordId,_message,signal,runId){observed();signal.addEventListener("abort",()=>{aborted=true},{once:true});await gate;completed=true;return{runId,entries:[]}}});t.after(()=>x.server.close());
   const login=await fetch(`${x.base}/api/v1/auth/login`,{method:"POST",headers:{origin:x.base,"content-type":"application/json"},body:JSON.stringify({username:"owl",password:"correct"})});const body=await login.json() as{data:{csrfToken:string}};const cookies=login.headers.getSetCookie().map(v=>v.split(";",1)[0]).join("; ");
   const controller=new AbortController();const response=await fetch(`${x.base}/api/v1/sessions/record/messages`,{method:"POST",signal:controller.signal,headers:{cookie:cookies,origin:x.base,"x-csrf-token":body.data.csrfToken,"content-type":"application/json"},body:JSON.stringify({message:"disconnect fixture"})});
-  await seen;controller.abort();await assert.rejects(response.text(),/abort/i);for(let i=0;i<20&&!aborted;i++)await new Promise(resolve=>setTimeout(resolve,10));assert.equal(aborted,true);
+  await seen;controller.abort();await assert.rejects(response.text(),/abort/i);
+  for(let i=0;i<20;i++)await new Promise(resolve=>setTimeout(resolve,10));assert.equal(aborted,false,"断线不应触发 abort");
+  release();for(let i=0;i<20&&!completed;i++)await new Promise(resolve=>setTimeout(resolve,10));assert.equal(completed,true,"推理应在断线后继续跑完");
+});
+
+test("显式 /runs/:runId/abort 接口才中断进行中的 run", async t => {
+  let observed!:()=>void;const seen=new Promise<void>(resolve=>{observed=resolve});let aborted=false;const controllers=new Map<string,AbortController>();
+  const x=await fixture({async generate(_recordId,_message,_signal,runId){const controller=new AbortController();controllers.set(runId,controller);observed();try{await new Promise<void>((_resolve,reject)=>controller.signal.addEventListener("abort",()=>{aborted=true;reject(new Error("BRIDGE_ABORTED"))},{once:true}));return{runId,entries:[]}}finally{controllers.delete(runId)}},abort(runId){const controller=controllers.get(runId);if(!controller)return false;controller.abort();return true}});t.after(()=>x.server.close());
+  const login=await fetch(`${x.base}/api/v1/auth/login`,{method:"POST",headers:{origin:x.base,"content-type":"application/json"},body:JSON.stringify({username:"owl",password:"correct"})});const body=await login.json() as{data:{csrfToken:string}};const cookies=login.headers.getSetCookie().map(v=>v.split(";",1)[0]).join("; ");
+  const runId="99999999-9999-4999-8999-999999999999";
+  const response=fetch(`${x.base}/api/v1/sessions/record/messages`,{method:"POST",headers:{cookie:cookies,origin:x.base,"x-csrf-token":body.data.csrfToken,"content-type":"application/json","idempotency-key":runId},body:JSON.stringify({message:"abort fixture"})});
+  await seen;
+  const abortResponse=await fetch(`${x.base}/api/v1/runs/${runId}/abort`,{method:"POST",headers:{cookie:cookies,origin:x.base,"x-csrf-token":body.data.csrfToken,"content-type":"application/json"},body:"{}"});
+  assert.equal(abortResponse.status,200);assert.equal((await abortResponse.json()).data.aborted,true);
+  const events=await(await response).text();assert.match(events,/event: run.aborted/);assert.equal(aborted,true);
+  const missResponse=await fetch(`${x.base}/api/v1/runs/${runId}/abort`,{method:"POST",headers:{cookie:cookies,origin:x.base,"x-csrf-token":body.data.csrfToken,"content-type":"application/json"},body:"{}"});
+  assert.equal((await missResponse.json()).data.aborted,false,"已结束的 run 再次 abort 应幂等返回 false");
 });
