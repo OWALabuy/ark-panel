@@ -22,7 +22,7 @@ export class BridgeService {
   }
 
   async cleanupOrphanedSession(request: BridgeOrphanCleanupRequest): Promise<string[]> {
-    await this.client.abort(request.sessionKey, request.gatewayRunId).catch(() => undefined);
+    await this.client.abort(request.sessionKey, request.gatewayRunId, request.sessionId);
     return await unregisterAndClean(this.client, { runtimeAgentId: request.runtimeAgentId, sessionId: request.sessionId,
       sessionKey: request.sessionKey, runtimeSessionsRoot: this.allowedRuntimeRoots.get(request.runtimeAgentId) ?? "",
       allowedRuntimeRoots: this.allowedRuntimeRoots });
@@ -31,8 +31,8 @@ export class BridgeService {
   async generate(request: BridgeRequest): Promise<BridgeResult> {
     assertSupportedVersion(await this.client.version());
     let created: CreatedSession | undefined; let runId: string | undefined; let primaryError: unknown;
-    let abortPromise: Promise<void> | undefined; let entriesStaged = false;
-    const abortCreated = (): Promise<void> => abortPromise ??= created ? this.client.abort(created.sessionKey, runId) : Promise.resolve();
+    let abortPromise: Promise<void> | undefined; let entriesStaged = false; let cleanupSafe = true; let sendAttempted = false;
+    const abortCreated = (): Promise<void> => abortPromise ??= created ? this.client.abort(created.sessionKey, runId, created.sessionId) : Promise.resolve();
     try {
       created = await this.client.createSession(request.runtimeAgentId);
       await request.lifecycle?.({ type: "temporary_session_created", runtimeAgentId: request.runtimeAgentId,
@@ -44,14 +44,14 @@ export class BridgeService {
         await this.client.applySessionOverrides(created.sessionKey, request.overrides);
       }
       if (request.signal?.aborted) throw new Error("BRIDGE_ABORTED");
-      ({ runId } = await this.client.send(created.sessionKey, request.latestUserMessage, request.idempotencyKey));
+      sendAttempted = true; ({ runId } = await this.client.send(created.sessionKey, request.latestUserMessage, request.idempotencyKey));
       const abort = () => { void abortCreated().catch(() => undefined); };
       request.signal?.addEventListener("abort", abort, { once: true });
       try {
         if (request.signal?.aborted) { await abortCreated().catch(() => undefined); throw new Error("BRIDGE_ABORTED"); }
         await request.lifecycle?.({ type: "gateway_send_accepted", gatewayRunId: runId });
         if (request.signal?.aborted) { await abortCreated().catch(() => undefined); throw new Error("BRIDGE_ABORTED"); }
-        await this.client.waitForCompletion(created.sessionId, runId);
+        await this.client.waitForCompletion(created.sessionId, runId, request.signal);
       }
       finally { request.signal?.removeEventListener("abort", abort); }
       if (request.signal?.aborted) throw new Error("BRIDGE_ABORTED");
@@ -62,10 +62,20 @@ export class BridgeService {
       return { runId, sessionId: created.sessionId, entries };
     } catch (error) {
       primaryError = error;
-      if (created) await abortCreated().catch(() => undefined);
+      if (created) {
+        try { await abortCreated(); }
+        catch (abortError) {
+          cleanupSafe = !sendAttempted;
+          if (!cleanupSafe) await request.cleanupFailed?.().catch(() => undefined);
+          if (error instanceof Error && error.message === "BRIDGE_ABORTED") {
+            if (abortError instanceof Error && abortError.message === "GATEWAY_ABORT_RELEASE_TIMEOUT") throw abortError;
+            throw new Error("RUN_ABORT_UNCONFIRMED");
+          }
+        }
+      }
       throw error;
     } finally {
-      if (created) {
+      if (created && cleanupSafe) {
         try {
           await unregisterAndClean(this.client, { runtimeAgentId: request.runtimeAgentId, sessionId: created.sessionId,
             sessionKey: created.sessionKey, runtimeSessionsRoot: this.allowedRuntimeRoots.get(request.runtimeAgentId) ?? "",

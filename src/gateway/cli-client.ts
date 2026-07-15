@@ -1,23 +1,56 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { open, readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import type { CommandArgument, CommandsCatalog, CreatedSession, GatewayClient, GatewayCommand, GatewayStatus, ModelsCatalog, OpenClawModel, SessionOverrides } from "./adapter.js";
 
-interface CliOptions { executable?: string; sessionsRoots: ReadonlyMap<string, string>; requestTimeoutMs?: number; runTimeoutMs?: number }
+interface CliOptions {
+  executable?: string;
+  sessionsRoots: ReadonlyMap<string, string>;
+  requestTimeoutMs?: number;
+  /** Maximum execution time passed to OpenClaw. */
+  gatewayRunTimeoutMs?: number;
+  /** Extra time for the terminal trajectory event to become visible. */
+  watcherGraceMs?: number;
+  /** Kept for integration tools compiled against the old option name. */
+  runTimeoutMs?: number;
+  pollIntervalMs?: number;
+  commandRunner?: (executable: string, args: string[], timeoutMs: number) => Promise<string>;
+}
+
+export type GatewayRunErrorCode = "GATEWAY_RUN_TIMEOUT" | "GATEWAY_RUN_ABORTED" | "GATEWAY_RUN_FAILED" |
+  "GATEWAY_RUN_NOT_STARTED" | "BRIDGE_WATCH_TIMEOUT" | "GATEWAY_ABORT_RELEASE_TIMEOUT";
+
+export interface GatewayRunDiagnostics {
+  sessionId: string;
+  gatewayRunId: string;
+  waitedMs: number;
+  gatewayRunTimeoutMs: number;
+  watcherGraceMs: number;
+  lastObserved?: { type: string; status?: string; ts?: string; seq?: number; aborted?: boolean; timedOut?: boolean };
+}
+
+export class GatewayRunError extends Error {
+  constructor(readonly code: GatewayRunErrorCode, readonly diagnostics: GatewayRunDiagnostics) { super(code); this.name = "GatewayRunError"; }
+}
 
 function runCommand(executable: string, args: string[], timeoutMs: number): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = spawn(executable, args, { stdio: ["ignore", "pipe", "pipe"], shell: false, env: process.env });
-    const stdout: Buffer[] = []; const stderr: Buffer[] = [];
-    const timer = setTimeout(() => { child.kill("SIGTERM"); reject(new Error("OPENCLAW_CLI_TIMEOUT")); }, timeoutMs);
+    const stdout: Buffer[] = []; let settled = false; let killTimer: NodeJS.Timeout | undefined;
+    const finish = (action: () => void) => { if (settled) return; settled = true; action(); };
+    const timer = setTimeout(() => {
+      child.kill("SIGTERM"); killTimer = setTimeout(() => { if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL"); }, 1_000); killTimer.unref();
+      finish(() => reject(new Error("OPENCLAW_CLI_TIMEOUT")));
+    }, timeoutMs);
     child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
-    child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
-    child.once("error", (error) => { clearTimeout(timer); reject(error); });
+    child.stderr.resume();
+    child.once("error", (error) => { clearTimeout(timer); if (killTimer) clearTimeout(killTimer); finish(() => reject(error)); });
     child.once("close", (code) => {
-      clearTimeout(timer);
-      if (code === 0) resolve(Buffer.concat(stdout).toString("utf8"));
-      else reject(new Error(`OPENCLAW_CLI_FAILED (${code}): ${Buffer.concat(stderr).toString("utf8").trim()}`));
+      clearTimeout(timer); if (killTimer) clearTimeout(killTimer);
+      if (code === 0) finish(() => resolve(Buffer.concat(stdout).toString("utf8")));
+      else finish(() => reject(new Error(`OPENCLAW_CLI_FAILED (${code})`)));
     });
   });
 }
@@ -87,35 +120,90 @@ export function sessionPatchParams(sessionKey: string, overrides: SessionOverrid
     ...(overrides.reasoningLevel ? { reasoningLevel: overrides.reasoningLevel } : {}) };
 }
 
-interface TrajectoryEnd {
+interface TrajectoryEntry {
   runId?: unknown;
   type?: unknown;
-  data?: { status?: unknown };
+  ts?: unknown;
+  seq?: unknown;
+  data?: { status?: unknown; aborted?: unknown; externalAbort?: unknown; timedOut?: unknown; idleTimedOut?: unknown;
+    timedOutDuringCompaction?: unknown; timedOutDuringToolExecution?: unknown };
 }
 
 export function completedRunStatus(jsonl: string, runId: string): string | undefined {
+  return trajectoryRunState(jsonl, runId).terminalStatus;
+}
+
+export interface TrajectoryRunState {
+  seen: boolean;
+  terminalStatus?: string;
+  lastObserved?: GatewayRunDiagnostics["lastObserved"];
+}
+
+interface TrajectoryTracker { offset: number; remainder: string; decoder: StringDecoder; state: TrajectoryRunState }
+
+async function pollTrajectory(path: string, runId: string, tracker: TrajectoryTracker, includeRemainder = false): Promise<void> {
+  let handle;
+  try {
+    handle = await open(path, "r"); const stat = await handle.stat();
+    if (stat.size < tracker.offset) { tracker.offset = 0; tracker.remainder = ""; tracker.decoder = new StringDecoder("utf8"); tracker.state = { seen: false }; }
+    while (tracker.offset < stat.size) {
+      const buffer = Buffer.alloc(Math.min(64 * 1024, stat.size - tracker.offset));
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, tracker.offset); if (!bytesRead) break; tracker.offset += bytesRead;
+      const chunks = (tracker.remainder + tracker.decoder.write(buffer.subarray(0, bytesRead))).split("\n"); tracker.remainder = chunks.pop() ?? "";
+      for (const line of chunks) mergeTrajectoryState(tracker.state, trajectoryRunState(line, runId));
+    }
+    if (includeRemainder) { tracker.remainder += tracker.decoder.end(); if (tracker.remainder) mergeTrajectoryState(tracker.state, trajectoryRunState(tracker.remainder, runId)); }
+  } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  finally { await handle?.close(); }
+}
+
+function mergeTrajectoryState(target: TrajectoryRunState, next: TrajectoryRunState): void {
+  if (!next.seen) return; target.seen = true;
+  if (next.lastObserved) target.lastObserved = next.lastObserved;
+  if (next.terminalStatus) target.terminalStatus = next.terminalStatus;
+}
+
+export function trajectoryRunState(jsonl: string, runId: string): TrajectoryRunState {
+  let seen = false; let lastObserved: GatewayRunDiagnostics["lastObserved"];
   for (const line of jsonl.trimEnd().split("\n").reverse()) {
     if (!line.trim()) continue;
-    let entry: TrajectoryEnd;
-    try { entry = JSON.parse(line) as TrajectoryEnd; } catch { continue; }
-    if (entry.type === "session.ended" && entry.runId === runId && typeof entry.data?.status === "string") return entry.data.status;
+    let entry: TrajectoryEntry;
+    try { entry = JSON.parse(line) as TrajectoryEntry; } catch { continue; }
+    if (entry.runId !== runId || typeof entry.type !== "string") continue;
+    seen = true;
+    const data = entry.data;
+    lastObserved ??= { type: entry.type, ...(typeof data?.status === "string" ? { status: data.status } : {}),
+      ...(typeof entry.ts === "string" ? { ts: entry.ts } : {}), ...(typeof entry.seq === "number" ? { seq: entry.seq } : {}),
+      ...([data?.aborted, data?.externalAbort].some(value => typeof value === "boolean") ? { aborted: data?.aborted === true || data?.externalAbort === true } : {}),
+      ...([data?.timedOut, data?.idleTimedOut, data?.timedOutDuringCompaction, data?.timedOutDuringToolExecution].some(value => typeof value === "boolean") ?
+        { timedOut: data?.timedOut === true || data?.idleTimedOut === true || data?.timedOutDuringCompaction === true || data?.timedOutDuringToolExecution === true } : {}) };
+    if (entry.type === "session.ended" && typeof data?.status === "string") return { seen, terminalStatus: data.status, lastObserved };
   }
-  return undefined;
+  return { seen, ...(lastObserved ? { lastObserved } : {}) };
 }
 
 export class OpenClawCliClient implements GatewayClient {
-  readonly executable: string; readonly sessionsRoots: ReadonlyMap<string, string>; readonly requestTimeoutMs: number; readonly runTimeoutMs: number;
+  readonly executable: string; readonly sessionsRoots: ReadonlyMap<string, string>; readonly requestTimeoutMs: number;
+  readonly gatewayRunTimeoutMs: number; readonly watcherGraceMs: number; readonly pollIntervalMs: number;
   private readonly keysBySessionId = new Map<string, string>();
+  private readonly sessionIdsByKey = new Map<string, string>();
+  private readonly commandRunner: (executable: string, args: string[], timeoutMs: number) => Promise<string>;
   constructor(options: CliOptions) {
     this.executable = options.executable ?? "openclaw"; this.sessionsRoots = options.sessionsRoots;
-    this.requestTimeoutMs = options.requestTimeoutMs ?? 15_000; this.runTimeoutMs = options.runTimeoutMs ?? 120_000;
+    this.requestTimeoutMs = options.requestTimeoutMs ?? 15_000;
+    this.commandRunner = options.commandRunner ?? runCommand;
+    this.gatewayRunTimeoutMs = options.gatewayRunTimeoutMs ?? options.runTimeoutMs ?? 30 * 60_000;
+    this.watcherGraceMs = options.watcherGraceMs ?? 30_000; this.pollIntervalMs = options.pollIntervalMs ?? 500;
+    for (const [name, value] of [["gatewayRunTimeoutMs", this.gatewayRunTimeoutMs], ["watcherGraceMs", this.watcherGraceMs], ["pollIntervalMs", this.pollIntervalMs]] as const) {
+      if (!Number.isInteger(value) || value < 1) throw new Error(`${name} 必须是正整数`);
+    }
   }
   private async call<T>(method: string, params: unknown, timeout = this.requestTimeoutMs): Promise<T> {
-    const output = await runCommand(this.executable, ["gateway", "call", method, "--json", "--timeout", String(timeout), "--params", payload(params)], timeout + 2_000);
+    const output = await this.commandRunner(this.executable, ["gateway", "call", method, "--json", "--timeout", String(timeout), "--params", payload(params)], timeout + 2_000);
     return JSON.parse(output) as T;
   }
   async version(): Promise<string> {
-    const output = await runCommand(this.executable, ["--version"], this.requestTimeoutMs);
+    const output = await this.commandRunner(this.executable, ["--version"], this.requestTimeoutMs);
     const match = /OpenClaw\s+(\d+\.\d+\.\d+)/.exec(output);
     if (!match) throw new Error("无法识别 OpenClaw 版本"); return match[1]!;
   }
@@ -123,10 +211,11 @@ export class OpenClawCliClient implements GatewayClient {
     const root = this.sessionsRoots.get(runtimeAgentId); if (!root) throw new Error("runtime agent 不在 allowlist");
     const localKey = `panel-${randomUUID()}`; const sessionKey = `agent:${runtimeAgentId}:${localKey}`;
     await this.call("sessions.create", { key: localKey, agentId: runtimeAgentId, label: "panel bridge" });
-    const listed = JSON.parse(await runCommand(this.executable, ["sessions", "--agent", runtimeAgentId, "--json"], this.requestTimeoutMs)) as { sessions?: Array<{ key?: string; sessionId?: string }> };
+    const listed = JSON.parse(await this.commandRunner(this.executable, ["sessions", "--agent", runtimeAgentId, "--json"], this.requestTimeoutMs)) as { sessions?: Array<{ key?: string; sessionId?: string }> };
     const found = listed.sessions?.find((session) => session.key === localKey || session.key === sessionKey);
     if (!found?.sessionId) throw new Error("sessions.create 后找不到 sessionId");
     this.keysBySessionId.set(found.sessionId, sessionKey);
+    this.sessionIdsByKey.set(sessionKey, found.sessionId);
     return { sessionId: found.sessionId, sessionKey, transcriptPath: join(root, `${found.sessionId}.jsonl`) };
   }
   async applySessionOverrides(sessionKey: string, overrides: SessionOverrides): Promise<void> {
@@ -139,36 +228,83 @@ export class OpenClawCliClient implements GatewayClient {
     return parseGatewayStatus(await this.call<unknown>("status", {}));
   }
   async listModels(): Promise<ModelsCatalog> {
-    const output = await runCommand(this.executable, ["models", "list", "--json"], this.requestTimeoutMs);
+    const output = await this.commandRunner(this.executable, ["models", "list", "--json"], this.requestTimeoutMs);
     return parseModelsCatalog(JSON.parse(output) as unknown);
   }
   async send(sessionKey: string, message: string, idempotencyKey: string): Promise<{ runId: string }> {
-    return await this.call("sessions.send", { key: sessionKey, agentId: sessionKey.split(":")[1], message, timeoutMs: this.runTimeoutMs, idempotencyKey });
+    return await this.call("sessions.send", { key: sessionKey, agentId: sessionKey.split(":")[1], message, timeoutMs: this.gatewayRunTimeoutMs, idempotencyKey });
   }
-  async waitForCompletion(sessionId: string, runId: string): Promise<void> {
+  async waitForCompletion(sessionId: string, runId: string, signal?: AbortSignal): Promise<void> {
     const key = this.keysBySessionId.get(sessionId); if (!key) throw new Error("未知 sessionId");
     const agentId = key.split(":")[1];
     const root = agentId ? this.sessionsRoots.get(agentId) : undefined;
     if (!root) throw new Error("runtime agent 不在 allowlist");
     const trajectoryPath = join(root, `${sessionId}.trajectory.jsonl`);
-    const started = Date.now();
-    while (Date.now() - started < this.runTimeoutMs) {
-      let status: string | undefined;
-      try { status = completedRunStatus(await readFile(trajectoryPath, "utf8"), runId); }
-      catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      }
-      if (status === "success") return;
-      if (status) throw new Error(`BRIDGE_RUN_${status.toUpperCase()}`);
-      await new Promise((resolve) => setTimeout(resolve, 500));
+    const started = Date.now(), deadline = started + this.gatewayRunTimeoutMs + this.watcherGraceMs;
+    const tracker: TrajectoryTracker = { offset: 0, remainder: "", decoder: new StringDecoder("utf8"), state: { seen: false } };
+    while (Date.now() < deadline) {
+      if (signal?.aborted) throw new Error("BRIDGE_ABORTED");
+      await pollTrajectory(trajectoryPath, runId, tracker);
+      if (tracker.state.terminalStatus === "success") return;
+      if (tracker.state.terminalStatus) throw this.runError(tracker.state, sessionId, runId, Date.now() - started);
+      await new Promise((resolve) => setTimeout(resolve, this.pollIntervalMs));
     }
-    throw new Error("BRIDGE_RUN_TIMEOUT");
+    if (signal?.aborted) throw new Error("BRIDGE_ABORTED");
+    await pollTrajectory(trajectoryPath, runId, tracker, true);
+    if (tracker.state.terminalStatus === "success") return;
+    if (tracker.state.terminalStatus) throw this.runError(tracker.state, sessionId, runId, Date.now() - started);
+    throw new GatewayRunError(tracker.state.seen ? "BRIDGE_WATCH_TIMEOUT" : "GATEWAY_RUN_NOT_STARTED",
+      this.diagnostics(tracker.state, sessionId, runId, Date.now() - started));
   }
-  async abort(sessionKey: string, runId?: string): Promise<void> {
-    await this.call("sessions.abort", { key: sessionKey, ...(runId ? { runId } : {}) });
+  async abort(sessionKey: string, runId?: string, persistedSessionId?: string): Promise<void> {
+    const response = await this.abortRpc(sessionKey, runId);
+    const sessionId = persistedSessionId ?? this.sessionIdsByKey.get(sessionKey);
+    const effectiveRunId = runId ?? (typeof response.abortedRunId === "string" ? response.abortedRunId : undefined);
+    if (sessionId && effectiveRunId && response.status === "aborted") {
+      await this.waitForTerminalRelease(sessionId, effectiveRunId);
+      await this.waitForInactive(sessionKey, effectiveRunId, sessionId);
+    }
   }
   async deleteSession(sessionKey: string): Promise<void> {
     const pieces = sessionKey.split(":"); const agentId = pieces[1];
     await this.call("sessions.delete", { key: sessionKey, agentId, deleteTranscript: true, emitLifecycleHooks: false });
+    const sessionId = this.sessionIdsByKey.get(sessionKey); if (sessionId) this.keysBySessionId.delete(sessionId); this.sessionIdsByKey.delete(sessionKey);
+  }
+
+  private diagnostics(state: TrajectoryRunState, sessionId: string, runId: string, waitedMs: number): GatewayRunDiagnostics {
+    return { sessionId, gatewayRunId: runId, waitedMs, gatewayRunTimeoutMs: this.gatewayRunTimeoutMs,
+      watcherGraceMs: this.watcherGraceMs, ...(state.lastObserved ? { lastObserved: state.lastObserved } : {}) };
+  }
+  private runError(state: TrajectoryRunState, sessionId: string, runId: string, waitedMs: number): GatewayRunError {
+    const observed = state.lastObserved;
+    const code: GatewayRunErrorCode = observed?.timedOut ? "GATEWAY_RUN_TIMEOUT" : observed?.aborted || ["aborted", "interrupted"].includes(state.terminalStatus ?? "") ?
+      "GATEWAY_RUN_ABORTED" : "GATEWAY_RUN_FAILED";
+    return new GatewayRunError(code, this.diagnostics(state, sessionId, runId, waitedMs));
+  }
+  private async waitForTerminalRelease(sessionId: string, runId: string): Promise<void> {
+    const key = this.keysBySessionId.get(sessionId), agentId = key?.split(":")[1], root = agentId ? this.sessionsRoots.get(agentId) : undefined;
+    if (!root) return;
+    const path = join(root, `${sessionId}.trajectory.jsonl`), started = Date.now(), deadline = started + this.watcherGraceMs;
+    const tracker: TrajectoryTracker = { offset: 0, remainder: "", decoder: new StringDecoder("utf8"), state: { seen: false } };
+    while (Date.now() < deadline) {
+      await pollTrajectory(path, runId, tracker); if (tracker.state.terminalStatus) return;
+      await new Promise(resolve => setTimeout(resolve, this.pollIntervalMs));
+    }
+    await pollTrajectory(path, runId, tracker, true); if (tracker.state.terminalStatus) return;
+    throw new GatewayRunError("GATEWAY_ABORT_RELEASE_TIMEOUT", this.diagnostics(tracker.state, sessionId, runId, Date.now() - started));
+  }
+  private async abortRpc(sessionKey: string, runId?: string): Promise<Record<string, unknown>> {
+    const response = object(await this.call<unknown>("sessions.abort", { key: sessionKey, ...(runId ? { runId } : {}) }), "ABORT_RESPONSE");
+    if (response.ok !== true || !["aborted", "no-active-run"].includes(String(response.status))) throw new Error("OPENCLAW_INVALID_ABORT_RESPONSE");
+    if (response.status === "aborted" && runId && response.abortedRunId !== runId) throw new Error("OPENCLAW_ABORT_RUN_MISMATCH");
+    return response;
+  }
+  private async waitForInactive(sessionKey: string, runId: string, sessionId: string): Promise<void> {
+    const started = Date.now(), deadline = started + this.watcherGraceMs;
+    while (Date.now() < deadline) {
+      const response = await this.abortRpc(sessionKey, runId); if (response.status === "no-active-run") return;
+      await new Promise(resolve => setTimeout(resolve, this.pollIntervalMs));
+    }
+    throw new GatewayRunError("GATEWAY_ABORT_RELEASE_TIMEOUT", this.diagnostics({ seen: true }, sessionId, runId, Date.now() - started));
   }
 }

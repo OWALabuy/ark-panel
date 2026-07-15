@@ -86,3 +86,14 @@ test("frontend renders untrusted metadata with DOM text nodes", async () => {
   assert.match(source,/sourceSession=activeSession,sourceRevision=activeRevision/);
   assert.doesNotMatch(source,/\/compact|\/reset/);
 });
+
+test("generation state only locks the composer for its own session", async () => {
+  const source=await readFile("src/frontend/app.js","utf8");
+
+  assert.match(source,/runsBySession=new Map\(\)/);
+  assert.match(source,/function syncActiveRun\(\)\{activeRun=runsBySession\.get\(activeSession\)\|\|null\}/);
+  assert.match(source,/activeSession=id;[\s\S]*?syncActiveRun\(\);[\s\S]*?restoreDraft\(id\);updateComposer\(\)/);
+  assert.match(source,/const textarea=\$\("#message"\),running=Boolean\(activeRun\)/);
+  assert.match(source,/textarea\.disabled=running\|\|!writable/);
+  assert.match(source,/if\(activeSession!==run\.recordId\)return;syncActiveRun\(\)/);
+});

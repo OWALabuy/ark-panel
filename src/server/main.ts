@@ -13,7 +13,7 @@ const config = parsePanelConfig(process.env, import.meta.url); await validateAnd
 const readApi = config.dataRoot && config.readAgents.length ? new SessionReadData(config.readAgents, config.dataRoot) : undefined;
 const roots = new Map<string, string>();
 for (const value of config.runtimes.values()) roots.set(value.runtimeAgentId, value.sessionsRoot);
-const gateway = new OpenClawCliClient({ sessionsRoots: roots });
+const gateway = new OpenClawCliClient({ sessionsRoots: roots, gatewayRunTimeoutMs: config.gatewayRunTimeoutMs, watcherGraceMs: config.runWatcherGraceMs });
 const operations = new SessionOperationCoordinator();
 let generationApi: PanelGenerationApi | undefined;
 const bridge = new BridgeService(gateway, new FileBridgeMaterializer(), roots);

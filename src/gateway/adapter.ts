@@ -49,8 +49,8 @@ export interface GatewayClient {
   version(): Promise<string>;
   createSession(runtimeAgentId: string): Promise<CreatedSession>;
   send(sessionKey: string, message: string, idempotencyKey: string): Promise<{ runId: string }>;
-  waitForCompletion(sessionId: string, runId: string): Promise<void>;
-  abort(sessionKey: string, runId?: string): Promise<void>;
+  waitForCompletion(sessionId: string, runId: string, signal?: AbortSignal): Promise<void>;
+  abort(sessionKey: string, runId?: string, sessionId?: string): Promise<void>;
   deleteSession(sessionKey: string): Promise<void>;
   applySessionOverrides?(sessionKey: string, overrides: SessionOverrides): Promise<void>;
   listCommands?(): Promise<CommandsCatalog>;
@@ -117,11 +117,13 @@ export async function runBridge(client: GatewayClient, materializer: BridgeMater
   }
   const { runId } = await client.send(created.sessionKey, request.latestUserMessage, request.idempotencyKey);
   await request.lifecycle?.({ type: "gateway_send_accepted", gatewayRunId: runId });
-  const abort = () => { void client.abort(created.sessionKey, runId); };
+  const abort = () => {
+    void client.abort(created.sessionKey, runId, created.sessionId).catch(() => undefined);
+  };
   request.signal?.addEventListener("abort", abort, { once: true });
   try {
     if (request.signal?.aborted) throw new Error("BRIDGE_ABORTED");
-    await client.waitForCompletion(created.sessionId, runId);
+    await client.waitForCompletion(created.sessionId, runId, request.signal);
     if (request.signal?.aborted) throw new Error("BRIDGE_ABORTED");
   } finally { request.signal?.removeEventListener("abort", abort); }
   const added = await materializer.readNewEntries(created, previousCount);

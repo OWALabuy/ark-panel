@@ -101,7 +101,7 @@ test("bridge lifecycle 失败会 abort 并 cleanup，且保留 lifecycle 主错�
       const client: GatewayClient = {
         async version() { return "2026.6.11"; }, async createSession() { return created; },
         async send() { order.push("send"); return { runId: "run-after-send" }; }, async waitForCompletion() { order.push("wait"); },
-        async abort(_key, runId) { order.push(`abort:${runId ?? "none"}`); throw new Error("abort cleanup failure"); },
+        async abort(_key, runId) { order.push(`abort:${runId ?? "none"}`); },
         async deleteSession() { order.push("cleanup"); throw new Error("delete cleanup failure"); }
       };
       const materializer: BridgeMaterializer = {
@@ -140,6 +140,21 @@ test("bridge 在 send 后 lifecycle 持久化期间收到 abort 不会漏停 gat
   assert.equal(order.includes("wait"), false); assert.equal(order.at(-1), "cleanup");
 });
 
+test("显式停止的 abort RPC 未确认时不谎报成功，也不清理仍可能运行的 session", async t => {
+  const root = await mkdtemp(join(tmpdir(), "bridge-abort-unconfirmed-")); t.after(() => rm(root, { recursive: true, force: true }));
+  const id = "12121212-1212-4212-8212-121212121212", controller = new AbortController(); let deleted = false, cleanupPending = 0;
+  const created: CreatedSession = { sessionId: id, sessionKey: "agent:runtime:uncertain", transcriptPath: join(root, `${id}.jsonl`) };
+  const client: GatewayClient = { async version() { return "2026.6.11"; }, async createSession() { return created; }, async send() { return { runId: "run" }; },
+    async waitForCompletion(_session, _run, signal) { await new Promise<void>((resolve, reject) => signal?.addEventListener("abort", () => reject(new Error("BRIDGE_ABORTED")), { once: true })); },
+    async abort() { throw new Error("OPENCLAW_CLI_TIMEOUT"); }, async deleteSession() { deleted = true; } };
+  const materializer: BridgeMaterializer = { async replaceCreatedTranscript() { return 0; }, async readNewEntries() { return []; }, verifyAndStripSubmittedUser(entries) { return entries; } };
+  const service = new BridgeService(client, materializer, new Map([["runtime", root]]));
+  const pending = service.generate({ runtimeAgentId: "runtime", historyThroughPreviousRun: { header: { type: "session" }, entries: [] }, latestUserMessage: "x",
+    latestUserEntryId: "user", idempotencyKey: "key", signal: controller.signal, cleanupFailed: async () => { cleanupPending++; } });
+  await new Promise(resolve => setTimeout(resolve, 5)); controller.abort();
+  await assert.rejects(pending, /RUN_ABORT_UNCONFIRMED/); assert.equal(deleted, false); assert.equal(cleanupPending, 1);
+});
+
 test("entries 已 durable 后 cleanup 失败不推翻结果，并发出 best-effort cleanup_failed", async t => {
   const root = await mkdtemp(join(tmpdir(), "bridge-cleanup-failed-")); t.after(() => rm(root, { recursive: true, force: true }));
   const id = "66666666-6666-4666-8666-666666666666";
@@ -176,8 +191,8 @@ test("主流程与 cleanup 同时失败时保留主错误并登记后续清理",
   assert.equal(cleanupFailed, 1);
 });
 
-test("cleanupOrphanedSession 先 best-effort abort，再严格注销并删除 artifacts", async t => {
-  for (const abortFails of [false, true]) await t.test(abortFails ? "abort 失败仍清理" : "abort 成功", async t => {
+test("cleanupOrphanedSession 只在 abort/release 确认后注销并删除 artifacts", async t => {
+  for (const abortFails of [false, true]) await t.test(abortFails ? "abort 未确认时保留 artifacts" : "abort 成功", async t => {
     const root = await mkdtemp(join(tmpdir(), "bridge-orphan-")); t.after(() => rm(root, { recursive: true, force: true }));
     const id = abortFails ? "77777777-7777-4777-8777-777777777777" : "88888888-8888-4888-8888-888888888888";
     await writeFile(join(root, `${id}.jsonl.deleted.fixture`), "x"); await writeFile(join(root, `${id}.trajectory.jsonl`), "x");
@@ -187,10 +202,14 @@ test("cleanupOrphanedSession 先 best-effort abort，再严格注销并删除 ar
       async deleteSession(key) { order.push(`delete:${key}`); } };
     const materializer: BridgeMaterializer = { async replaceCreatedTranscript() { return 0; }, async readNewEntries() { return []; }, verifyAndStripSubmittedUser(entries) { return entries; } };
     const service = new BridgeService(client, materializer, new Map([["runtime", root]]));
-    const removed = await service.cleanupOrphanedSession({ runtimeAgentId: "runtime", sessionId: id, sessionKey: "agent:runtime:orphan", gatewayRunId: "gateway-run" });
-    assert.deepEqual(removed, [`${id}.jsonl.deleted.fixture`, `${id}.trajectory.jsonl`]);
-    assert.deepEqual(order, ["abort:agent:runtime:orphan:gateway-run", "delete:agent:runtime:orphan"]);
-    assert.deepEqual(await readdir(root), []);
+    const cleanup = service.cleanupOrphanedSession({ runtimeAgentId: "runtime", sessionId: id, sessionKey: "agent:runtime:orphan", gatewayRunId: "gateway-run" });
+    if (abortFails) {
+      await assert.rejects(cleanup, /already gone/); assert.deepEqual(order, ["abort:agent:runtime:orphan:gateway-run"]);
+      assert.deepEqual((await readdir(root)).sort(), [`${id}.jsonl.deleted.fixture`, `${id}.trajectory.jsonl`].sort());
+    } else {
+      assert.deepEqual(await cleanup, [`${id}.jsonl.deleted.fixture`, `${id}.trajectory.jsonl`]);
+      assert.deepEqual(order, ["abort:agent:runtime:orphan:gateway-run", "delete:agent:runtime:orphan"]); assert.deepEqual(await readdir(root), []);
+    }
   });
 });
 
@@ -198,7 +217,7 @@ test("cleanupOrphanedSession 不吞严格 cleanup 错误", async t => {
   const root = await mkdtemp(join(tmpdir(), "bridge-orphan-cleanup-error-")); t.after(() => rm(root, { recursive: true, force: true }));
   const id = "99999999-9999-4999-8999-999999999999";
   const client: GatewayClient = { async version() { return "2026.6.11"; }, async createSession() { throw new Error("unused"); }, async send() { throw new Error("unused"); },
-    async waitForCompletion() {}, async abort() { throw new Error("abort ignored"); }, async deleteSession() { throw new Error("strict cleanup failed"); } };
+    async waitForCompletion() {}, async abort() {}, async deleteSession() { throw new Error("strict cleanup failed"); } };
   const materializer: BridgeMaterializer = { async replaceCreatedTranscript() { return 0; }, async readNewEntries() { return []; }, verifyAndStripSubmittedUser(entries) { return entries; } };
   const service = new BridgeService(client, materializer, new Map([["runtime", root]]));
   await assert.rejects(service.cleanupOrphanedSession({ runtimeAgentId: "runtime", sessionId: id, sessionKey: "agent:runtime:orphan" }), /strict cleanup failed/);

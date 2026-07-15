@@ -30,6 +30,8 @@ export PANEL_SESSION_SECRET='至少32字符的随机秘密'
 export PANEL_DATA_DIR="$HOME/.local/share/ark-panel"
 export PANEL_PORT='8790'
 export PANEL_CONTEXT_HISTORY_BUDGET_TOKENS='100000'
+export PANEL_GATEWAY_RUN_TIMEOUT_MS='1800000'
+export PANEL_RUN_WATCHER_GRACE_MS='30000'
 
 export PANEL_READ_AGENTS='{
   "claude":{"label":"Claude","sessionsRoot":"/home/USER/.openclaw/agents/claude/sessions"},
@@ -77,7 +79,12 @@ npm run healthcheck
 - 客户端重试应复用 UUID 格式的 `Idempotency-Key`。相同 key 与相同消息会共享或返回已完成结果；把同一 key 用于不同消息会被拒绝。
 - fork 和编辑重发只创建新的 panel 会话，不修改来源 transcript。
 - conversation API 只返回允许的 header/entry 字段，不返回 workspace `cwd` 或未知 header 字段。
-- 已完成的幂等结果使用进程内有界缓存；服务重启后客户端仍应结合 `revision` 重新读取会话状态。
+- run 状态和幂等结果持久化在 panel 数据目录中；服务重启后客户端可用原 `Idempotency-Key` 重连或读取已完成结果。
+
+gateway 单轮执行默认最多等待 30 分钟，随后再给轨迹观察器 30 秒收尾窗口，分别由
+`PANEL_GATEWAY_RUN_TIMEOUT_MS` 和 `PANEL_RUN_WATCHER_GRACE_MS` 调整。用户停止、超时或服务启动时清理遗留 run，
+都必须确认 OpenClaw 已释放对应运行槽位后才能删除临时 session；若无法确认，面板会保留清理信息并报告失败，
+不会把它误报为“已停止”。
 
 ## 第一版长上下文保护
 

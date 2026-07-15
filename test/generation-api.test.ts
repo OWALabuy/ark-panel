@@ -112,6 +112,15 @@ test("后台 run 先持久化再快速返回，持久幂等、会话互斥并在
   assert.equal("message" in terminal,false);assert.equal("stagedEntries" in terminal,false);assert.equal(terminal.gatewayRunId,"gateway");
 });
 
+test("后台 run 将停止未确认记录为 failed 而不是 aborted", async t => {
+  const root=await mkdtemp(join(tmpdir(),"generation-abort-unconfirmed-"));t.after(()=>rm(root,{recursive:true,force:true}));
+  const metadata=await createPanelSession(root,"claude",{header:{type:"session"},entries:[]});
+  const api=new PanelGenerationApi({async generate(){throw new Error("RUN_ABORT_UNCONFIRMED")}}, {dataRoot:root,runtimeByAgent:new Map([["claude","runtime"]])});
+  const runId="13131313-1313-4313-8313-131313131313";await api.create(metadata.recordId,"message",runId);
+  for(let i=0;i<100&&(await api.get(runId))?.status!=="failed";i++)await new Promise(resolve=>setTimeout(resolve,5));
+  const run=await api.get(runId);assert.equal(run?.status,"failed");assert.equal(run?.error?.code,"RUN_ABORT_UNCONFIRMED");
+});
+
 test("run 订阅先给快照、终态可重订阅，重启恢复 staged entries 而不重复调用模型", async t => {
   const root=await mkdtemp(join(tmpdir(),"generation-recover-"));t.after(()=>rm(root,{recursive:true,force:true}));
   const metadata=await createPanelSession(root,"claude",{header:{type:"session"},entries:[]});let release!:()=>void;const gate=new Promise<void>(resolve=>{release=resolve});

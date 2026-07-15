@@ -37,3 +37,12 @@ test("初始化独立 dataRoot 为 0700", async () => {
   await validateAndInitializeConfig(config);
   const { mode } = await import("node:fs/promises").then(fs => fs.lstat(x.data)); assert.equal(mode & 0o777, 0o700);
 });
+
+test("运行 timeout 使用长程默认值并校验独立 grace", async () => {
+  const defaults = parsePanelConfig(auth, moduleUrl);
+  assert.equal(defaults.gatewayRunTimeoutMs, 1_800_000); assert.equal(defaults.runWatcherGraceMs, 30_000);
+  const configured = parsePanelConfig({ ...auth, PANEL_GATEWAY_RUN_TIMEOUT_MS: "3600000", PANEL_RUN_WATCHER_GRACE_MS: "45000" }, moduleUrl);
+  assert.equal(configured.gatewayRunTimeoutMs, 3_600_000); assert.equal(configured.runWatcherGraceMs, 45_000);
+  assert.throws(() => parsePanelConfig({ ...auth, PANEL_GATEWAY_RUN_TIMEOUT_MS: "999" }, moduleUrl), /PANEL_GATEWAY_RUN_TIMEOUT_MS/);
+  assert.throws(() => parsePanelConfig({ ...auth, PANEL_RUN_WATCHER_GRACE_MS: "600001" }, moduleUrl), /PANEL_RUN_WATCHER_GRACE_MS/);
+});

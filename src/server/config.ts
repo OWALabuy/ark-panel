@@ -9,6 +9,13 @@ export interface PanelConfig {
   host: "127.0.0.1"; port: number; publicDir: string; dataRoot?: string; mock: boolean;
   readAgents: ReadAgentConfig[]; runtimes: Map<string, RuntimeConfig>;
   contextHistoryBudgetTokens: number;
+  gatewayRunTimeoutMs: number; runWatcherGraceMs: number;
+}
+
+function boundedInteger(value: string | undefined, fallback: number, name: string, minimum: number, maximum: number): number {
+  const parsed = Number(value ?? String(fallback));
+  if (!Number.isInteger(parsed) || parsed < minimum || parsed > maximum) throw new Error(`${name} 必须是 ${minimum}–${maximum} 之间的整数毫秒值`);
+  return parsed;
 }
 
 function jsonObject(value: string | undefined, name: string): Record<string, Record<string, unknown>> {
@@ -29,6 +36,8 @@ export function parsePanelConfig(env: NodeJS.ProcessEnv, moduleUrl: string): Pan
   const port = Number(env.PANEL_PORT ?? "8790"); if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("PANEL_PORT 无效");
   const contextHistoryBudgetTokens = Number(env.PANEL_CONTEXT_HISTORY_BUDGET_TOKENS ?? "100000");
   if (!Number.isInteger(contextHistoryBudgetTokens) || contextHistoryBudgetTokens < 1024) throw new Error("PANEL_CONTEXT_HISTORY_BUDGET_TOKENS 必须是至少 1024 的整数");
+  const gatewayRunTimeoutMs = boundedInteger(env.PANEL_GATEWAY_RUN_TIMEOUT_MS, 30 * 60_000, "PANEL_GATEWAY_RUN_TIMEOUT_MS", 1_000, 24 * 60 * 60_000);
+  const runWatcherGraceMs = boundedInteger(env.PANEL_RUN_WATCHER_GRACE_MS, 30_000, "PANEL_RUN_WATCHER_GRACE_MS", 100, 10 * 60_000);
   const read = jsonObject(env.PANEL_READ_AGENTS, "PANEL_READ_AGENTS"), runtime = jsonObject(env.PANEL_AGENT_RUNTIMES, "PANEL_AGENT_RUNTIMES");
   const readAgents = Object.entries(read).map(([agentId, value]) => {
     if (typeof value.sessionsRoot !== "string" || (value.label !== undefined && typeof value.label !== "string")) throw new Error("PANEL_READ_AGENTS 格式错误");
@@ -46,7 +55,8 @@ export function parsePanelConfig(env: NodeJS.ProcessEnv, moduleUrl: string): Pan
   if ((readAgents.length || runtimes.size) && !env.PANEL_DATA_DIR) throw new Error("配置会话数据源时必须设置 PANEL_DATA_DIR");
   return { username: env.PANEL_USERNAME!, passwordHash: env.PANEL_PASSWORD_HASH!, sessionSecret: env.PANEL_SESSION_SECRET!, secureCookie: env.PANEL_SECURE_COOKIE === "1",
     host: "127.0.0.1", port, publicDir: env.PANEL_PUBLIC_DIR ? resolve(env.PANEL_PUBLIC_DIR) : fileURLToPath(new URL("../../../src/frontend/", moduleUrl)),
-    ...(env.PANEL_DATA_DIR ? { dataRoot: resolve(env.PANEL_DATA_DIR) } : {}), mock: env.PANEL_MOCK_DATA === "1", readAgents, runtimes, contextHistoryBudgetTokens };
+    ...(env.PANEL_DATA_DIR ? { dataRoot: resolve(env.PANEL_DATA_DIR) } : {}), mock: env.PANEL_MOCK_DATA === "1", readAgents, runtimes, contextHistoryBudgetTokens,
+    gatewayRunTimeoutMs, runWatcherGraceMs };
 }
 
 async function safeDirectory(path: string, label: string): Promise<string> {

@@ -43,7 +43,7 @@ Legend: ✅ available · 🚧 scheduled · 💡 candidate (not scheduled) · ⛔
 | Messages | Local timestamps | ✅ | Displayed using the browser's local time zone |
 | Messages | Export the current branch as Markdown | ✅ | Includes timestamps, thinking, tool calls and tool results without internal paths or metadata |
 | Messages | Thinking, tool calls, and tool results | ✅ | Structured, collapsible rendering including command output |
-| Composer | Per-session local drafts | ✅ | Browser-local only; restored after refresh and retained when sending fails |
+| Composer | Per-session local drafts and generation state | ✅ | Browser-local drafts survive refresh and failure; a run only locks its own conversation, so other drafts remain editable |
 | Conversation | Long-thread scroll following | ✅ | Preserves the reading position and shows a new-message control when the user has scrolled up |
 | Generation | Durable run lifecycle, reconnect, stop, retry, and idempotent sending | ✅ | Server-owned run state survives browser disconnects; SSE can be re-subscribed and completed message groups commit atomically |
 | Generation | Token-by-token streaming | ⛔ | The current gateway integration does not promise incremental token output |
@@ -83,6 +83,8 @@ export PANEL_SESSION_SECRET='a-random-secret-with-at-least-32-characters'
 export PANEL_DATA_DIR="$HOME/.local/share/ark-panel"
 export PANEL_PORT='8790'
 export PANEL_CONTEXT_HISTORY_BUDGET_TOKENS='100000'
+export PANEL_GATEWAY_RUN_TIMEOUT_MS='1800000'
+export PANEL_RUN_WATCHER_GRACE_MS='30000'
 
 export PANEL_READ_AGENTS='{
   "claude":{"label":"Claude","sessionsRoot":"/home/USER/.openclaw/agents/claude/sessions"},
@@ -96,6 +98,8 @@ export PANEL_AGENT_RUNTIMES='{
 ```
 
 `PANEL_READ_AGENTS` is the allowlist of real agents that may be browsed. `PANEL_AGENT_RUNTIMES` maps each browsable agent to a dedicated runtime with no channel bindings; never use a real, channel-bound agent as the panel runtime.
+
+Long-running agent work defaults to a 30-minute OpenClaw execution limit (`PANEL_GATEWAY_RUN_TIMEOUT_MS`). The panel then waits an additional 30 seconds (`PANEL_RUN_WATCHER_GRACE_MS`) for the terminal trajectory event, so an upstream timeout or abort is reported accurately instead of being hidden by a simultaneous panel timeout.
 
 Build and start:
 
