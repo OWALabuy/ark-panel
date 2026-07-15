@@ -3,7 +3,7 @@
 ## Product and architecture
 
 - [`architecture.md`](architecture.md): requirements, architecture, and design rationale.
-- [`implementation-spec.md`](implementation-spec.md): implementation and acceptance specification.
+- [`implementation-spec.md`](implementation-spec.md): implementation and acceptance specification, including Markdown/KaTeX syntax, security boundaries, and fallback behavior in §8.7.
 - [`v1-completion.md`](v1-completion.md): implemented scope and remaining production work.
 
 ## Decisions

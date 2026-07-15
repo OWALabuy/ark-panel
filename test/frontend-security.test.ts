@@ -44,6 +44,10 @@ test("frontend renders untrusted metadata with DOM text nodes", async () => {
   assert.match(markdown,/className="code-language"/);
   assert.match(markdown,/else code\.textContent=text/);
   assert.match(markdown,/noopener noreferrer/);
+  assert.match(markdown,/globalThis\.katex\.render/);
+  assert.match(markdown,/trust:false/);
+  assert.match(markdown,/function mathBlock/);
+  assert.match(styles,/\.math-display/);
   assert.doesNotMatch(markdown,/insertAdjacentHTML|document\.write|eval\(/);
   assert.match(source,/text\/event-stream/);
   assert.match(source,/\/search\?q=/);

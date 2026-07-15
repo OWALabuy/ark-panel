@@ -58,7 +58,7 @@ npm start
 - `PANEL_DATA_DIR` 自动创建并收紧为 `0700`；
 - read、runtime、data 目录不得相同或存在父子重叠；
 - runtime 路径必须与其 agent ID 对应，且不能是符号链接；
-- 静态资源路径按程序安装位置解析，不依赖启动时的 cwd。
+- 静态资源路径按程序安装位置解析，不依赖启动时的 cwd；部署时必须完整保留 `src/frontend/vendor/katex/` 下的 JS、CSS、许可证和 WOFF2 字体，不能只复制顶层 HTML/CSS/JS。KaTeX 资源由面板同源提供，不需要也不应改为 CDN。
 
 健康检查无需登录：
 

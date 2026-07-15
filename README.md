@@ -18,9 +18,27 @@ Panel-owned sessions support `/model`, `/think`, `/reasoning`, `/new`, `/command
 
 Generation runs are server-owned resources rather than properties of one browser request. The panel persists their lifecycle and idempotency state, lets browsers query or re-subscribe after a dropped SSE connection, and only clears a draft after a confirmed completed run. It does not claim token-by-token streaming.
 
-Message text is rendered as safe Markdown with raw HTML disabled. Whole messages and individual fenced code blocks can be copied from the conversation view.
+Message text is rendered as safe Markdown with raw HTML disabled. Inline and display LaTeX math is rendered locally with KaTeX; no CDN is required. Whole messages and individual fenced code blocks can be copied from the conversation view.
 
 Messages show local date/time. All session sources can be renamed and moved into or out of the archive; metadata for read-only OpenClaw sources is stored in panel-owned sidecars and never written back to source transcripts.
+
+### Markdown math
+
+Use `$...$` or `\(...\)` for inline math:
+
+```markdown
+The identity $e^{i\pi}+1=0$ and the fraction \(\frac{a}{b}\) are inline.
+```
+
+Use `$$...$$` or `\[...\]` for display math. The delimiters may be on one line, or the opening and closing delimiters may occupy their own lines:
+
+```markdown
+$$
+\int_0^1 x^2\,dx = \frac{1}{3}
+$$
+```
+
+Inline code and fenced code take precedence over math delimiters, so `` `$not_math$` `` stays code. Dollar signs in ordinary currency text are not treated as a formula when they do not form a valid math pair. Invalid LaTeX falls back to the original source instead of breaking the message. Copying a message or exporting it as Markdown preserves the original delimiters and LaTeX source.
 
 ## Feature status
 
@@ -38,6 +56,7 @@ Legend: ✅ available · 🚧 scheduled · 💡 candidate (not scheduled) · ⛔
 | Branching | Fork from a valid message boundary | ✅ | Preserves tool-call groups and never mutates the source transcript |
 | Branching | Edit a user message and resend as a new branch | ✅ | The original branch remains available |
 | Messages | Safe Markdown rendering | ✅ | Headings, lists, quotes, tables, links, inline code and fenced code; raw HTML is not executed |
+| Messages | LaTeX math rendering | ✅ | KaTeX renders `$...$`, `\(...\)`, `$$...$$`, and `\[...\]` from same-origin assets with safe fallback |
 | Messages | Fenced-code syntax highlighting | ✅ | Uses explicit language tags, displays the language, and safely falls back to plain text |
 | Messages | Copy a whole message or fenced code block | ✅ | Available directly in the conversation view |
 | Messages | Local timestamps | ✅ | Displayed using the browser's local time zone |

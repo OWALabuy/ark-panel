@@ -20,5 +20,5 @@
     "test:panel-claude-runtime": "npm run build && PANEL_ALLOW_CLAUDE_RUNTIME_ACCEPTANCE=1 node dist/src/server/panel-claude-runtime-smoke.js",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
-  "devDependencies": { "@types/node": "^22.15.0", "typescript": "^5.8.3" }
+  "devDependencies": { "@types/node": "^22.15.0", "katex": "^0.16.47", "typescript": "^5.8.3" }
 }

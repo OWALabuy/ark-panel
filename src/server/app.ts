@@ -161,7 +161,7 @@ export function createPanelServer(options: AppOptions) {
         return fail(res, 404, "NOT_FOUND", "接口不存在", requestId);
       }
       const pathname = url.pathname === "/" ? "index.html" : url.pathname.slice(1); const safe = normalize(pathname).replace(/^(\.\.(\/|\\|$))+/, ""); const file = join(options.publicDir, safe);
-      const types: Record<string,string> = { ".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".svg": "image/svg+xml" };
+      const types: Record<string,string> = { ".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".svg": "image/svg+xml", ".woff2": "font/woff2", ".woff": "font/woff", ".ttf": "font/ttf" };
       try { const [root, resolved] = await Promise.all([realpath(options.publicDir), realpath(file)]); const fromRoot = relative(root, resolved); if (fromRoot === ".." || fromRoot.startsWith(`..${sep}`) || fromRoot.startsWith(sep)) throw new Error("STATIC_PATH_ESCAPE"); const data = await readFile(resolved); res.writeHead(200, { "content-type": types[extname(resolved)] ?? "application/octet-stream", "cache-control": pathname === "index.html" ? "no-store" : "public, max-age=3600", "x-content-type-options": "nosniff", "content-security-policy": "default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'" }); res.end(data); }
       catch { fail(res, 404, "NOT_FOUND", "页面不存在", requestId); }
     } catch (error) {

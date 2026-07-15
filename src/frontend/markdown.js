@@ -14,10 +14,37 @@ function highlightGeneric(root,text,language){const keywords=KEYWORDS[language],
 function highlightMarkup(root,text){const pattern=/(<!--[\s\S]*?-->)|(<\/?)([\w:-]+)|([\w:-]+)(\s*=\s*)("[^"]*"|'[^']*')/g;let cursor=0,match;while((match=pattern.exec(text))){if(match.index>cursor)root.append(document.createTextNode(text.slice(cursor,match.index)));if(match[1])token(root,"comment",match[1]);else if(match[2]){token(root,"punctuation",match[2]);token(root,"tag",match[3])}else{token(root,"attribute",match[4]);root.append(document.createTextNode(match[5]));token(root,"string",match[6])}cursor=pattern.lastIndex}if(cursor<text.length)root.append(document.createTextNode(text.slice(cursor)))}
 function highlightCode(code,text,rawLanguage){const language=languageName(rawLanguage);code.dataset.language=language;if(language==="markup")highlightMarkup(code,text);else if(language==="json"||language==="yaml"||language==="css"||KEYWORDS[language])highlightGeneric(code,text,language);else if(language==="diff")for(const [index,line] of text.split("\n").entries()){if(index)code.append(document.createTextNode("\n"));token(code,line.startsWith("+")?"inserted":line.startsWith("-")?"deleted":"plain",line)}else code.textContent=text;return language}
 
+function isEscaped(text,index){let slashes=0;while(index-slashes-1>=0&&text[index-slashes-1]==="\\")slashes++;return slashes%2===1}
+function findInlineMath(text,start){
+  for(let index=start;index<text.length;index++){
+    if(text[index]==="\\"&&text[index+1]==="("&&!isEscaped(text,index)){
+      for(let end=index+2;end<text.length-1;end++)if(text[end]==="\\"&&text[end+1]===")"&&!isEscaped(text,end))return{start:index,end:end+2,formula:text.slice(index+2,end),raw:text.slice(index,end+2)};
+    }
+    if(text[index]!=="$"||text[index+1]==="$"||isEscaped(text,index)||/\s/.test(text[index+1]||"")||/[\p{L}\p{N}]/u.test(text[index-1]||""))continue;
+    for(let end=index+1;end<text.length;end++)if(text[end]==="$"&&!isEscaped(text,end)){
+      if(text[end+1]!=="$"&&!/[\s\\]/.test(text[end-1]||""))return{start:index,end:end+1,formula:text.slice(index+1,end),raw:text.slice(index,end+1)};
+      break;
+    }
+  }
+  return null;
+}
+
+function appendMath(root,formula,displayMode,raw){
+  const node=document.createElement(displayMode?"div":"span");node.className=displayMode?"math-display":"math-inline";
+  try{
+    if(!globalThis.katex?.render)throw new Error("KaTeX 未加载");
+    globalThis.katex.render(formula,node,{displayMode,throwOnError:true,strict:"ignore",trust:false,maxSize:10,maxExpand:1000});
+  }catch(error){node.classList.add("math-error");node.textContent=raw;node.title=error instanceof Error?error.message:"公式渲染失败"}
+  root.append(node);
+}
+
 function appendInline(root,text){
   const pattern=/(`+)([\s\S]*?)\1|!\[([^\]]*)\]\(([^\s)]+)(?:\s+["'][^"']*["'])?\)|\[([^\]]+)\]\(([^\s)]+)(?:\s+["'][^"']*["'])?\)|\*\*([^*]+)\*\*|__([^_]+)__|~~([^~]+)~~|(?<!\*)\*([^*\n]+)\*(?!\*)|(?<!_)_([^_\n]+)_(?!_)/g;
-  let cursor=0,match;
-  while((match=pattern.exec(text))){
+  let cursor=0;
+  while(cursor<text.length){
+    pattern.lastIndex=cursor;const match=pattern.exec(text),math=findInlineMath(text,cursor);
+    if(math&&(!match||math.start<=match.index)){if(math.start>cursor)root.append(document.createTextNode(text.slice(cursor,math.start)));appendMath(root,math.formula,false,math.raw);cursor=math.end;continue}
+    if(!match)break;
     if(match.index>cursor)root.append(document.createTextNode(text.slice(cursor,match.index)));
     if(match[1]){const code=document.createElement("code");code.textContent=match[2];root.append(code)}
     else if(match[3]!==undefined){root.append(document.createTextNode(match[0]))}
@@ -46,6 +73,15 @@ function codeBlock(lines,start){
   return{end:index<lines.length?index+1:index,language:opening[2]||"",text:body.join("\n")};
 }
 
+function mathBlock(lines,start){
+  const line=lines[start].trim(),single=/^\$\$([\s\S]+)\$\$$/.exec(line)||/^\\\[([\s\S]+)\\\]$/.exec(line);
+  if(single)return{end:start+1,formula:single[1].trim(),raw:line};
+  const close=line==="$$"?"$$":line==="\\["?"\\]":null;if(!close)return null;
+  const body=[];let index=start+1;while(index<lines.length&&lines[index].trim()!==close)body.push(lines[index++]);
+  if(index===lines.length)return null;
+  return{end:index+1,formula:body.join("\n").trim(),raw:[line,...body,close].join("\n")};
+}
+
 function addCodeCopy(pre,text,language){
   const wrap=document.createElement("div"),button=document.createElement("button");wrap.className="code-block";if(language){const label=document.createElement("span");label.className="code-language";label.textContent=LANGUAGE_LABELS[language]||language;wrap.append(label)}button.type="button";button.className="copy-code";button.textContent="复制代码";button.onclick=()=>copyText(text,button,"已复制");wrap.append(button,pre);return wrap;
 }
@@ -64,6 +100,8 @@ export function renderMarkdown(text){
     if(!lines[index].trim()){index++;continue}
     const fenced=codeBlock(lines,index);
     if(fenced){const pre=document.createElement("pre"),code=document.createElement("code"),language=fenced.language?highlightCode(code,fenced.text,fenced.language):(code.textContent=fenced.text,"");pre.append(code);root.append(addCodeCopy(pre,fenced.text,language));index=fenced.end;continue}
+    const formula=mathBlock(lines,index);
+    if(formula){appendMath(root,formula.formula,true,formula.raw);index=formula.end;continue}
     const heading=/^(#{1,6})\s+(.+)$/.exec(lines[index]);
     if(heading){const node=document.createElement(`h${heading[1].length}`);appendInline(node,heading[2]);root.append(node);index++;continue}
     if(/^>\s?/.test(lines[index])){const quote=document.createElement("blockquote"),parts=[];while(index<lines.length&&/^>\s?/.test(lines[index]))parts.push(lines[index++].replace(/^>\s?/,""));quote.append(renderMarkdown(parts.join("\n")));root.append(quote);continue}
@@ -72,7 +110,7 @@ export function renderMarkdown(text){
     if(index+1<lines.length&&/^\s*\|?(?:\s*:?-+:?\s*\|)+\s*:?-+:?\s*\|?\s*$/.test(lines[index+1])&&lines[index].includes("|")){
       const table=document.createElement("table"),head=document.createElement("thead"),body=document.createElement("tbody"),split=line=>line.trim().replace(/^\||\|$/g,"").split("|").map(cell=>cell.trim());const header=document.createElement("tr");for(const cell of split(lines[index])){const th=document.createElement("th");appendInline(th,cell);header.append(th)}head.append(header);index+=2;while(index<lines.length&&lines[index].includes("|")&&lines[index].trim()){const row=document.createElement("tr");for(const cell of split(lines[index++])){const td=document.createElement("td");appendInline(td,cell);row.append(td)}body.append(row)}table.append(head,body);root.append(table);continue
     }
-    const paragraph=[];while(index<lines.length&&lines[index].trim()&&!codeBlock(lines,index)&&!/^#{1,6}\s+/.test(lines[index])&&!/^>\s?/.test(lines[index])&&!/^\s*(?:[-+*]|\d+\.)\s+/.test(lines[index]))paragraph.push(lines[index++]);const node=document.createElement("p");paragraph.forEach((line,i)=>{if(i)node.append(document.createElement("br"));appendInline(node,line)});root.append(node);
+    const paragraph=[];while(index<lines.length&&lines[index].trim()&&!codeBlock(lines,index)&&!mathBlock(lines,index)&&!/^#{1,6}\s+/.test(lines[index])&&!/^>\s?/.test(lines[index])&&!/^\s*(?:[-+*]|\d+\.)\s+/.test(lines[index]))paragraph.push(lines[index++]);const node=document.createElement("p");paragraph.forEach((line,i)=>{if(i)node.append(document.createElement("br"));appendInline(node,line)});root.append(node);
   }
   return root;
 }

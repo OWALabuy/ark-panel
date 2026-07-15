@@ -8,6 +8,7 @@
 - panel 会话新建、完整 transcript 展示、专用 runtime 推理、SSE 生命周期、停止生成、错误重试与幂等键。
 - 从合法边界 fork、编辑用户消息后派生分支；不修改来源 transcript。
 - thinking、tool use、tool result 安全 DOM 渲染并默认折叠。
+- 消息安全 Markdown、代码高亮与本地 KaTeX 数学公式渲染；支持四种常用公式定界符，失败时保留原文且不依赖 CDN。
 - 上下文预算保护、原子 transcript 提交、runtime artifact 受限清理。
 - 首版不显示斜杠命令入口；客户端和服务端均阻止 `/...` 进入普通推理桥接。
 - 备份/校验/恢复工具、systemd 示例、部署 smoke 和纯 fixture 浏览器验收。
