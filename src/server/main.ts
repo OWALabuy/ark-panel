@@ -8,6 +8,7 @@ import { parsePanelConfig, validateAndInitializeConfig } from "./config.js";
 import { ConservativeContextBudget } from "../domain/context-budget.js";
 import { PanelCommandApi } from "./command-api.js";
 import { SessionOperationCoordinator } from "./session-operation.js";
+import { ExperienceStore } from "./experience-store.js";
 
 const config = parsePanelConfig(process.env, import.meta.url); await validateAndInitializeConfig(config);
 const readApi = config.dataRoot && config.readAgents.length ? new SessionReadData(config.readAgents, config.dataRoot) : undefined;
@@ -15,6 +16,8 @@ const roots = new Map<string, string>();
 for (const value of config.runtimes.values()) roots.set(value.runtimeAgentId, value.sessionsRoot);
 const gateway = new OpenClawCliClient({ sessionsRoots: roots, gatewayRunTimeoutMs: config.gatewayRunTimeoutMs, watcherGraceMs: config.runWatcherGraceMs });
 const operations = new SessionOperationCoordinator();
+const experienceAgentIds = new Set([...config.readAgents.map(agent => agent.agentId), ...config.runtimes.keys()]);
+const experience = config.dataRoot ? new ExperienceStore(config.dataRoot, [...experienceAgentIds]) : undefined;
 let generationApi: PanelGenerationApi | undefined;
 const bridge = new BridgeService(gateway, new FileBridgeMaterializer(), roots);
 if (config.dataRoot && config.runtimes.size) {
@@ -37,7 +40,7 @@ const commandApi = config.dataRoot && readApi ? new PanelCommandApi(config.dataR
 const allowedHosts = [`127.0.0.1:${config.port}`, `localhost:${config.port}`];
 const server = createPanelServer({ auth: { username: config.username, passwordHash: config.passwordHash, sessionSecret: config.sessionSecret, secureCookie: config.secureCookie },
   publicDir: config.publicDir, mock: config.mock, allowedHosts, publicOrigins: allowedHosts.map(value => `http://${value}`),
-  ...(generationApi ? { generation: generationApi } : {}), ...(commandApi ? { commands: commandApi } : {}), ...(readApi ? { reads: readApi } : {}) });
+  ...(generationApi ? { generation: generationApi } : {}), ...(commandApi ? { commands: commandApi } : {}), ...(readApi ? { reads: readApi } : {}), ...(experience ? { experience } : {}) });
 server.listen(config.port, config.host, () => process.stdout.write(`会话面板监听 http://${config.host}:${config.port}\n`));
 
 let stopping = false;

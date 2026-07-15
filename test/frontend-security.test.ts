@@ -101,3 +101,92 @@ test("generation state only locks the composer for its own session", async () =>
   assert.match(source,/textarea\.disabled=running\|\|!writable/);
   assert.match(source,/if\(activeSession!==run\.recordId\)return;syncActiveRun\(\)/);
 });
+
+test("appearance preferences are constrained, cached early, and locally scale reading content", async () => {
+  const source=await readFile("src/frontend/app.js","utf8");
+  const html=await readFile("src/frontend/index.html","utf8");
+  const bootstrap=await readFile("src/frontend/theme-bootstrap.js","utf8");
+  const styles=await readFile("src/frontend/styles.css","utf8");
+
+  assert.match(html,/src="\/theme-bootstrap\.js"/);
+  assert.match(bootstrap,/ark-panel:appearance:v1/);
+  assert.match(bootstrap,/document\.documentElement\.dataset\.theme/);
+  assert.match(html,/id="settings-drawer"[\s\S]*aria-modal="true"/);
+  assert.match(html,/id="reading-scale"[^>]*min="85"[^>]*max="130"[^>]*step="5"/);
+  assert.match(source,/THEMES=new Set\(\["system","light","dark","gruvbox-dark-medium","gruvbox-light-medium"\]\)/);
+  assert.match(source,/ACCENTS=new Set\(\["default","blue","green","red","yellow","magenta","cyan"\]\)/);
+  assert.match(source,/api\("\/settings",\{method:"PATCH"/);
+  assert.match(source,/READING_SCALE_KEY="ark-panel:reading-scale:v1"/);
+  assert.match(source,/number>=85&&number<=130&&number%5===0/);
+  assert.match(source,/confirmedAppearance=accountAppearance,desiredAppearance=accountAppearance/);
+  assert.match(source,/desiredAppearance=normalizeAppearance\(\{\.\.\.desiredAppearance,\.\.\.patch\}\)/);
+  assert.match(source,/body:JSON\.stringify\(\{appearance:target\}\)/);
+  assert.match(source,/if\(sameAppearance\(target,desiredAppearance\)\)\{desiredAppearance=confirmedAppearance;applyAppearance\(confirmedAppearance\)/);
+  assert.match(styles,/\[data-theme="gruvbox-dark-medium"\]/);
+  assert.match(styles,/\[data-theme="gruvbox-light-medium"\]/);
+  assert.match(styles,/--code-background:/);
+  assert.match(styles,/--syntax-keyword:/);
+  assert.match(styles,/--danger-soft:/);
+  assert.match(styles,/color-scheme:dark/);
+  assert.match(styles,/font-size:var\(--reading-size\)/);
+});
+
+test("background run notifications stay unread per session until the conversation is viewed", async () => {
+  const source=await readFile("src/frontend/app.js","utf8");
+  const styles=await readFile("src/frontend/styles.css","utf8");
+
+  assert.match(source,/UNREAD_KEY="ark-panel:unread-runs:v1"/);
+  assert.match(source,/let unreadRuns=readUnreadRuns\(\)/);
+  assert.match(source,/new Map\(entries\.flatMap/);
+  assert.match(source,/status==="completed"\|\|status==="failed"/);
+  assert.match(source,/activeSession===run\.recordId&&!document\.hidden/);
+  assert.match(source,/unreadRuns\.set\(String\(run\.recordId\),\{agentId:String\(run\.agentId\|\|activeAgent\),status:run\.status\}\)/);
+  assert.match(source,/if\(!document\.hidden\)clearUnreadRun\(id\)/);
+  assert.match(source,/document\.addEventListener\("visibilitychange",updateDocumentTitle\)/);
+  assert.doesNotMatch(source,/visibilitychange[^\n]*clearUnreadRun/);
+  assert.match(source,/count=document\.hidden\?unreadRuns\.size:0/);
+  assert.match(source,/unread-marker/);
+  assert.match(source,/unread\.some\(item=>item\.status==="failed"\)/);
+  assert.match(source,/if\(run\.status!=="completed"&&run\.status!=="failed"\)return/);
+  assert.match(styles,/\.unread-marker\.failed/);
+});
+
+test("desktop navigation can collapse to an accessible persistent rail", async () => {
+  const source=await readFile("src/frontend/app.js","utf8");
+  const html=await readFile("src/frontend/index.html","utf8");
+  const styles=await readFile("src/frontend/styles.css","utf8");
+
+  assert.match(html,/id="sidebar-rail"[\s\S]*id="expand-sidebar"[\s\S]*id="rail-recents"[^>]*aria-haspopup="menu"/);
+  assert.match(html,/id="rail-agent"[^>]*aria-haspopup="menu"/);
+  assert.match(source,/SIDEBAR_KEY="ark-panel:sidebar-collapsed:v1"/);
+  assert.match(source,/localStorage\.setItem\(SIDEBAR_KEY,String\(Boolean\(collapsed\)\)\)/);
+  assert.match(source,/slice\(0,10\)/);
+  assert.match(source,/function closeRailFlyout\(\{restore=true\}=\{\}\)/);
+  assert.match(source,/event\.key==="Escape"&&!\$\("#rail-flyout"\)\.hidden/);
+  assert.match(source,/function refreshUnreadUi\(\)\{renderAgents\(\);renderRail\(\)/);
+  assert.match(source,/showAgentFlyout[\s\S]*unreadRuns\.values\(\)/);
+  assert.match(source,/function clearConversationSelection\(\)[\s\S]*\$\("#title"\)\.textContent="选择一个会话"/);
+  assert.match(source,/async function switchAgent\(agentId\)[\s\S]*clearConversationSelection\(\)/);
+  assert.match(styles,/\.shell\.sidebar-collapsed\{grid-template-columns:60px minmax\(0,1fr\)\}/);
+  assert.match(styles,/@media\(max-width:760px\)\{\.sidebar-rail/);
+});
+
+test("agent avatars are cropped client-side and uploaded with CSRF protection", async () => {
+  const source=await readFile("src/frontend/app.js","utf8");
+  const html=await readFile("src/frontend/index.html","utf8");
+  const server=await readFile("src/server/app.ts","utf8");
+
+  assert.match(html,/id="avatar-file"[^>]*accept="image\/png,image\/jpeg,image\/webp"/);
+  assert.match(html,/id="reset-avatar"/);
+  assert.match(html,/id="confirm-avatar"[^>]*hidden/);
+  assert.match(source,/MAX_AVATAR_BYTES=5\*1024\*1024/);
+  assert.match(source,/createImageBitmap\(file\)/);
+  assert.match(source,/Math\.min\(bitmap\.width,bitmap\.height\)/);
+  assert.match(source,/canvas\.toBlob\(resolve,"image\/webp",\.88\)/);
+  assert.match(source,/pendingAvatar=\{agentId,blob,url:URL\.createObjectURL\(blob\)\}/);
+  assert.match(source,/status\.textContent="请确认裁剪预览"/);
+  assert.match(source,/fetch\(avatarUrl\(agentId\),\{method,body,headers:\{"x-csrf-token":csrf/);
+  assert.match(source,/avatarRequest\(agentId,"PUT",blob\)/);
+  assert.match(source,/avatarRequest\(agentId,"DELETE"\)/);
+  assert.match(server,/img-src 'self' blob:/);
+});

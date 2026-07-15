@@ -5,6 +5,7 @@ import { cookie, cookies, issueSession, newCsrf, verifyPassword, verifySession, 
 import { mockAgents, mockConversation, mockSessions } from "./mock-data.js";
 import { ForkError } from "../domain/fork.js";
 import type { PublicPanelRun } from "./run-store.js";
+import { MAX_AVATAR_BYTES, validateSettingsPatch, type PanelSettings, type SettingsPatch, type StoredAvatar } from "./experience-store.js";
 
 export interface GenerationApi {
   create(recordId: string, message: string, runId?: string, expectedRevision?: string): Promise<PublicPanelRun>;
@@ -14,6 +15,14 @@ export interface GenerationApi {
   activeForRecord(recordId: string): Promise<PublicPanelRun | undefined>;
 }
 export interface CommandApi { dispatch(recordId: string, request: { command: string; args: string[] }): Promise<unknown> }
+export interface ExperienceApi {
+  assertAgent(agentId: string): void;
+  settings(): Promise<PanelSettings>;
+  patchSettings(patch: SettingsPatch): Promise<PanelSettings>;
+  avatar(agentId: string): Promise<StoredAvatar | undefined>;
+  putAvatar(agentId: string, input: Buffer): Promise<StoredAvatar>;
+  deleteAvatar(agentId: string): Promise<boolean>;
+}
 export interface ReadApi {
   agents(): Promise<unknown[]>; sessions(agentId?: string, archived?: boolean): Promise<unknown[]>; conversation(recordId: string): Promise<unknown | null>;
   search?(query: string, agentId?: string): Promise<unknown[]>;
@@ -24,12 +33,19 @@ export interface ReadApi {
   deleteSession?(recordId: string, confirmed: boolean): Promise<unknown>;
   exportMarkdown?(recordId: string): Promise<{ filename: string; markdown: string } | null>;
 }
-export interface AppOptions { auth: AuthConfig; publicDir: string; mock?: boolean; now?: () => number; generation?: GenerationApi; commands?: CommandApi; reads?: ReadApi; allowedHosts?: readonly string[]; publicOrigins?: readonly string[] }
+export interface AppOptions { auth: AuthConfig; publicDir: string; mock?: boolean; now?: () => number; generation?: GenerationApi; commands?: CommandApi; reads?: ReadApi; experience?: ExperienceApi; allowedHosts?: readonly string[]; publicOrigins?: readonly string[] }
 const jsonHeaders = { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" };
 function send(res: ServerResponse, status: number, body: unknown, headers = {}): void { res.writeHead(status, { ...jsonHeaders, ...headers }); res.end(JSON.stringify(body)); }
 function fail(res: ServerResponse, status: number, code: string, message: string, requestId: string): void { send(res, status, { error: { code, message, requestId } }); }
 class HttpError extends Error { constructor(readonly status: number, readonly code: string) { super(code); } }
 async function body(req: IncomingMessage): Promise<unknown> { const chunks: Buffer[] = []; let size = 0; for await (const chunk of req) { size += chunk.length; if (size > 16_384) throw new HttpError(413, "BODY_TOO_LARGE"); chunks.push(Buffer.from(chunk)); } return JSON.parse(Buffer.concat(chunks).toString("utf8")); }
+async function binaryBody(req: IncomingMessage, maximum: number): Promise<Buffer> {
+  const declared = req.headers["content-length"];
+  if (declared !== undefined && (!/^\d+$/.test(declared) || Number(declared) > maximum)) throw new HttpError(413, "AVATAR_TOO_LARGE");
+  const chunks: Buffer[] = []; let size = 0;
+  for await (const chunk of req) { const bytes = Buffer.from(chunk); size += bytes.length; if (size > maximum) throw new HttpError(413, "AVATAR_TOO_LARGE"); chunks.push(bytes); }
+  return Buffer.concat(chunks, size);
+}
 function sameOrigin(req: IncomingMessage, options: AppOptions): boolean { const origin = req.headers.origin; if (!origin) return false; return options.publicOrigins?.includes(origin) ?? origin === `http://${req.headers.host}`; }
 function allowedHost(req: IncomingMessage, options: AppOptions): boolean { return !options.allowedHosts || (!!req.headers.host && options.allowedHosts.includes(req.headers.host)); }
 function validRunId(value: unknown): value is string { return typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value); }
@@ -57,6 +73,32 @@ export function createPanelServer(options: AppOptions) {
         if (!["GET", "HEAD", "OPTIONS"].includes(req.method ?? "") && (!sameOrigin(req, options) || !jar.panel_csrf || req.headers["x-csrf-token"] !== jar.panel_csrf)) return fail(res, 403, "CSRF_REJECTED", "安全校验失败，请刷新后重试", requestId);
         if (req.method === "GET" && url.pathname === "/api/v1/auth/session") return send(res, 200, { data: { username: options.auth.username, csrfToken: jar.panel_csrf } });
         if (req.method === "POST" && url.pathname === "/api/v1/auth/logout") return send(res, 200, { data: null }, { "set-cookie": [cookie("panel_session", "", { httpOnly: true, secure: options.auth.secureCookie ?? false, maxAge: 0 }), cookie("panel_csrf", "", { secure: options.auth.secureCookie ?? false, maxAge: 0 })] });
+        if (req.method === "GET" && url.pathname === "/api/v1/settings") {
+          if (!options.experience) return fail(res, 501, "SETTINGS_NOT_CONNECTED", "设置存储尚未接入", requestId);
+          return send(res, 200, { data: await options.experience.settings() });
+        }
+        if (req.method === "PATCH" && url.pathname === "/api/v1/settings") {
+          if (!options.experience) return fail(res, 501, "SETTINGS_NOT_CONNECTED", "设置存储尚未接入", requestId);
+          return send(res, 200, { data: await options.experience.patchSettings(validateSettingsPatch(await body(req))) });
+        }
+        const avatarMatch = /^\/api\/v1\/agents\/([^/]+)\/avatar$/.exec(url.pathname);
+        if (avatarMatch && req.method === "GET") {
+          if (!options.experience) return fail(res, 501, "SETTINGS_NOT_CONNECTED", "设置存储尚未接入", requestId);
+          const avatar = await options.experience.avatar(decodeURIComponent(avatarMatch[1]!));
+          if (!avatar) return fail(res, 404, "AVATAR_NOT_FOUND", "尚未设置自定义头像", requestId);
+          if (req.headers["if-none-match"] === avatar.etag) { res.writeHead(304, { etag: avatar.etag, "cache-control": "private, no-cache", "x-content-type-options": "nosniff" }); res.end(); return; }
+          res.writeHead(200, { "content-type": "image/webp", "content-length": avatar.bytes.length, etag: avatar.etag, "cache-control": "private, no-cache", "x-content-type-options": "nosniff" }); res.end(avatar.bytes); return;
+        }
+        if (avatarMatch && req.method === "PUT") {
+          if (!options.experience) return fail(res, 501, "SETTINGS_NOT_CONNECTED", "设置存储尚未接入", requestId);
+          const agentId = decodeURIComponent(avatarMatch[1]!); options.experience.assertAgent(agentId);
+          const avatar = await options.experience.putAvatar(agentId, await binaryBody(req, MAX_AVATAR_BYTES));
+          return send(res, 200, { data: { etag: avatar.etag } });
+        }
+        if (avatarMatch && req.method === "DELETE") {
+          if (!options.experience) return fail(res, 501, "SETTINGS_NOT_CONNECTED", "设置存储尚未接入", requestId);
+          await options.experience.deleteAvatar(decodeURIComponent(avatarMatch[1]!)); return send(res, 200, { data: null });
+        }
         if (req.method === "GET" && url.pathname === "/api/v1/agents") return send(res, 200, { data: options.mock ? mockAgents : await options.reads?.agents() ?? [] });
         if (req.method === "GET" && url.pathname === "/api/v1/sessions") { const agentId = url.searchParams.get("agentId") ?? undefined, archivedValue = url.searchParams.get("archived"); if (archivedValue !== null && !["true", "false"].includes(archivedValue)) return fail(res, 400, "ARCHIVED_FILTER_INVALID", "归档筛选格式无效", requestId); const archived = archivedValue === null ? false : archivedValue === "true"; return send(res, 200, { data: options.mock ? mockSessions.filter(s => !agentId || s.agentId === agentId) : await options.reads?.sessions(agentId, archived) ?? [] }); }
         if (req.method === "GET" && url.pathname === "/api/v1/revisions") { const agentId = url.searchParams.get("agentId") ?? undefined; const records = options.mock ? mockSessions : await options.reads?.sessions(agentId) ?? []; return send(res, 200, { data: (records as Array<Record<string, unknown>>).map(item => ({ recordId: item.recordId, revision: item.revision, updatedAt: item.updatedAt })) }); }
@@ -162,10 +204,10 @@ export function createPanelServer(options: AppOptions) {
       }
       const pathname = url.pathname === "/" ? "index.html" : url.pathname.slice(1); const safe = normalize(pathname).replace(/^(\.\.(\/|\\|$))+/, ""); const file = join(options.publicDir, safe);
       const types: Record<string,string> = { ".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".svg": "image/svg+xml", ".woff2": "font/woff2", ".woff": "font/woff", ".ttf": "font/ttf" };
-      try { const [root, resolved] = await Promise.all([realpath(options.publicDir), realpath(file)]); const fromRoot = relative(root, resolved); if (fromRoot === ".." || fromRoot.startsWith(`..${sep}`) || fromRoot.startsWith(sep)) throw new Error("STATIC_PATH_ESCAPE"); const data = await readFile(resolved); res.writeHead(200, { "content-type": types[extname(resolved)] ?? "application/octet-stream", "cache-control": pathname === "index.html" ? "no-store" : "public, max-age=3600", "x-content-type-options": "nosniff", "content-security-policy": "default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'" }); res.end(data); }
+      try { const [root, resolved] = await Promise.all([realpath(options.publicDir), realpath(file)]); const fromRoot = relative(root, resolved); if (fromRoot === ".." || fromRoot.startsWith(`..${sep}`) || fromRoot.startsWith(sep)) throw new Error("STATIC_PATH_ESCAPE"); const data = await readFile(resolved); res.writeHead(200, { "content-type": types[extname(resolved)] ?? "application/octet-stream", "cache-control": pathname === "index.html" ? "no-store" : "public, max-age=3600", "x-content-type-options": "nosniff", "content-security-policy": "default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'" }); res.end(data); }
       catch { fail(res, 404, "NOT_FOUND", "页面不存在", requestId); }
     } catch (error) {
-      const known: Record<string, [number, string]> = { AGENT_NOT_ALLOWED: [403, "Agent 不在允许列表中"], SESSION_NOT_FOUND: [404, "会话不存在"], SESSION_UPDATE_EMPTY: [400, "没有需要修改的字段"], SESSION_TITLE_INVALID: [400, "标题格式无效"], SESSION_DELETE_CONFIRMATION_REQUIRED: [400, "删除需要明确确认"], SESSION_NOT_ARCHIVED: [409, "面板会话必须先归档才能彻底删除"], PANEL_SESSION_DELETE_UNSAFE: [409, "会话目录包含未知内容，已拒绝删除"], PANEL_SESSION_NOT_FOUND: [404, "面板会话不存在"], EDIT_TARGET_NOT_USER: [409, "只能编辑用户消息"], PANEL_SESSION_CREATE_FAILED: [500, "面板会话创建失败"], COMMAND_NOT_ALLOWED: [403, "该命令未获面板允许"], COMMAND_ARGS_INVALID: [400, "命令参数无效"], MODEL_NOT_AVAILABLE: [400, "模型不可用"], THINKING_LEVEL_INVALID: [400, "思考等级无效"], THINKING_LEVEL_UNSUPPORTED: [409, "当前模型不支持该思考等级"], REASONING_LEVEL_INVALID: [400, "推理显示模式无效"], IDEMPOTENCY_KEY_REUSED: [409, "重试标识已用于其他请求"], SESSION_BUSY: [409, "该会话正在生成"] };
+      const known: Record<string, [number, string]> = { AGENT_NOT_ALLOWED: [403, "Agent 不在允许列表中"], SETTINGS_INVALID: [400, "设置格式无效"], SETTINGS_UPDATE_EMPTY: [400, "没有需要修改的设置"], SETTINGS_CORRUPT: [500, "设置存储已损坏"], PANEL_STORAGE_UNSAFE: [500, "设置存储暂不可用"], AVATAR_STORAGE_INVALID: [500, "头像存储异常，请重新上传头像"], AVATAR_TOO_LARGE: [413, "头像文件不能超过 5 MiB"], AVATAR_INVALID: [400, "头像必须是有效的 PNG、JPEG 或 WebP，且不超过 4096×4096"], SESSION_NOT_FOUND: [404, "会话不存在"], SESSION_UPDATE_EMPTY: [400, "没有需要修改的字段"], SESSION_TITLE_INVALID: [400, "标题格式无效"], SESSION_DELETE_CONFIRMATION_REQUIRED: [400, "删除需要明确确认"], SESSION_NOT_ARCHIVED: [409, "面板会话必须先归档才能彻底删除"], PANEL_SESSION_DELETE_UNSAFE: [409, "会话目录包含未知内容，已拒绝删除"], PANEL_SESSION_NOT_FOUND: [404, "面板会话不存在"], EDIT_TARGET_NOT_USER: [409, "只能编辑用户消息"], PANEL_SESSION_CREATE_FAILED: [500, "面板会话创建失败"], COMMAND_NOT_ALLOWED: [403, "该命令未获面板允许"], COMMAND_ARGS_INVALID: [400, "命令参数无效"], MODEL_NOT_AVAILABLE: [400, "模型不可用"], THINKING_LEVEL_INVALID: [400, "思考等级无效"], THINKING_LEVEL_UNSUPPORTED: [409, "当前模型不支持该思考等级"], REASONING_LEVEL_INVALID: [400, "推理显示模式无效"], IDEMPOTENCY_KEY_REUSED: [409, "重试标识已用于其他请求"], SESSION_BUSY: [409, "该会话正在生成"] };
       const code = error instanceof ForkError ? error.code : error instanceof Error ? error.message : "INVALID_REQUEST"; const mapped = known[code];
       const status = error instanceof HttpError ? error.status : error instanceof SyntaxError ? 400 : error instanceof ForkError ? 409 : mapped?.[0] ?? 500;
       fail(res, status, error instanceof HttpError ? error.code : error instanceof ForkError ? error.code : mapped ? code : "INVALID_REQUEST", error instanceof ForkError ? error.message : mapped?.[1] ?? "请求无法处理", requestId);
