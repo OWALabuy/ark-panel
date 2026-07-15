@@ -73,16 +73,17 @@ Legend: ✅ available · 🚧 scheduled · 💡 candidate (not scheduled) · ⛔
 | Commands | `/reset`, `/bash`, config/restart, and arbitrary passthrough | ⛔ | Deliberately excluded because of lifecycle, host, and gateway safety risks |
 | Memory | Store per-session `scratch` / `eligible` disposition | ✅ | Defaults to `scratch`; the control is not exposed in the UI yet |
 | Memory | Memory-disposition UI and scratch isolation during inference | 🚧 | Isolation behavior will be selected through `paneltest` runtime acceptance |
-| Appearance | Switchable themes with named accent colors | 🚧 | Built-in light/dark plus gruvbox presets; account-level, cross-device; open color picker deferred |
-| Appearance | Settings drawer | 🚧 | Gear-icon entry; Appearance / Reading / Account sections; account preferences persist server-side |
-| Appearance | Custom per-agent avatars | 🚧 | Uploaded, cropped to 1:1 on the client; account-level and shared; doubles as the agent switcher |
-| Appearance | Adjustable font size | 🚧 | Slider scaling text and line height together; device-local |
+| Appearance | Switchable themes with named accent colors | 🚧 | System/light/dark plus gruvbox medium light/dark; account-level and cross-device; hard/soft and open color picker deferred |
+| Appearance | Settings drawer | 🚧 | Gear opens Appearance / Reading directly; logout stays in the footer; account preferences persist server-side |
+| Appearance | Custom per-agent avatars | 🚧 | Safe capped raster upload, server validation/re-encoding, reset-to-default, account-level sharing, and agent switching |
+| Appearance | Adjustable reading font size | 🚧 | Device-local 85%–130% slider for messages, Markdown, code, tools, and math without scaling navigation/layout |
 | Appearance | Status display (model badge, context gauge, last-active) | 💡 | Recorded as a candidate; not scheduled |
-| Sessions | Collapsible sidebar rail | 🚧 | Keeps new-session, search, recent-sessions, settings, and the agent switcher when collapsed |
-| Generation | Background-completion notification | 🚧 | Builds on run/connection decoupling; title marker when backgrounded, list dot when focused; no browser Notifications |
+| Sessions | Collapsible sidebar rail | 🚧 | Collapses both desktop sidebars; keeps new-session, search, 10 recent sessions, settings, and the agent switcher; mobile flow remains full-screen |
+| Generation | Background-completion notification | 🚧 | Per-session device-local unread state, list markers and title count across concurrent runs; failures notify, user aborts do not |
 | Conversation | Document title reflects session and agent | 🚧 | Format `session - agent`; also carries the background-completion marker |
-| Navigation | Keyboard shortcuts and command palette | ⛔ | Excluded to avoid conflicting with browser Vimium usage |
-| Access | In-UI password change | ⛔ | Kept CLI-only (`npm run password-hash`); the settings account section only exposes logout |
+| Navigation | Keyboard shortcuts and command palette | 💡 | Candidate, not scheduled; a future version must be configurable and disableable for Vimium compatibility |
+| Localization | Multiple UI languages | 💡 | Candidate, not scheduled; the current UI remains Chinese without a premature string-catalog refactor |
+| Access | In-UI password change | ⛔ | Kept CLI-only (`npm run password-hash`); logout remains at the bottom of the settings drawer |
 | Operations | Backup, integrity verification, restore, health check, and systemd example | ✅ | Includes deployment smoke and fixture-based browser acceptance coverage |
 | Extras | Attachments/multimodal input | 💡 | Recorded for future evaluation; not currently scheduled |
 
