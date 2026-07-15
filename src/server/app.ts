@@ -3,10 +3,16 @@ import { readFile, realpath } from "node:fs/promises";
 import { extname, join, normalize, relative, sep } from "node:path";
 import { cookie, cookies, issueSession, newCsrf, verifyPassword, verifySession, type AuthConfig } from "./auth.js";
 import { mockAgents, mockConversation, mockSessions } from "./mock-data.js";
-import { ContextBudgetExceededError } from "../domain/context-budget.js";
 import { ForkError } from "../domain/fork.js";
+import type { PublicPanelRun } from "./run-store.js";
 
-export interface GenerationApi { generate(recordId: string, message: string, signal: AbortSignal, runId: string, expectedRevision?: string): Promise<{ runId: string; entries: unknown[]; revision?: string }>; abort(runId: string): boolean }
+export interface GenerationApi {
+  create(recordId: string, message: string, runId?: string, expectedRevision?: string): Promise<PublicPanelRun>;
+  get(runId: string): Promise<PublicPanelRun | undefined>;
+  subscribe(runId: string, listener: (run: PublicPanelRun) => void): Promise<(() => void) | undefined>;
+  abortRun(runId: string): Promise<PublicPanelRun | undefined>;
+  activeForRecord(recordId: string): Promise<PublicPanelRun | undefined>;
+}
 export interface CommandApi { dispatch(recordId: string, request: { command: string; args: string[] }): Promise<unknown> }
 export interface ReadApi {
   agents(): Promise<unknown[]>; sessions(agentId?: string, archived?: boolean): Promise<unknown[]>; conversation(recordId: string): Promise<unknown | null>;
@@ -26,6 +32,7 @@ class HttpError extends Error { constructor(readonly status: number, readonly co
 async function body(req: IncomingMessage): Promise<unknown> { const chunks: Buffer[] = []; let size = 0; for await (const chunk of req) { size += chunk.length; if (size > 16_384) throw new HttpError(413, "BODY_TOO_LARGE"); chunks.push(Buffer.from(chunk)); } return JSON.parse(Buffer.concat(chunks).toString("utf8")); }
 function sameOrigin(req: IncomingMessage, options: AppOptions): boolean { const origin = req.headers.origin; if (!origin) return false; return options.publicOrigins?.includes(origin) ?? origin === `http://${req.headers.host}`; }
 function allowedHost(req: IncomingMessage, options: AppOptions): boolean { return !options.allowedHosts || (!!req.headers.host && options.allowedHosts.includes(req.headers.host)); }
+function validRunId(value: unknown): value is string { return typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value); }
 
 export function createPanelServer(options: AppOptions) {
   const attempts = new Map<string, number[]>();
@@ -73,7 +80,9 @@ export function createPanelServer(options: AppOptions) {
           if (!options.reads?.deleteSession) return fail(res, 501, "DATA_NOT_CONNECTED", "数据层尚未接入", requestId);
           const value = await body(req) as { confirm?: unknown };
           if (value.confirm !== true) return fail(res, 400, "SESSION_DELETE_CONFIRMATION_REQUIRED", "删除需要明确确认", requestId);
-          const recordId = decodeURIComponent(url.pathname.slice("/api/v1/sessions/".length)); return send(res, 200, { data: await options.reads.deleteSession(recordId, true) });
+          const recordId = decodeURIComponent(url.pathname.slice("/api/v1/sessions/".length));
+          if (await options.generation?.activeForRecord(recordId)) return fail(res, 409, "SESSION_BUSY", "该会话正在生成，不能删除", requestId);
+          return send(res, 200, { data: await options.reads.deleteSession(recordId, true) });
         }
         if (req.method === "GET" && /^\/api\/v1\/sessions\/[^/]+\/export\.md$/.test(url.pathname)) {
           if (!options.reads?.exportMarkdown) return fail(res, 501, "DATA_NOT_CONNECTED", "数据层尚未接入", requestId);
@@ -101,48 +110,53 @@ export function createPanelServer(options: AppOptions) {
           const value = await body(req) as { message?: unknown }; if (typeof value.message !== "string" || !value.message.trim()) return fail(res, 400, "MESSAGE_REQUIRED", "消息不能为空", requestId);
           return send(res, 201, { data: await options.reads.editAndFork(decodeURIComponent(match[1]!), decodeURIComponent(match[2]!), value.message) });
         }
+        if (req.method === "POST" && /^\/api\/v1\/sessions\/[^/]+\/runs$/.test(url.pathname)) {
+          if (!options.generation) return fail(res, 501, "GATEWAY_NOT_CONNECTED", "后台任务适配器尚未接入", requestId);
+          const recordId = decodeURIComponent(url.pathname.slice("/api/v1/sessions/".length, -"/runs".length));
+          if (options.reads) { const target = await options.reads.conversation(recordId) as { sourceKind?: unknown } | null; if (!target) return fail(res, 404, "SESSION_NOT_FOUND", "会话不存在", requestId); if (target.sourceKind !== "panel") return fail(res, 409, "SOURCE_READ_ONLY", "真实活会话和归档只读，请先 fork 为面板会话", requestId); }
+          const value = await body(req) as { message?: unknown; revision?: unknown };
+          if (typeof value.message !== "string" || !value.message.trim()) return fail(res, 400, "MESSAGE_REQUIRED", "消息不能为空", requestId);
+          if (value.revision !== undefined && typeof value.revision !== "string") return fail(res, 400, "REVISION_INVALID", "revision 格式错误", requestId);
+          const retryKey = req.headers["idempotency-key"];
+          if (retryKey !== undefined && !validRunId(retryKey)) return fail(res, 400, "IDEMPOTENCY_KEY_INVALID", "Idempotency-Key 格式错误", requestId);
+          const created = await options.generation.create(recordId, value.message, typeof retryKey === "string" ? retryKey : undefined, typeof value.revision === "string" ? value.revision : undefined) as PublicPanelRun & { newlyCreated?: boolean };
+          const { newlyCreated, ...snapshot } = created; return send(res, newlyCreated === false ? 200 : 202, { data: snapshot });
+        }
+        if (req.method === "GET" && /^\/api\/v1\/sessions\/[^/]+\/runs\/active$/.test(url.pathname)) {
+          if (!options.generation) return fail(res, 501, "GATEWAY_NOT_CONNECTED", "后台任务适配器尚未接入", requestId);
+          const recordId = decodeURIComponent(url.pathname.slice("/api/v1/sessions/".length, -"/runs/active".length));
+          return send(res, 200, { data: await options.generation.activeForRecord(recordId) ?? null });
+        }
+        if (req.method === "GET" && /^\/api\/v1\/runs\/[^/]+$/.test(url.pathname)) {
+          if (!options.generation) return fail(res, 501, "GATEWAY_NOT_CONNECTED", "后台任务适配器尚未接入", requestId);
+          const runId = decodeURIComponent(url.pathname.slice("/api/v1/runs/".length));
+          if (!validRunId(runId)) return fail(res, 400, "RUN_ID_INVALID", "runId 格式错误", requestId);
+          const run = await options.generation.get(runId); return run ? send(res, 200, { data: run }) : fail(res, 404, "RUN_NOT_FOUND", "任务不存在", requestId);
+        }
+        if (req.method === "GET" && /^\/api\/v1\/runs\/[^/]+\/events$/.test(url.pathname)) {
+          if (!options.generation) return fail(res, 501, "GATEWAY_NOT_CONNECTED", "后台任务适配器尚未接入", requestId);
+          const runId = decodeURIComponent(url.pathname.slice("/api/v1/runs/".length, -"/events".length));
+          if (!validRunId(runId)) return fail(res, 400, "RUN_ID_INVALID", "runId 格式错误", requestId);
+          if (!await options.generation.get(runId)) return fail(res, 404, "RUN_NOT_FOUND", "任务不存在", requestId);
+          res.writeHead(200, { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-store", connection: "keep-alive", "x-accel-buffering": "no" });
+          let first = true, terminal = false;
+          const write = (name: string, data: PublicPanelRun) => { if (!res.writableEnded && !res.destroyed) res.write(`id: ${data.sequence}\nevent: ${name}\ndata: ${JSON.stringify(data)}\n\n`); };
+          const unsubscribe = await options.generation.subscribe(runId, run => {
+            write(first ? "run.snapshot" : "run.updated", run); first = false;
+            if (["completed", "failed", "aborted"].includes(run.status)) { terminal = true; write(`run.${run.status}`, run); res.end(); }
+          });
+          if (!unsubscribe) { if (!res.writableEnded) res.end(); return; }
+          if (!terminal) {
+            const heartbeat = setInterval(() => { if (!res.destroyed) res.write(": heartbeat\n\n"); }, 15_000); heartbeat.unref();
+            res.once("close", () => { clearInterval(heartbeat); unsubscribe(); });
+          }
+          return;
+        }
         if (req.method === "POST" && /^\/api\/v1\/runs\/[^/]+\/abort$/.test(url.pathname)) {
           if (!options.generation) return fail(res, 501, "GATEWAY_NOT_CONNECTED", "推理适配器尚未接入", requestId);
           const runId = decodeURIComponent(url.pathname.slice("/api/v1/runs/".length, -"/abort".length));
-          if (!/^[0-9a-f-]{36}$/i.test(runId)) return fail(res, 400, "RUN_ID_INVALID", "runId 格式错误", requestId);
-          // 幂等：run 可能已完成或从未存在，一律返回 ok，只报告是否命中了进行中的 run。
-          return send(res, 200, { data: { aborted: options.generation.abort(runId) } });
-        }
-        if (req.method === "POST" && url.pathname.endsWith("/messages")) {
-          if (!options.generation) return send(res, 501, { error: { code: "GATEWAY_NOT_CONNECTED", message: "推理适配器尚未接入", requestId } });
-          const match = /^\/api\/v1\/sessions\/([^/]+)\/messages$/.exec(url.pathname); if (!match) return fail(res, 404, "NOT_FOUND", "接口不存在", requestId);
-          const targetRecordId = decodeURIComponent(match[1]!);
-          if (options.reads) { const target = await options.reads.conversation(targetRecordId) as { sourceKind?: unknown } | null; if (!target) return fail(res, 404, "SESSION_NOT_FOUND", "会话不存在", requestId); if (target.sourceKind !== "panel") return fail(res, 409, "SOURCE_READ_ONLY", "真实活会话和归档在首版中只读，请先 fork 为面板会话", requestId); }
-          const value = await body(req) as { message?: unknown; revision?: unknown }; if (typeof value.message !== "string" || !value.message.trim()) return fail(res, 400, "MESSAGE_REQUIRED", "消息不能为空", requestId);
-          if (value.revision !== undefined && typeof value.revision !== "string") return fail(res, 400, "REVISION_INVALID", "revision 格式错误", requestId);
-          const retryKey = req.headers["idempotency-key"];
-          if (retryKey !== undefined && (typeof retryKey !== "string" || !/^[0-9a-f-]{36}$/i.test(retryKey))) return fail(res, 400, "IDEMPOTENCY_KEY_INVALID", "Idempotency-Key 格式错误", requestId);
-          res.writeHead(200, { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-store", connection: "keep-alive", "x-accel-buffering": "no" });
-          // 连接断开只停止向该客户端推流，不中断推理：run 由 generation 按 runId 独立持有，
-          // 仅显式 /runs/:runId/abort 接口能停止它。因此这里不再把连接关闭绑定到 abort。
-          const event = (name: string, data: unknown) => { if (!res.writableEnded && !res.destroyed) res.write(`event: ${name}\ndata: ${JSON.stringify(data)}\n\n`); };
-          const runId = typeof retryKey === "string" ? retryKey : crypto.randomUUID();
-          const heartbeat = setInterval(() => { if (!res.destroyed) res.write(": heartbeat\n\n"); }, 15_000); heartbeat.unref(); res.once("close", () => clearInterval(heartbeat));
-          event("run.started", { runId });
-          try {
-            const result = await options.generation.generate(targetRecordId, value.message, new AbortController().signal, runId, typeof value.revision === "string" ? value.revision : undefined);
-            if (result.runId !== runId) throw new Error("RUN_ID_MISMATCH");
-            event("run.completed", { runId, entries: result.entries, revision: result.revision });
-          } catch (error) {
-            const aborted = error instanceof Error && error.message === "BRIDGE_ABORTED";
-            const known = error instanceof Error && ["SESSION_BUSY", "REVISION_CONFLICT", "PANEL_SESSION_NOT_FOUND", "RUNTIME_NOT_CONFIGURED", "IDEMPOTENCY_KEY_REUSED", "SLASH_COMMANDS_UNSUPPORTED"].includes(error.message) ? error.message : error instanceof ContextBudgetExceededError ? error.code : "RUN_FAILED";
-            if (!aborted && known === "RUN_FAILED") {
-              const detail = error instanceof Error ? error.stack ?? error.message : String(error);
-              process.stderr.write(`[ark-panel] generation failed requestId=${requestId} recordId=${targetRecordId}: ${detail}\n`);
-            }
-            const userMessages: Record<string, string> = { SESSION_BUSY: "该会话正在生成，请稍后重试。", REVISION_CONFLICT: "会话已在其他窗口更新，请刷新后重试。", PANEL_SESSION_NOT_FOUND: "只有面板自建会话可以在这里继续。", RUNTIME_NOT_CONFIGURED: "该 Agent 尚未配置专用推理 runtime。", IDEMPOTENCY_KEY_REUSED: "重试标识已用于其他消息，请重新发送。", RUN_FAILED: "生成失败，请稍后重试。" };
-            event(aborted ? "run.aborted" : "run.failed", { runId, code: aborted ? "RUN_ABORTED" : known,
-              ...(error instanceof ContextBudgetExceededError ? { message: error.message, estimate: error.estimate } : {}),
-              ...(known === "SLASH_COMMANDS_UNSUPPORTED" ? { message: "首版面板暂不支持 OpenClaw 斜杠命令，请在原有 OpenClaw 渠道中执行。" } : userMessages[known] ? { message: userMessages[known] } : {}) });
-          } finally {
-            clearInterval(heartbeat);
-          }
-          res.end(); return;
+          if (!validRunId(runId)) return fail(res, 400, "RUN_ID_INVALID", "runId 格式错误", requestId);
+          const run = await options.generation.abortRun(runId); return run ? send(res, 200, { data: run }) : fail(res, 404, "RUN_NOT_FOUND", "任务不存在", requestId);
         }
         return fail(res, 404, "NOT_FOUND", "接口不存在", requestId);
       }
@@ -151,7 +165,7 @@ export function createPanelServer(options: AppOptions) {
       try { const [root, resolved] = await Promise.all([realpath(options.publicDir), realpath(file)]); const fromRoot = relative(root, resolved); if (fromRoot === ".." || fromRoot.startsWith(`..${sep}`) || fromRoot.startsWith(sep)) throw new Error("STATIC_PATH_ESCAPE"); const data = await readFile(resolved); res.writeHead(200, { "content-type": types[extname(resolved)] ?? "application/octet-stream", "cache-control": pathname === "index.html" ? "no-store" : "public, max-age=3600", "x-content-type-options": "nosniff", "content-security-policy": "default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'" }); res.end(data); }
       catch { fail(res, 404, "NOT_FOUND", "页面不存在", requestId); }
     } catch (error) {
-      const known: Record<string, [number, string]> = { AGENT_NOT_ALLOWED: [403, "Agent 不在允许列表中"], SESSION_NOT_FOUND: [404, "会话不存在"], SESSION_UPDATE_EMPTY: [400, "没有需要修改的字段"], SESSION_TITLE_INVALID: [400, "标题格式无效"], SESSION_DELETE_CONFIRMATION_REQUIRED: [400, "删除需要明确确认"], SESSION_NOT_ARCHIVED: [409, "面板会话必须先归档才能彻底删除"], PANEL_SESSION_DELETE_UNSAFE: [409, "会话目录包含未知内容，已拒绝删除"], PANEL_SESSION_NOT_FOUND: [404, "面板会话不存在"], EDIT_TARGET_NOT_USER: [409, "只能编辑用户消息"], PANEL_SESSION_CREATE_FAILED: [500, "面板会话创建失败"], COMMAND_NOT_ALLOWED: [403, "该命令未获面板允许"], COMMAND_ARGS_INVALID: [400, "命令参数无效"], MODEL_NOT_AVAILABLE: [400, "模型不可用"], THINKING_LEVEL_INVALID: [400, "思考等级无效"], THINKING_LEVEL_UNSUPPORTED: [409, "当前模型不支持该思考等级"], REASONING_LEVEL_INVALID: [400, "推理显示模式无效"] };
+      const known: Record<string, [number, string]> = { AGENT_NOT_ALLOWED: [403, "Agent 不在允许列表中"], SESSION_NOT_FOUND: [404, "会话不存在"], SESSION_UPDATE_EMPTY: [400, "没有需要修改的字段"], SESSION_TITLE_INVALID: [400, "标题格式无效"], SESSION_DELETE_CONFIRMATION_REQUIRED: [400, "删除需要明确确认"], SESSION_NOT_ARCHIVED: [409, "面板会话必须先归档才能彻底删除"], PANEL_SESSION_DELETE_UNSAFE: [409, "会话目录包含未知内容，已拒绝删除"], PANEL_SESSION_NOT_FOUND: [404, "面板会话不存在"], EDIT_TARGET_NOT_USER: [409, "只能编辑用户消息"], PANEL_SESSION_CREATE_FAILED: [500, "面板会话创建失败"], COMMAND_NOT_ALLOWED: [403, "该命令未获面板允许"], COMMAND_ARGS_INVALID: [400, "命令参数无效"], MODEL_NOT_AVAILABLE: [400, "模型不可用"], THINKING_LEVEL_INVALID: [400, "思考等级无效"], THINKING_LEVEL_UNSUPPORTED: [409, "当前模型不支持该思考等级"], REASONING_LEVEL_INVALID: [400, "推理显示模式无效"], IDEMPOTENCY_KEY_REUSED: [409, "重试标识已用于其他请求"], SESSION_BUSY: [409, "该会话正在生成"] };
       const code = error instanceof ForkError ? error.code : error instanceof Error ? error.message : "INVALID_REQUEST"; const mapped = known[code];
       const status = error instanceof HttpError ? error.status : error instanceof SyntaxError ? 400 : error instanceof ForkError ? 409 : mapped?.[0] ?? 500;
       fail(res, status, error instanceof HttpError ? error.code : error instanceof ForkError ? error.code : mapped ? code : "INVALID_REQUEST", error instanceof ForkError ? error.message : mapped?.[1] ?? "请求无法处理", requestId);

@@ -54,11 +54,14 @@ try {
   const created = await createdResponse.json() as { data: { recordId: string; revision: string } };
   const marker = `RUNTIME_ACCEPTED_${randomUUID().slice(0, 8)}`;
   const message = `这是隔离验收。不要使用任何工具，不要访问文件、记忆、网络或外部服务，只回答固定短语：${marker}`;
-  const generated = await fetch(`${base}/api/v1/sessions/${created.data.recordId}/messages`, {
-    method: "POST", headers: { ...writeHeaders, "idempotency-key": randomUUID() }, body: JSON.stringify({ message, revision: created.data.revision })
+  const runId = randomUUID();
+  const generated = await fetch(`${base}/api/v1/sessions/${created.data.recordId}/runs`, {
+    method: "POST", headers: { ...writeHeaders, "idempotency-key": runId }, body: JSON.stringify({ message, revision: created.data.revision })
   });
-  const events = await generated.text();
-  if (!generated.ok || !events.includes("event: run.completed")) throw new Error("runtime 生成未完成");
+  if (!generated.ok) throw new Error("runtime run 创建失败");
+  const observed = await fetch(`${base}/api/v1/runs/${runId}/events`, { headers: readHeaders });
+  const events = await observed.text();
+  if (!observed.ok || !events.includes("event: run.completed")) throw new Error("runtime 生成未完成");
   const conversationResponse = await fetch(`${base}/api/v1/sessions/${created.data.recordId}`, { headers: readHeaders });
   if (!conversationResponse.ok) throw new Error("无法读取落盘会话");
   const conversationText = await conversationResponse.text();

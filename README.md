@@ -16,7 +16,7 @@ ark-panel runs locally on Node.js 22 and listens on `127.0.0.1` by default. Exis
 
 Panel-owned sessions support `/model`, `/think`, `/reasoning`, `/new`, `/commands`, `/help`, `/status`, and `/models` through a separate structured command API. Inputs beginning with `/` are still rejected by the ordinary message API and never forwarded to the gateway's in-band command dispatcher. See [the slash-command decision](docs/decisions/slash-commands.md) for the boundary.
 
-The server currently reports generation lifecycle events over SSE and refreshes the completed message group after the gateway finishes. It does not claim token-by-token streaming.
+Generation runs are server-owned resources rather than properties of one browser request. The panel persists their lifecycle and idempotency state, lets browsers query or re-subscribe after a dropped SSE connection, and only clears a draft after a confirmed completed run. It does not claim token-by-token streaming.
 
 Message text is rendered as safe Markdown with raw HTML disabled. Whole messages and individual fenced code blocks can be copied from the conversation view.
 
@@ -45,7 +45,7 @@ Legend: ✅ available · 🚧 scheduled · 💡 candidate (not scheduled) · ⛔
 | Messages | Thinking, tool calls, and tool results | ✅ | Structured, collapsible rendering including command output |
 | Composer | Per-session local drafts | ✅ | Browser-local only; restored after refresh and retained when sending fails |
 | Conversation | Long-thread scroll following | ✅ | Preserves the reading position and shows a new-message control when the user has scrolled up |
-| Generation | Run lifecycle, stop, retry, and idempotent sending | ✅ | SSE reports lifecycle events; completed message groups refresh atomically |
+| Generation | Durable run lifecycle, reconnect, stop, retry, and idempotent sending | ✅ | Server-owned run state survives browser disconnects; SSE can be re-subscribed and completed message groups commit atomically |
 | Generation | Token-by-token streaming | ⛔ | The current gateway integration does not promise incremental token output |
 | Context | Configurable context-budget protection | ✅ | Rejects oversized requests before generation instead of silently truncating history |
 | Context | Durable compaction and `/compact` | 🚧 | Planned together as the long-conversation strategy; summary boundaries and fork behavior still need design closure |

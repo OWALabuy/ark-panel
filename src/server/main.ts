@@ -22,6 +22,7 @@ if (config.dataRoot && config.runtimes.size) {
   for (const [agentId, value] of config.runtimes) runtimeByAgent.set(agentId, value.runtimeAgentId);
   generationApi = new PanelGenerationApi(bridge,
     { dataRoot: config.dataRoot, runtimeByAgent, contextBudget: new ConservativeContextBudget(config.contextHistoryBudgetTokens), operations });
+  await generationApi.initialize();
 }
 const commandApi = config.dataRoot && readApi ? new PanelCommandApi(config.dataRoot, config.readAgents.map(agent => agent.agentId), {
   models: async () => (await gateway.listModels()).models,

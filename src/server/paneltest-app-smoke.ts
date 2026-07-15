@@ -36,9 +36,11 @@ try {
   const createdResponse = await fetch(`${base}/api/v1/sessions`, { method: "POST", headers: writeHeaders, body: JSON.stringify({ agentId: "claude" }) });
   if (createdResponse.status !== 201) throw new Error("创建 panel 会话失败"); const created = await createdResponse.json() as { data: { recordId: string; revision: string } };
   const runId = randomUUID(), testMessage = `只回答：面板应用端到端通过-${runId.slice(0, 8)}。不使用工具。`;
-  const generated = await fetch(`${base}/api/v1/sessions/${created.data.recordId}/messages`, { method: "POST", headers: { ...writeHeaders, "idempotency-key": runId },
+  const generated = await fetch(`${base}/api/v1/sessions/${created.data.recordId}/runs`, { method: "POST", headers: { ...writeHeaders, "idempotency-key": runId },
     body: JSON.stringify({ message: testMessage, revision: created.data.revision }) });
-  const events = await generated.text(); if (!generated.ok || !events.includes("event: run.completed")) throw new Error("paneltest 生成未完成");
+  if (!generated.ok) throw new Error("paneltest run 创建失败");
+  const observed = await fetch(`${base}/api/v1/runs/${runId}/events`, { headers: readHeaders });
+  const events = await observed.text(); if (!observed.ok || !events.includes("event: run.completed")) throw new Error("paneltest 生成未完成");
   const conversation = await (await fetch(`${base}/api/v1/sessions/${created.data.recordId}`, { headers: readHeaders })).json() as { data: { document: { entries: Array<{ id?: string; message?: { role?: string } }> } } };
   const assistant = [...conversation.data.document.entries].reverse().find(entry => entry.message?.role === "assistant" && entry.id); if (!assistant?.id) throw new Error("持久化结果缺少 assistant entry");
   const searched = await (await fetch(`${base}/api/v1/search?q=${encodeURIComponent(runId.slice(0, 8))}&agentId=claude`, { headers: readHeaders })).json() as { data: unknown[] };

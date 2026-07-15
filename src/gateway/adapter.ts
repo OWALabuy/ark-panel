@@ -66,9 +66,29 @@ export interface BridgeRequest {
   idempotencyKey: string;
   overrides?: SessionOverrides;
   signal?: AbortSignal;
+  lifecycle?: BridgeLifecycleCallback;
+  cleanupFailed?: () => Promise<void>;
 }
 
 export interface BridgeResult { runId: string; sessionId: string; entries: TranscriptDocument["entries"] }
+
+// These events are persistence boundaries, not a diagnostic log. In particular,
+// message content is only exposed by entries_materialized, whose payload is the
+// completed result that the caller must durably save before bridge cleanup begins.
+export type BridgeLifecycleEvent =
+  | { type: "temporary_session_created"; runtimeAgentId: string; sessionId: string; sessionKey: string; transcriptPath: string }
+  | { type: "history_materialized"; previousEntryCount: number }
+  | { type: "gateway_send_accepted"; gatewayRunId: string }
+  | { type: "entries_materialized"; entries: TranscriptDocument["entries"] };
+
+export type BridgeLifecycleCallback = (event: BridgeLifecycleEvent) => Promise<void>;
+
+export interface BridgeOrphanCleanupRequest {
+  runtimeAgentId: string;
+  sessionId: string;
+  sessionKey: string;
+  gatewayRunId?: string;
+}
 
 export function assertSupportedVersion(actual: string): void {
   if (actual !== SUPPORTED_OPENCLAW_VERSION) {
@@ -87,12 +107,16 @@ export interface BridgeMaterializer {
 export async function runBridge(client: GatewayClient, materializer: BridgeMaterializer, request: BridgeRequest): Promise<BridgeResult> {
   assertSupportedVersion(await client.version());
   const created = await client.createSession(request.runtimeAgentId);
+  await request.lifecycle?.({ type: "temporary_session_created", runtimeAgentId: request.runtimeAgentId,
+    sessionId: created.sessionId, sessionKey: created.sessionKey, transcriptPath: created.transcriptPath });
   const previousCount = await materializer.replaceCreatedTranscript(created, request.historyThroughPreviousRun);
+  await request.lifecycle?.({ type: "history_materialized", previousEntryCount: previousCount });
   if (request.overrides && Object.keys(request.overrides).length > 0) {
     if (!client.applySessionOverrides) throw new Error("GATEWAY_SESSION_OVERRIDES_UNSUPPORTED");
     await client.applySessionOverrides(created.sessionKey, request.overrides);
   }
   const { runId } = await client.send(created.sessionKey, request.latestUserMessage, request.idempotencyKey);
+  await request.lifecycle?.({ type: "gateway_send_accepted", gatewayRunId: runId });
   const abort = () => { void client.abort(created.sessionKey, runId); };
   request.signal?.addEventListener("abort", abort, { once: true });
   try {
@@ -101,5 +125,7 @@ export async function runBridge(client: GatewayClient, materializer: BridgeMater
     if (request.signal?.aborted) throw new Error("BRIDGE_ABORTED");
   } finally { request.signal?.removeEventListener("abort", abort); }
   const added = await materializer.readNewEntries(created, previousCount);
-  return { runId, sessionId: created.sessionId, entries: materializer.verifyAndStripSubmittedUser(added, request.latestUserMessage, request.latestUserEntryId) };
+  const entries = materializer.verifyAndStripSubmittedUser(added, request.latestUserMessage, request.latestUserEntryId);
+  await request.lifecycle?.({ type: "entries_materialized", entries });
+  return { runId, sessionId: created.sessionId, entries };
 }
