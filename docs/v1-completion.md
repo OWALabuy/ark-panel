@@ -5,7 +5,7 @@
 - 账号密码登录、CSRF、Host/Origin 限制、限速、退出登录与 localhost-only 监听。
 - 真实 agent active transcript 与 OpenClaw reset 归档只读浏览；panel 数据目录独立。
 - 多 agent、会话列表、来源标记、全文搜索、revision 轮询与移动端逐层导航。
-- panel 会话新建、完整 transcript 展示、专用 runtime 推理、SSE 生命周期、停止生成、错误重试与幂等键。
+- panel 会话新建、完整 transcript 展示、专用 runtime 推理、SSE 生命周期与临时流式预览、停止生成、错误重试与幂等键。
 - 从合法边界 fork、编辑用户消息后派生分支；不修改来源 transcript。
 - thinking、tool use、tool result 安全 DOM 渲染并默认折叠。
 - 消息安全 Markdown、代码高亮与本地 KaTeX 数学公式渲染；支持四种常用公式定界符，失败时保留原文且不依赖 CDN。
@@ -17,7 +17,7 @@
 
 - 向真实 active 会话发送消息；它们在面板中只读。
 - `/reset`、`/compact` 或其他 OpenClaw 斜杠命令。
-- 逐 token 输出；当前 SSE 提供 run 生命周期，完成后整组刷新。
+- 严格逐 token 输出；当前流式粒度由 OpenClaw 合并事件决定，工具 stdout 与 reasoning 不做实时转发。
 - 自动压缩或模型摘要；超预算时拒绝并建议从较早位置 fork。
 
 ## 上线前需要用户参与

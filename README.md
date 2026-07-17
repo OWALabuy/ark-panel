@@ -16,7 +16,7 @@ ark-panel runs locally on Node.js 22 and listens on `127.0.0.1` by default. Exis
 
 Panel-owned sessions support `/model`, `/think`, `/reasoning`, `/new`, `/commands`, `/help`, `/status`, and `/models` through a separate structured command API. Inputs beginning with `/` are still rejected by the ordinary message API and never forwarded to the gateway's in-band command dispatcher. See [the slash-command decision](docs/decisions/slash-commands.md) for the boundary.
 
-Generation runs are server-owned resources rather than properties of one browser request. The panel persists their lifecycle and idempotency state, lets browsers query or re-subscribe after a dropped SSE connection, and only clears a draft after a confirmed completed run. It does not claim token-by-token streaming.
+Generation runs are server-owned resources rather than properties of one browser request. The panel persists their lifecycle and idempotency state, lets browsers query or re-subscribe after a dropped SSE connection, and only clears a draft after a confirmed completed run. While OpenClaw is running, the panel also relays its coalesced assistant-text updates and tool start/completion events as an ephemeral live preview. This is upstream event streaming, not a promise of one event per token.
 
 Message text is rendered as safe Markdown with raw HTML disabled. Inline and display LaTeX math is rendered locally with KaTeX; no CDN is required. Whole messages and individual fenced code blocks can be copied from the conversation view.
 
@@ -65,7 +65,7 @@ Legend: ✅ available · 🚧 scheduled · 💡 candidate (not scheduled) · ⛔
 | Composer | Per-session local drafts and generation state | ✅ | Browser-local drafts survive refresh and failure; a run only locks its own conversation, so other drafts remain editable |
 | Conversation | Long-thread scroll following | ✅ | Preserves the reading position and shows a new-message control when the user has scrolled up |
 | Generation | Durable run lifecycle, reconnect, stop, retry, and idempotent sending | ✅ | Server-owned run state survives browser disconnects; SSE can be re-subscribed and completed message groups commit atomically |
-| Generation | Token-by-token streaming | ⛔ | The current gateway integration does not promise incremental token output |
+| Generation | Live assistant text and tool status | ✅ | Relays OpenClaw's coalesced updates (currently about every 150 ms), not one event per token; tool stdout and reasoning are not streamed |
 | Context | Configurable context-budget protection | ✅ | Rejects oversized requests before generation instead of silently truncating history |
 | Context | Durable compaction and `/compact` | 🚧 | Planned together as the long-conversation strategy; summary boundaries and fork behavior still need design closure |
 | Commands | `/model`, `/think`, `/reasoning`, `/new` | ✅ | Panel-native structured operations; command text is never forwarded as a normal prompt |
@@ -115,6 +115,8 @@ export PANEL_PORT='8790'
 export PANEL_CONTEXT_HISTORY_BUDGET_TOKENS='100000'
 export PANEL_GATEWAY_RUN_TIMEOUT_MS='1800000'
 export PANEL_RUN_WATCHER_GRACE_MS='30000'
+# Optional: disable live preview while retaining durable generation and SSE lifecycle events.
+export PANEL_OPENCLAW_STREAMING='1'
 
 export PANEL_READ_AGENTS='{
   "claude":{"label":"Claude","sessionsRoot":"/home/USER/.openclaw/agents/claude/sessions"},
@@ -130,6 +132,8 @@ export PANEL_AGENT_RUNTIMES='{
 `PANEL_READ_AGENTS` is the allowlist of real agents that may be browsed. `PANEL_AGENT_RUNTIMES` maps each browsable agent to a dedicated runtime with no channel bindings; never use a real, channel-bound agent as the panel runtime.
 
 Long-running agent work defaults to a 30-minute OpenClaw execution limit (`PANEL_GATEWAY_RUN_TIMEOUT_MS`). The panel then waits an additional 30 seconds (`PANEL_RUN_WATCHER_GRACE_MS`) for the terminal trajectory event, so an upstream timeout or abort is reported accurately instead of being hidden by a simultaneous panel timeout.
+
+Live preview uses a separate server-side WebSocket connection to the local OpenClaw Gateway and keeps the browser on the panel's authenticated SSE endpoint; the Gateway credential is never sent to the browser. By default the panel reads the local URL and token/password from `~/.openclaw/openclaw.json`. `PANEL_OPENCLAW_GATEWAY_URL`, `PANEL_OPENCLAW_GATEWAY_TOKEN`, and `PANEL_OPENCLAW_GATEWAY_PASSWORD` override those values, while `PANEL_OPENCLAW_STREAMING=0` disables preview. The observer requests only `operator.read`. If it disconnects or cannot authenticate, generation continues through the existing CLI/trajectory path and the UI falls back to a non-streaming waiting state. The completed, verified transcript remains authoritative and replaces the preview atomically.
 
 Build and start:
 
@@ -153,6 +157,7 @@ When serving through an HTTPS reverse proxy, set `PANEL_SECURE_COOKIE=1`. The fi
 - [Engineering decisions](docs/decisions/engineering-decisions.md)
 - [Version 1 completion status](docs/v1-completion.md)
 - [Runtime acceptance procedure](docs/testing/runtime-acceptance.md)
+- [Streaming protocol acceptance](docs/testing/streaming-acceptance.md)
 - [Browser acceptance results](docs/testing/browser-acceptance.md)
 - [Development archive](docs/archive/development-notes/)
 

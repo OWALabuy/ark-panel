@@ -1,10 +1,13 @@
 import type { TranscriptDocument } from "../domain/transcript.js";
 import { unregisterAndClean } from "./artifact-cleanup.js";
 import { assertSupportedVersion, type BridgeMaterializer, type BridgeOrphanCleanupRequest, type BridgeRequest, type BridgeResult, type CreatedSession, type GatewayClient, type SessionOverrides } from "./adapter.js";
+import type { GatewayStreamEvent, GatewayStreamListener } from "./stream-client.js";
+
+interface StreamObserver { observe(sessionKey: string, listener: GatewayStreamListener): Promise<() => void> }
 
 export class BridgeService {
   constructor(private readonly client: GatewayClient, private readonly materializer: BridgeMaterializer,
-    private readonly allowedRuntimeRoots: ReadonlyMap<string, string>) {}
+    private readonly allowedRuntimeRoots: ReadonlyMap<string, string>, private readonly streamObserver?: StreamObserver) {}
 
   async validateOverrides(runtimeAgentId: string, overrides: SessionOverrides): Promise<void> {
     assertSupportedVersion(await this.client.version());
@@ -32,6 +35,7 @@ export class BridgeService {
     assertSupportedVersion(await this.client.version());
     let created: CreatedSession | undefined; let runId: string | undefined; let primaryError: unknown;
     let abortPromise: Promise<void> | undefined; let entriesStaged = false; let cleanupSafe = true; let sendAttempted = false;
+    let unsubscribeStream: (() => void) | undefined;
     const abortCreated = (): Promise<void> => abortPromise ??= created ? this.client.abort(created.sessionKey, runId, created.sessionId) : Promise.resolve();
     try {
       created = await this.client.createSession(request.runtimeAgentId);
@@ -44,6 +48,19 @@ export class BridgeService {
         await this.client.applySessionOverrides(created.sessionKey, request.overrides);
       }
       if (request.signal?.aborted) throw new Error("BRIDGE_ABORTED");
+      if (this.streamObserver && request.stream) {
+        try {
+          unsubscribeStream = await this.streamObserver.observe(created.sessionKey, (event: GatewayStreamEvent) => {
+            if (event.type === "connection") request.stream?.(event);
+            else if (event.runId === request.idempotencyKey) {
+              const { runId: _runId, sessionKey: _sessionKey, ...visible } = event;
+              request.stream?.(visible);
+            }
+          });
+        } catch (error) {
+          process.stderr.write(`[ark-panel] stream attach degraded: ${error instanceof Error ? error.message : String(error)}\n`);
+        }
+      }
       sendAttempted = true; ({ runId } = await this.client.send(created.sessionKey, request.latestUserMessage, request.idempotencyKey));
       const abort = () => { void abortCreated().catch(() => undefined); };
       request.signal?.addEventListener("abort", abort, { once: true });
@@ -75,6 +92,7 @@ export class BridgeService {
       }
       throw error;
     } finally {
+      unsubscribeStream?.();
       if (created && cleanupSafe) {
         try {
           await unregisterAndClean(this.client, { runtimeAgentId: request.runtimeAgentId, sessionId: created.sessionId,

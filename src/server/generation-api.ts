@@ -3,16 +3,17 @@ import { lstat } from "node:fs/promises";
 import { join } from "node:path";
 import type { JsonObject, TranscriptDocument } from "../domain/transcript.js";
 import { commitPanelTranscript, listPanelSessions, loadPanelSession } from "../storage/panel-sessions.js";
-import type { BridgeLifecycleEvent, BridgeOrphanCleanupRequest, BridgeRequest, BridgeResult } from "../gateway/adapter.js";
+import type { BridgeLifecycleEvent, BridgeOrphanCleanupRequest, BridgeRequest, BridgeResult, BridgeStreamEvent } from "../gateway/adapter.js";
 import type { GenerationApi } from "./app.js";
 import { ConservativeContextBudget, type ContextBudgetEstimator } from "../domain/context-budget.js";
 import { ContextBudgetExceededError } from "../domain/context-budget.js";
 import { SessionOperationCoordinator } from "./session-operation.js";
-import { PanelRunStore, publicRun, terminalRunStatuses, type PanelRunRecord, type PublicPanelRun } from "./run-store.js";
+import { PanelRunStore, publicRun, terminalRunStatuses, type PanelRunRecord, type PublicPanelRun, type PublicRunStream, type PublicRunTool } from "./run-store.js";
 import { GatewayRunError } from "../gateway/cli-client.js";
 
 interface BridgeRunner { generate(request: BridgeRequest): Promise<BridgeResult>; cleanupOrphanedSession?(request: BridgeOrphanCleanupRequest): Promise<string[]> }
 export interface GenerationConfig { dataRoot: string; runtimeByAgent: ReadonlyMap<string, string>; completedCacheLimit?: number; contextBudget?: ContextBudgetEstimator; operations?: SessionOperationCoordinator }
+interface InternalRunStream { public: PublicRunStream; lastAssistantSeq: number; toolSeq: Map<string, number> }
 
 function latestEntryId(document: TranscriptDocument): string | null {
   for (let index = document.entries.length - 1; index >= 0; index--) if (typeof document.entries[index]!.id === "string") return document.entries[index]!.id as string;
@@ -33,6 +34,8 @@ export class PanelGenerationApi implements GenerationApi {
   private readonly abortRequested = new Set<string>();
   private readonly transitionTails = new Map<string, Promise<void>>();
   private readonly listeners = new Map<string, Set<(run: PublicPanelRun) => void>>();
+  private readonly streams = new Map<string, InternalRunStream>();
+  private readonly streamTails = new Map<string, Promise<void>>();
   private initialization?: Promise<void>;
   constructor(private readonly bridge: BridgeRunner, private readonly config: GenerationConfig) {
     if (config.completedCacheLimit !== undefined && (!Number.isInteger(config.completedCacheLimit) || config.completedCacheLimit < 1)) throw new Error("completedCacheLimit 必须是正整数");
@@ -98,7 +101,7 @@ export class PanelGenerationApi implements GenerationApi {
     let accepted: PanelRunRecord;
     try {
       const existing = await this.runStore.get(runId);
-      if (existing) { if (existing.recordId !== recordId || existing.requestHash !== requestHash) throw new Error("IDEMPOTENCY_KEY_REUSED"); return { ...publicRun(existing), newlyCreated: false }; }
+      if (existing) { if (existing.recordId !== recordId || existing.requestHash !== requestHash) throw new Error("IDEMPOTENCY_KEY_REUSED"); return { ...this.visible(existing), newlyCreated: false }; }
       const active = (await this.runStore.list()).find(item => item.recordId === recordId && !terminalRunStatuses.has(item.status));
       if (active) throw new Error("SESSION_BUSY");
       const now = new Date().toISOString(), plannedUserEntryId = randomUUID();
@@ -110,15 +113,15 @@ export class PanelGenerationApi implements GenerationApi {
       process.stderr.write(`[ark-panel] run manager failed runId=${runId}: ${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
     }).finally(() => this.executions.delete(runId));
     this.executions.set(runId, execution);
-    return { ...publicRun(accepted), newlyCreated: true };
+    return { ...this.visible(accepted), newlyCreated: true };
   }
 
   async get(runId: string): Promise<PublicPanelRun | undefined> {
-    await this.initialize(); const record = await this.runStore.get(runId); return record ? publicRun(record) : undefined;
+    await this.initialize(); const record = await this.runStore.get(runId); return record ? this.visible(record) : undefined;
   }
 
   async activeForRecord(recordId: string): Promise<PublicPanelRun | undefined> {
-    await this.initialize(); const active = (await this.runStore.list()).find(item => item.recordId === recordId && !terminalRunStatuses.has(item.status)); return active ? publicRun(active) : undefined;
+    await this.initialize(); const active = (await this.runStore.list()).find(item => item.recordId === recordId && !terminalRunStatuses.has(item.status)); return active ? this.visible(active) : undefined;
   }
 
   async subscribe(runId: string, listener: (run: PublicPanelRun) => void): Promise<(() => void) | undefined> {
@@ -128,19 +131,21 @@ export class PanelGenerationApi implements GenerationApi {
     const listeners = this.listeners.get(runId) ?? new Set(); listeners.add(buffered); this.listeners.set(runId, listeners);
     const record = await this.runStore.get(runId);
     if (!record) { listeners.delete(buffered); if (!listeners.size) this.listeners.delete(runId); return undefined; }
-    listener(publicRun(record)); snapshotSent = true;
-    for (const run of queued.filter(run => run.sequence > record.sequence).sort((a, b) => a.sequence - b.sequence)) listener(run);
+    const snapshot = this.visible(record); listener(snapshot); snapshotSent = true;
+    const snapshotStreamRevision = snapshot.stream?.revision ?? -1;
+    for (const run of queued.filter(run => run.sequence > snapshot.sequence || run.sequence === snapshot.sequence && (run.stream?.revision ?? -1) > snapshotStreamRevision)
+      .sort((left, right) => left.sequence - right.sequence || (left.stream?.revision ?? -1) - (right.stream?.revision ?? -1))) listener(run);
     if (terminalRunStatuses.has(record.status)) { listeners.delete(buffered); return () => undefined; }
     return () => { listeners.delete(buffered); if (!listeners.size) this.listeners.delete(runId); };
   }
 
   async abortRun(runId: string): Promise<PublicPanelRun | undefined> {
     await this.initialize(); const record = await this.runStore.get(runId); if (!record) return undefined;
-    if (terminalRunStatuses.has(record.status) || ["aborting", "committing", "committed"].includes(record.status)) return publicRun(record);
-    if (record.plannedUserEntryId) { const revision = await this.committedRevision(record.recordId, record.plannedUserEntryId); if (revision) return publicRun(await this.transition(record, { status: "completed", finishedAt: new Date().toISOString(), revision })); }
+    if (terminalRunStatuses.has(record.status) || ["aborting", "committing", "committed"].includes(record.status)) return this.visible(record);
+    if (record.plannedUserEntryId) { const revision = await this.committedRevision(record.recordId, record.plannedUserEntryId); if (revision) return this.visible(await this.transition(record, { status: "completed", finishedAt: new Date().toISOString(), revision })); }
     this.abortRequested.add(runId); const updated = await this.transition(record, { status: "aborting" });
     this.abort(runId);
-    return publicRun(updated);
+    return this.visible(updated);
   }
 
   private async executeRun(accepted: PanelRunRecord, message: string, expectedRevision?: string): Promise<void> {
@@ -204,14 +209,48 @@ export class PanelGenerationApi implements GenerationApi {
         committed: ["committed", "completed"], aborting: ["aborting", "aborted", "completed", "failed"], completed: [], failed: [], aborted: [] };
       if (patch.status && !legal[latest.status].includes(patch.status)) return latest;
       let next: PanelRunRecord = { ...latest, ...patch, sequence: latest.sequence + 1, updatedAt: new Date().toISOString() };
-      if (terminalRunStatuses.has(next.status)) next = this.scrub(next);
+      if (terminalRunStatuses.has(next.status)) { next = this.scrub(next); this.streams.delete(next.runId); }
       await this.runStore.put(next); this.emit(next);
       if (terminalRunStatuses.has(next.status)) this.listeners.delete(next.runId);
       return next;
     } finally { release(); if (this.transitionTails.get(record.runId) === queued) this.transitionTails.delete(record.runId); }
   }
 
-  private emit(record: PanelRunRecord): void { const visible = publicRun(record); for (const listener of this.listeners.get(record.runId) ?? []) listener(visible); }
+  private visible(record: PanelRunRecord): PublicPanelRun {
+    const visible = publicRun(record), stream = this.streams.get(record.runId)?.public;
+    return stream && !terminalRunStatuses.has(record.status) ? { ...visible, stream: { ...stream, tools: stream.tools.map(tool => ({ ...tool })) } } : visible;
+  }
+  private emit(record: PanelRunRecord): void { const visible = this.visible(record); for (const listener of this.listeners.get(record.runId) ?? []) listener(visible); }
+
+  private enqueueBridgeStream(runId: string, event: BridgeStreamEvent): void {
+    const previous = this.streamTails.get(runId) ?? Promise.resolve();
+    const task = previous.then(async () => {
+      const record = await this.runStore.get(runId);
+      if (!record || terminalRunStatuses.has(record.status) || record.status === "aborting" || this.abortRequested.has(runId)) return;
+      const current = this.streams.get(runId) ?? { public: { revision: 0, state: "connecting", text: "", tools: [] }, lastAssistantSeq: -1, toolSeq: new Map<string, number>() };
+      let changed = false;
+      if (event.type === "connection") {
+        const state = event.state === "connected" ? (current.public.text || current.public.tools.length ? "streaming" : "connecting") : "degraded";
+        if (current.public.state !== state) { current.public.state = state; changed = true; }
+      } else if (event.type === "assistant_text" && event.upstreamSeq >= current.lastAssistantSeq) {
+        if (event.upstreamSeq > current.lastAssistantSeq || event.text !== current.public.text) {
+          current.lastAssistantSeq = event.upstreamSeq; current.public.text = event.text; current.public.state = "streaming"; changed = true;
+        }
+      } else if (event.type === "tool" && event.upstreamSeq > (current.toolSeq.get(event.callId) ?? -1)) {
+        const index = current.public.tools.findIndex(tool => tool.callId === event.callId);
+        const previousTool = index >= 0 ? current.public.tools[index] : undefined;
+        const args = event.args ?? previousTool?.args;
+        const tool: PublicRunTool = { callId: event.callId, name: event.name, phase: event.phase, ...(args !== undefined ? { args } : {}) };
+        current.toolSeq.set(event.callId, event.upstreamSeq);
+        if (index >= 0) current.public.tools[index] = tool; else current.public.tools.push(tool);
+        current.public.state = "streaming"; changed = true;
+      }
+      if (!changed) return;
+      current.public.revision++; this.streams.set(runId, current); this.emit(record);
+    }).catch(error => { process.stderr.write(`[ark-panel] stream projection failed runId=${runId}: ${error instanceof Error ? error.message : String(error)}\n`); });
+    this.streamTails.set(runId, task);
+    void task.finally(() => { if (this.streamTails.get(runId) === task) { this.streamTails.delete(runId); } });
+  }
   private scrub(record: PanelRunRecord): PanelRunRecord {
     const { message: _message, expectedRevision: _expectedRevision, stagedEntries: _stagedEntries, ...clean } = record; return clean;
   }
@@ -293,7 +332,7 @@ export class PanelGenerationApi implements GenerationApi {
         overrides: { ...(metadata.modelOverride ? { modelOverride: metadata.modelOverride } : {}),
           ...(metadata.thinkingLevel ? { thinkingLevel: metadata.thinkingLevel } : {}),
           ...(metadata.reasoningLevel ? { reasoningLevel: metadata.reasoningLevel } : {}) }, signal,
-        lifecycle: async event => await this.recordBridgeLifecycle(runId, event), cleanupFailed: async () => {
+        lifecycle: async event => await this.recordBridgeLifecycle(runId, event), stream: event => this.enqueueBridgeStream(runId, event), cleanupFailed: async () => {
           const current = await this.runStore.get(runId); if (current) await this.transition(current, { cleanupPending: true });
         } });
       const preCommitState = await this.runStore.get(runId); if (signal.aborted || preCommitState?.status === "aborting") throw new Error("BRIDGE_ABORTED");

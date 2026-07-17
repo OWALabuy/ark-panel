@@ -50,6 +50,19 @@ test("bridge 在发送前把会话 override 以 patch 应用到临时 session", 
   assert.deepEqual(events.slice(0, 4), ["create", "materialize", "patch", "send"]);
 });
 
+test("bridge 在 send 前接入流并只转发本轮 run，观察失败不阻止生成", async t => {
+  for (const attachFails of [false,true]) await t.test(attachFails?"降级":"转发",async t=>{
+    const root=await mkdtemp(join(tmpdir(),"bridge-stream-"));t.after(()=>rm(root,{recursive:true,force:true}));const id="29292929-2929-4929-8929-292929292929";
+    const created:CreatedSession={sessionId:id,sessionKey:"agent:runtime:stream",transcriptPath:join(root,`${id}.jsonl`)};await writeFile(join(root,`${id}.jsonl.deleted.fixture`),"x");
+    const order:string[]=[],stream:unknown[]=[];let unsubscribed=false;
+    const client:GatewayClient={async version(){return"2026.6.11"},async createSession(){return created},async send(){order.push("send");return{runId:"wanted"}},async waitForCompletion(){},async abort(){},async deleteSession(){}};
+    const materializer:BridgeMaterializer={async replaceCreatedTranscript(){return 0},async readNewEntries(){return[]},verifyAndStripSubmittedUser(entries){return entries}};
+    const observer={async observe(_key:string,listener:(event:import("../src/gateway/stream-client.js").GatewayStreamEvent)=>void){order.push("observe");if(attachFails)throw new Error("offline");listener({type:"assistant_text",runId:"other",sessionKey:created.sessionKey,upstreamSeq:1,text:"wrong",deltaText:"",replace:false});listener({type:"assistant_text",runId:"wanted",sessionKey:created.sessionKey,upstreamSeq:2,text:"right",deltaText:"",replace:false});return()=>{unsubscribed=true}}};
+    const service=new BridgeService(client,materializer,new Map([["runtime",root]]),observer);await service.generate({runtimeAgentId:"runtime",historyThroughPreviousRun:{header:{type:"session"},entries:[]},latestUserMessage:"x",latestUserEntryId:"u",idempotencyKey:"wanted",stream:event=>stream.push(event)});
+    assert.deepEqual(order.slice(0,2),["observe","send"]);if(attachFails)assert.deepEqual(stream,[]);else{assert.equal((stream[0] as {text:string}).text,"right");assert.equal(unsubscribed,true)}
+  })
+});
+
 test("bridge lifecycle 按持久化边界顺序 await，并在 entries 持久化后才清理", async t => {
   const root = await mkdtemp(join(tmpdir(), "bridge-lifecycle-")); t.after(() => rm(root, { recursive: true, force: true }));
   const id = "33333333-3333-4333-8333-333333333333";

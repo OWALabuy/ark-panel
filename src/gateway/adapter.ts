@@ -67,6 +67,7 @@ export interface BridgeRequest {
   overrides?: SessionOverrides;
   signal?: AbortSignal;
   lifecycle?: BridgeLifecycleCallback;
+  stream?: BridgeStreamCallback;
   cleanupFailed?: () => Promise<void>;
 }
 
@@ -82,6 +83,14 @@ export type BridgeLifecycleEvent =
   | { type: "entries_materialized"; entries: TranscriptDocument["entries"] };
 
 export type BridgeLifecycleCallback = (event: BridgeLifecycleEvent) => Promise<void>;
+
+// Stream events are deliberately ephemeral. Callers may project them to a live
+// preview, but must never use them as the durable result of a generation.
+export type BridgeStreamEvent =
+  | { type: "connection"; state: "connected" | "disconnected" }
+  | { type: "assistant_text"; upstreamSeq: number; text: string; deltaText: string; replace: boolean }
+  | { type: "tool"; upstreamSeq: number; callId: string; name: string; phase: "started" | "completed" | "failed"; args?: unknown };
+export type BridgeStreamCallback = (event: BridgeStreamEvent) => void;
 
 export interface BridgeOrphanCleanupRequest {
   runtimeAgentId: string;

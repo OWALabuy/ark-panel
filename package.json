@@ -15,6 +15,7 @@
     "password-hash": "node -e \"const c=require('node:crypto');const s=c.randomBytes(16).toString('hex');console.log('scrypt:'+s+':'+c.scryptSync(process.argv[1],s,32).toString('hex'))\"",
     "test": "npm run build && node --test dist/test/**/*.test.js",
     "test:paneltest": "npm run build && PANEL_ALLOW_PANELTEST_INTEGRATION=1 node dist/src/gateway/paneltest-smoke.js",
+    "test:stream-probe": "npm run build && PANEL_ALLOW_STREAM_PROBE=1 node dist/src/gateway/stream-probe.js",
     "test:runtime-acceptance": "npm run build && PANEL_ALLOW_RUNTIME_ACCEPTANCE=1 node dist/src/gateway/runtime-acceptance-cli.js",
     "test:app-paneltest": "npm run build && PANEL_ALLOW_PANELTEST_INTEGRATION=1 node dist/src/server/paneltest-app-smoke.js",
     "test:panel-claude-runtime": "npm run build && PANEL_ALLOW_CLAUDE_RUNTIME_ACCEPTANCE=1 node dist/src/server/panel-claude-runtime-smoke.js",

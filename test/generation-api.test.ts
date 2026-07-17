@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { commitPanelTranscript, createPanelSession, loadPanelSession, updatePanelMetadata } from "../src/storage/panel-sessions.js";
 import { PanelGenerationApi } from "../src/server/generation-api.js";
 import { ConservativeContextBudget } from "../src/domain/context-budget.js";
+import type { BridgeRequest } from "../src/gateway/adapter.js";
 
 test("GenerationApi 只在完整 bridge 成功后原子提交 user 和 run，并保持 parent 链", async () => {
   const root = await mkdtemp(join(tmpdir(), "generation-api-"));
@@ -133,6 +134,49 @@ test("run 订阅先给快照、终态可重订阅，重启恢复 staged entries 
   const {PanelRunStore}=await import("../src/server/run-store.js");const store=new PanelRunStore(root);await store.put({version:1,runId:recoveryId,recordId:metadata.recordId,requestHash:"hash",sequence:4,status:"materializing",createdAt:now,updatedAt:now,message:"recovered",plannedUserEntryId:planned,stagedEntries:[{type:"message",id:"recovered-answer",parentId:planned,message:{role:"assistant",content:"done"}}]});
   let calls=0;const recovered=new PanelGenerationApi({async generate(){calls++;throw new Error("must not replay")}}, {dataRoot:root,runtimeByAgent:new Map([["claude","runtime"]])});await recovered.initialize();
   assert.equal(calls,0);assert.equal((await recovered.get(recoveryId))?.status,"completed");assert.ok((await loadPanelSession(root,"claude",metadata.recordId)).document.entries.some(entry=>entry.id===planned));
+});
+
+test("流式文本与工具状态只存在于运行快照，终态由 transcript 替换且不持久化增量", async t => {
+  const root=await mkdtemp(join(tmpdir(),"generation-stream-"));t.after(()=>rm(root,{recursive:true,force:true}));
+  const metadata=await createPanelSession(root,"claude",{header:{type:"session"},entries:[]});
+  let bridgeRequest: BridgeRequest|undefined;
+  let release!:()=>void;const gate=new Promise<void>(resolve=>{release=resolve});
+  const api=new PanelGenerationApi({async generate(request){bridgeRequest=request;await gate;return{runId:request.idempotencyKey,sessionId:"temp",entries:[{type:"message",id:"answer",parentId:request.latestUserEntryId,message:{role:"assistant",content:"最终结果"}}]}}},
+    {dataRoot:root,runtimeByAgent:new Map([["claude","runtime"]])});
+  const runId="45454545-4545-4545-8545-454545454545";await api.create(metadata.recordId,"hello",runId);
+  for(let index=0;index<100&&!bridgeRequest;index++)await new Promise(resolve=>setTimeout(resolve,2));assert.ok(bridgeRequest?.stream);
+  const seen:import("../src/server/run-store.js").PublicPanelRun[]=[];const unsubscribe=await api.subscribe(runId,run=>seen.push(run));
+  bridgeRequest!.stream!({type:"assistant_text",upstreamSeq:1,text:"临时",deltaText:"临",replace:false});
+  bridgeRequest!.stream!({type:"tool",upstreamSeq:2,callId:"call",name:"exec",phase:"started",args:{command:"true"}});
+  bridgeRequest!.stream!({type:"tool",upstreamSeq:3,callId:"call",name:"exec",phase:"completed"});
+  for(let index=0;index<100&&!seen.some(run=>run.stream?.tools[0]?.phase==="completed");index++)await new Promise(resolve=>setTimeout(resolve,2));
+  const live=[...seen].reverse().find(run=>run.stream?.tools.length);assert.equal(live?.stream?.text,"临时");assert.equal(live?.stream?.tools[0]?.phase,"completed");assert.deepEqual(live?.stream?.tools[0]?.args,{command:"true"});
+  release();for(let index=0;index<100&&(await api.get(runId))?.status!=="completed";index++)await new Promise(resolve=>setTimeout(resolve,2));
+  const terminal=await api.get(runId);assert.equal(terminal?.status,"completed");assert.equal(terminal?.stream,undefined);unsubscribe?.();
+  const persisted=JSON.parse(await readFile(join(root,"runs",`${runId}.json`),"utf8"));assert.equal("stream" in persisted,false);
+  assert.match(JSON.stringify((await loadPanelSession(root,"claude",metadata.recordId)).document.entries.at(-1)),/最终结果/);
+});
+
+test("不同会话并发流互不串线，停止后迟到增量被丢弃", async t => {
+  const root=await mkdtemp(join(tmpdir(),"generation-stream-concurrent-"));t.after(()=>rm(root,{recursive:true,force:true}));
+  const first=await createPanelSession(root,"claude",{header:{type:"session"},entries:[]}),second=await createPanelSession(root,"claude",{header:{type:"session"},entries:[]});
+  const requests=new Map<string,BridgeRequest>();let releaseSecond!:()=>void;const secondGate=new Promise<void>(resolve=>{releaseSecond=resolve});
+  const api=new PanelGenerationApi({async generate(request){requests.set(request.idempotencyKey,request);if(request.idempotencyKey.startsWith("61")){
+    await new Promise<void>((_resolve,reject)=>request.signal?.addEventListener("abort",()=>reject(new Error("BRIDGE_ABORTED")),{once:true}));throw new Error("unreachable");
+  }await secondGate;return{runId:request.idempotencyKey,sessionId:"temp",entries:[{type:"message",id:"answer",parentId:request.latestUserEntryId,message:{role:"assistant",content:"second done"}}]}}},
+    {dataRoot:root,runtimeByAgent:new Map([["claude","runtime"]])});
+  const firstId="61616161-6161-4161-8161-616161616161",secondId="62626262-6262-4262-8262-626262626262";
+  await Promise.all([api.create(first.recordId,"one",firstId),api.create(second.recordId,"two",secondId)]);
+  for(let index=0;index<100&&requests.size<2;index++)await new Promise(resolve=>setTimeout(resolve,2));assert.equal(requests.size,2);
+  requests.get(firstId)!.stream!({type:"assistant_text",upstreamSeq:1,text:"first only",deltaText:"first only",replace:false});
+  requests.get(secondId)!.stream!({type:"assistant_text",upstreamSeq:1,text:"second only",deltaText:"second only",replace:false});
+  for(let index=0;index<100&&(!(await api.get(firstId))?.stream||!(await api.get(secondId))?.stream);index++)await new Promise(resolve=>setTimeout(resolve,2));
+  assert.equal((await api.get(firstId))?.stream?.text,"first only");assert.equal((await api.get(secondId))?.stream?.text,"second only");
+  await api.abortRun(firstId);requests.get(firstId)!.stream!({type:"assistant_text",upstreamSeq:2,text:"late",deltaText:"late",replace:false});
+  for(let index=0;index<100&&(await api.get(firstId))?.status!=="aborted";index++)await new Promise(resolve=>setTimeout(resolve,2));
+  assert.equal((await api.get(firstId))?.status,"aborted");assert.equal((await api.get(firstId))?.stream,undefined);
+  releaseSecond();for(let index=0;index<100&&(await api.get(secondId))?.status!=="completed";index++)await new Promise(resolve=>setTimeout(resolve,2));
+  assert.equal((await api.get(secondId))?.status,"completed");
 });
 
 test("run store 拒绝符号链接根目录", async t => {

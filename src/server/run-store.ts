@@ -33,7 +33,9 @@ export interface PanelRunRecord {
   cleanupPending?: boolean;
 }
 
-export interface PublicPanelRun { runId: string; recordId: string; status: PanelRunStatus; sequence: number; createdAt: string; updatedAt: string; startedAt?: string; finishedAt?: string; revision?: string; error?: { code: string; message: string }; canAbort: boolean }
+export interface PublicRunTool { callId: string; name: string; phase: "started" | "completed" | "failed"; args?: unknown }
+export interface PublicRunStream { revision: number; state: "connecting" | "streaming" | "degraded"; text: string; tools: PublicRunTool[] }
+export interface PublicPanelRun { runId: string; recordId: string; status: PanelRunStatus; sequence: number; createdAt: string; updatedAt: string; startedAt?: string; finishedAt?: string; revision?: string; error?: { code: string; message: string }; canAbort: boolean; stream?: PublicRunStream }
 
 function validate(value: unknown, expectedRunId?: string): PanelRunRecord {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("run record 格式无效");

@@ -9,6 +9,7 @@ import { ConservativeContextBudget } from "../domain/context-budget.js";
 import { PanelCommandApi } from "./command-api.js";
 import { SessionOperationCoordinator } from "./session-operation.js";
 import { ExperienceStore } from "./experience-store.js";
+import { loadGatewayStreamAuth, OpenClawStreamObserver } from "../gateway/stream-client.js";
 
 const config = parsePanelConfig(process.env, import.meta.url); await validateAndInitializeConfig(config);
 const readApi = config.dataRoot && config.readAgents.length ? new SessionReadData(config.readAgents, config.dataRoot) : undefined;
@@ -19,7 +20,11 @@ const operations = new SessionOperationCoordinator();
 const experienceAgentIds = new Set([...config.readAgents.map(agent => agent.agentId), ...config.runtimes.keys()]);
 const experience = config.dataRoot ? new ExperienceStore(config.dataRoot, [...experienceAgentIds]) : undefined;
 let generationApi: PanelGenerationApi | undefined;
-const bridge = new BridgeService(gateway, new FileBridgeMaterializer(), roots);
+const streamAuth = config.dataRoot && config.runtimes.size ? await loadGatewayStreamAuth() : undefined;
+const streamObserver = streamAuth ? new OpenClawStreamObserver({ ...streamAuth, requestTimeoutMs: 1_500,
+  onDiagnostic: message => process.stderr.write(`[ark-panel] gateway stream: ${message}\n`) }) : undefined;
+streamObserver?.start();
+const bridge = new BridgeService(gateway, new FileBridgeMaterializer(), roots, streamObserver);
 if (config.dataRoot && config.runtimes.size) {
   const runtimeByAgent = new Map<string, string>();
   for (const [agentId, value] of config.runtimes) runtimeByAgent.set(agentId, value.runtimeAgentId);
@@ -46,6 +51,7 @@ server.listen(config.port, config.host, () => process.stdout.write(`会话面板
 let stopping = false;
 function shutdown(signal: string): void {
   if (stopping) return; stopping = true; process.stdout.write(`收到 ${signal}，停止接受新连接\n`);
+  streamObserver?.stop();
   const deadline = setTimeout(() => process.exit(1), 10_000); deadline.unref();
   server.close((error) => { clearTimeout(deadline); if (error) { process.stderr.write(`${error.message}\n`); process.exitCode = 1; } });
   server.closeIdleConnections();

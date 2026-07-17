@@ -72,6 +72,11 @@ test("frontend renders untrusted metadata with DOM text nodes", async () => {
   assert.match(source,/\/runs\/\$\{encodeURIComponent\(run\.runId\)\}\/events/);
   assert.match(source,/\/sessions\/\$\{encodeURIComponent\(recordId\)\}\/runs\/active/);
   assert.match(source,/streamDropped/);
+  assert.match(source,/function renderStreamPreview\(run\)/);
+  assert.match(source,/className="message assistant streaming stream-preview"/);
+  assert.match(source,/terminalRun\(run\.status\)\|\|!stream/);
+  assert.match(source,/Object\.prototype\.hasOwnProperty\.call\(raw,"stream"\)\?raw\.stream:undefined/);
+  assert.match(styles,/\.message\.streaming/);
   assert.match(source,/if\(!terminal\)throw Object\.assign/);
   assert.match(source,/RUN_PREFIX="ark-panel:run:v1:"/);
   assert.match(source,/runsBySession=new Map\(\)/);

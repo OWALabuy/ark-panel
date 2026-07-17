@@ -224,7 +224,9 @@ gateway 的会话索引属于其内部状态：它仅使用进程内锁，也没
 - **运行状态流**：浏览器先取得 `runId`，可查询当前快照，也可通过独立 SSE 订阅生命周期。订阅首帧总是当前快照；终态为 completed / failed / aborted。SSE 在终态前 EOF 只表示连接丢失，绝不等价于成功。
 - **多端同步**：会话正文仍靠 revision 轮询同步完整提交；正在运行、失败和取消则以 run 状态为准，不能用「revision 没变化」猜测任务仍在运行。多个浏览器可以观察同一服务端 run。
 - **停止确认**：本地取消 fetch 与停止远端推理是两件事。界面只有在服务端确认 aborting / aborted 后才显示相应状态；停止请求失败时显示「状态未知」并继续查询。
-- **依赖实测**：gateway 的推理 RPC 是否提供流式 token。提供，面板才能中转成 SSE；不提供则只能整段返回。列入待实测项。
+- **上游预览流**：服务端另建一条到本机 OpenClaw Gateway 的 WebSocket，以 `gateway-client/backend`、共享密钥和最小 `operator.read` scope 连接；连接只在服务端存在，Gateway 密钥不下发浏览器。它订阅 `chat` 与 `session.tool`，按 `sessionKey + runId` 路由到对应面板 run。OpenClaw 2026.6.11 的文本事件是约 150 ms 合并后的完整快照，并非逐 token；工具只展示开始、完成/失败和参数，不逐行转发 stdout，也不展示 reasoning。
+- **临时预览不入库**：文本和工具状态只保存在进程内 run 快照，经现有 SSE 中转。浏览器重连会先拿当前预览快照；服务重启后预览可以丢失，但权威 run 和生成不会因此丢失。正常完成时 UI 删除预览并加载校验后原子提交的完整 transcript，因此不会产生重复消息或半个 tool group。
+- **断线降级**：上游 WebSocket 自动退避重连并重新订阅；断线只把预览标记为 degraded，不能中止、重发或判定 run 失败。最终完成判断仍来自 trajectory watcher。显式停止仍走原有 abort/release 确认路径，停止后的迟到增量被丢弃。
 
 ### 6.4 消息内容、工具调用与思考过程展示
 - transcript 里 tool_use / tool_result 是独立的 content block，扩展思考块同理。
