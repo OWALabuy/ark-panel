@@ -9,12 +9,19 @@ import { createPanelSession, deletePanelSession, listPanelSessions, loadPanelSes
 import { loadReadonlyMetadata, updateReadonlyMetadata, type ReadonlySourceIdentity } from "../storage/readonly-metadata.js";
 import { updatePanelMetadata } from "../storage/panel-sessions.js";
 import { exportTranscriptMarkdown, markdownFilename } from "../domain/markdown-export.js";
+import { ConservativeContextBudget, type ContextBudgetEstimator } from "../domain/context-budget.js";
 
 export interface ReadAgentConfig { agentId: string; sessionsRoot: string; label?: string }
 export interface ConversationRecord {
   recordId: string; agentId: string; sourceKind: "active" | "reset" | "panel"; sourceKey: string;
   revision: string; updatedAt: string; messageCount: number; title: string;
   archived: boolean; hidden: boolean; pinned: boolean; project?: string;
+}
+
+export interface ConversationStatus {
+  modelOverride: string | null; thinkingLevel: string | null; reasoningLevel: string | null;
+  contextBudget: { estimatedTokens: number; budgetTokens: number; percentage: number; method: "utf8-bytes-upper-bound-v2" };
+  lastActiveAt: string;
 }
 
 const ACTIVE = /^([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.jsonl$/i;
@@ -50,9 +57,20 @@ function documentTitle(document: TranscriptDocument): string {
   return value ? value.slice(0, 48) : "未命名会话";
 }
 
+function currentBranch(document: TranscriptDocument): TranscriptDocument {
+  const byId = new Map(document.entries.flatMap(entry => typeof entry.id === "string" ? [[entry.id, entry] as const] : []));
+  let current = [...document.entries].reverse().find(entry => typeof entry.id === "string" && entry.message);
+  const ids = new Set<string>();
+  while (current && typeof current.id === "string" && !ids.has(current.id)) {
+    ids.add(current.id); current = typeof current.parentId === "string" ? byId.get(current.parentId) : undefined;
+  }
+  return ids.size ? { header: document.header, entries: document.entries.filter(entry => typeof entry.id === "string" && ids.has(entry.id)) } : document;
+}
+
 export class SessionReadData {
   private readonly agentsById: ReadonlyMap<string, ReadAgentConfig>;
-  constructor(readonly agentsConfig: readonly ReadAgentConfig[], readonly dataRoot: string) {
+  constructor(readonly agentsConfig: readonly ReadAgentConfig[], readonly dataRoot: string,
+    private readonly contextBudget: ContextBudgetEstimator = new ConservativeContextBudget()) {
     const entries = agentsConfig.map(agent => {
       if (!/^[A-Za-z0-9_-]+$/.test(agent.agentId)) throw new Error("agentId 格式无效");
       return [agent.agentId, { ...agent, sessionsRoot: resolve(agent.sessionsRoot) }] as const;
@@ -137,7 +155,17 @@ export class SessionReadData {
       ...(typeof entry.timestamp === "string" ? { timestamp: entry.timestamp } : {}),
       ...(entry.message && typeof entry.message === "object" && !Array.isArray(entry.message) ? { message: entry.message } : {})
     }));
-    return { ...loaded.record, document: { header: safeHeader, entries: safeEntries } };
+    const estimate = this.contextBudget.estimate(currentBranch(loaded.document), "");
+    let modelOverride: string | null = null, thinkingLevel: string | null = null, reasoningLevel: string | null = null;
+    if (loaded.record.sourceKind === "panel") {
+      const metadata = (await loadPanelSession(this.dataRoot, loaded.record.agentId, loaded.record.recordId)).metadata;
+      modelOverride = metadata.modelOverride ?? null; thinkingLevel = metadata.thinkingLevel ?? null; reasoningLevel = metadata.reasoningLevel ?? null;
+    }
+    const status: ConversationStatus = { modelOverride, thinkingLevel, reasoningLevel,
+      contextBudget: { estimatedTokens: estimate.estimatedTokens, budgetTokens: estimate.budgetTokens,
+        percentage: Math.round(estimate.estimatedTokens / estimate.budgetTokens * 100), method: estimate.method },
+      lastActiveAt: loaded.record.updatedAt };
+    return { ...loaded.record, status, document: { header: safeHeader, entries: safeEntries } };
   }
 
   async exportMarkdown(recordId: string): Promise<{ filename: string; markdown: string } | null> {

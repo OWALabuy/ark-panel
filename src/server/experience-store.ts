@@ -12,32 +12,38 @@ const MAX_AVATAR_PIXELS = 4096 * 4096;
 
 export type Theme = typeof THEMES[number];
 export type Accent = typeof ACCENTS[number];
-export interface PanelSettings { version: 1; appearance: { theme: Theme; accent: Accent } }
-export interface SettingsPatch { version?: 1; appearance?: { theme?: Theme; accent?: Accent } }
+export interface PanelSettings { version: 1; appearance: { theme: Theme; accent: Accent }; conversation: { showStatus: boolean } }
+export interface SettingsPatch { version?: 1; appearance?: { theme?: Theme; accent?: Accent }; conversation?: { showStatus?: boolean } }
 export interface StoredAvatar { bytes: Buffer; etag: string }
 
-const DEFAULT_SETTINGS: PanelSettings = { version: 1, appearance: { theme: "system", accent: "default" } };
+const DEFAULT_SETTINGS: PanelSettings = { version: 1, appearance: { theme: "system", accent: "default" }, conversation: { showStatus: true } };
 
 function object(value: unknown): value is Record<string, unknown> { return !!value && typeof value === "object" && !Array.isArray(value); }
 function exactKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean { return Object.keys(value).every(key => allowed.includes(key)); }
-function copySettings(value: PanelSettings): PanelSettings { return { version: 1, appearance: { ...value.appearance } }; }
+function copySettings(value: PanelSettings): PanelSettings { return { version: 1, appearance: { ...value.appearance }, conversation: { ...value.conversation } }; }
 
 export function validateSettingsPatch(value: unknown): SettingsPatch {
-  if (!object(value) || !exactKeys(value, ["version", "appearance"]) || Object.keys(value).length === 0) throw new Error("SETTINGS_INVALID");
+  if (!object(value) || !exactKeys(value, ["version", "appearance", "conversation"]) || Object.keys(value).length === 0) throw new Error("SETTINGS_INVALID");
   if (value.version !== undefined && value.version !== 1) throw new Error("SETTINGS_INVALID");
   if (value.appearance !== undefined) {
     if (!object(value.appearance) || !exactKeys(value.appearance, ["theme", "accent"]) || Object.keys(value.appearance).length === 0) throw new Error("SETTINGS_INVALID");
     if (value.appearance.theme !== undefined && !THEMES.includes(value.appearance.theme as Theme)) throw new Error("SETTINGS_INVALID");
     if (value.appearance.accent !== undefined && !ACCENTS.includes(value.appearance.accent as Accent)) throw new Error("SETTINGS_INVALID");
   }
-  if (value.appearance === undefined && value.version === 1) throw new Error("SETTINGS_UPDATE_EMPTY");
+  if (value.conversation !== undefined) {
+    if (!object(value.conversation) || !exactKeys(value.conversation, ["showStatus"]) || Object.keys(value.conversation).length === 0 ||
+        (value.conversation.showStatus !== undefined && typeof value.conversation.showStatus !== "boolean")) throw new Error("SETTINGS_INVALID");
+  }
+  if (value.appearance === undefined && value.conversation === undefined && value.version === 1) throw new Error("SETTINGS_UPDATE_EMPTY");
   return value as SettingsPatch;
 }
 
 function validateStoredSettings(value: unknown): PanelSettings {
-  if (!object(value) || !exactKeys(value, ["version", "appearance"]) || value.version !== 1 || !object(value.appearance) ||
+  if (!object(value) || !exactKeys(value, ["version", "appearance", "conversation"]) || value.version !== 1 || !object(value.appearance) ||
       !exactKeys(value.appearance, ["theme", "accent"]) || !THEMES.includes(value.appearance.theme as Theme) || !ACCENTS.includes(value.appearance.accent as Accent)) throw new Error("SETTINGS_CORRUPT");
-  return value as unknown as PanelSettings;
+  if (value.conversation !== undefined && (!object(value.conversation) || !exactKeys(value.conversation, ["showStatus"]) || typeof value.conversation.showStatus !== "boolean")) throw new Error("SETTINGS_CORRUPT");
+  return { version: 1, appearance: value.appearance as unknown as PanelSettings["appearance"],
+    conversation: { showStatus: value.conversation === undefined ? DEFAULT_SETTINGS.conversation.showStatus : value.conversation.showStatus as boolean } };
 }
 
 async function ensurePrivateDirectory(root: string, path: string): Promise<void> {
@@ -91,7 +97,9 @@ export class ExperienceStore {
   async patchSettings(patch: SettingsPatch): Promise<PanelSettings> {
     const operation = this.settingsQueue.then(async () => {
       const current = await this.settings();
-      const next: PanelSettings = { version: 1, appearance: { theme: patch.appearance?.theme ?? current.appearance.theme, accent: patch.appearance?.accent ?? current.appearance.accent } };
+      const next: PanelSettings = { version: 1,
+        appearance: { theme: patch.appearance?.theme ?? current.appearance.theme, accent: patch.appearance?.accent ?? current.appearance.accent },
+        conversation: { showStatus: patch.conversation?.showStatus ?? current.conversation.showStatus } };
       await atomicWrite(this.settingsPath, JSON.stringify(next, null, 2) + "\n");
       return next;
     });

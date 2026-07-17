@@ -4,6 +4,8 @@ import { mkdtemp, mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { SessionReadData } from "../src/server/read-data.js";
+import { ConservativeContextBudget } from "../src/domain/context-budget.js";
+import { updatePanelMetadata } from "../src/storage/panel-sessions.js";
 
 const header = { type: "session", version: 3, id: "11111111-1111-4111-8111-111111111111", timestamp: "2026-07-11T00:00:00Z", cwd: "/private/workspace", unknownSecret: "must-not-leak" };
 const user = { type: "message", id: "u1", parentId: null, timestamp: "2026-07-11T00:00:01Z", message: { role: "user", content: "needle private fixture" } };
@@ -17,12 +19,15 @@ test("只读扫描 active/reset/panel，容忍 active 半行并拒绝符号链�
   const activePath = join(sessions, `${activeId}.jsonl`); await writeFile(activePath, jsonl(user, assistant) + '{"type":"message"');
   await writeFile(join(sessions, `${activeId}.jsonl.reset.2026-07-11T00-00-00Z`), jsonl(user));
   const outside = join(root, "outside.jsonl"); await writeFile(outside, jsonl(user)); await symlink(outside, join(sessions, `${linkedId}.jsonl`));
-  const reads = new SessionReadData([{ agentId: "fixture", sessionsRoot: sessions }], data);
+  const reads = new SessionReadData([{ agentId: "fixture", sessionsRoot: sessions }], data, new ConservativeContextBudget(10_000));
   const listed = await reads.sessions("fixture"); assert.deepEqual(listed.map(item => item.sourceKind).sort(), ["active", "reset"]);
   assert.equal(listed.find(item => item.sourceKind === "active")!.messageCount, 2);
-  const conversation = await reads.conversation(listed.find(item => item.sourceKind === "active")!.recordId) as { document: { header: Record<string, unknown>; entries: unknown[] } };
+  const conversation = await reads.conversation(listed.find(item => item.sourceKind === "active")!.recordId) as { status: Record<string, unknown>; document: { header: Record<string, unknown>; entries: unknown[] } };
   assert.equal(conversation.document.entries.length, 2);
   assert.equal("cwd" in conversation.document.header, false); assert.equal("unknownSecret" in conversation.document.header, false);
+  assert.deepEqual({ modelOverride: conversation.status.modelOverride, thinkingLevel: conversation.status.thinkingLevel, reasoningLevel: conversation.status.reasoningLevel }, { modelOverride: null, thinkingLevel: null, reasoningLevel: null });
+  assert.equal((conversation.status.contextBudget as { budgetTokens: number }).budgetTokens, 10_000); assert.equal(typeof (conversation.status.contextBudget as { percentage: unknown }).percentage, "number");
+  assert.equal("cwd" in conversation.status, false); assert.equal(JSON.stringify(conversation.status).includes("needle private fixture"), false);
   const found = await reads.search("needle", "fixture") as unknown[]; assert.equal(found.length, 2);
 
   const activeRecord = listed.find(item => item.sourceKind === "active")!;
@@ -64,6 +69,16 @@ test("面板会话要求显式确认并先归档才可永久删除", async () =>
   await reads.updateSession(created.recordId, { archived: true });
   assert.deepEqual(await reads.deleteSession(created.recordId, true), { action: "deleted" });
   assert.equal(await reads.conversation(created.recordId), null);
+});
+
+test("面板会话状态只暴露 override、预算估算和活跃时间", async () => {
+  const root = await mkdtemp(join(tmpdir(), "panel-read-status-")), sessions = join(root, "source"), data = join(root, "data");
+  await mkdir(sessions); await mkdir(data); const reads = new SessionReadData([{ agentId: "fixture", sessionsRoot: sessions }], data, new ConservativeContextBudget(1_024));
+  const created = await reads.createPanel("fixture", "status") as { recordId: string };
+  await updatePanelMetadata(data, "fixture", created.recordId, current => ({ ...current, modelOverride: "provider/model", thinkingLevel: "high", reasoningLevel: "stream" }));
+  const conversation = await reads.conversation(created.recordId) as { status: { modelOverride: string | null; thinkingLevel: string | null; reasoningLevel: string | null; contextBudget: { percentage: number; method: string }; lastActiveAt: string } };
+  assert.equal(conversation.status.modelOverride, "provider/model"); assert.equal(conversation.status.thinkingLevel, "high"); assert.equal(conversation.status.reasoningLevel, "stream");
+  assert.equal(conversation.status.contextBudget.method, "utf8-bytes-upper-bound-v2"); assert.equal(Number.isInteger(conversation.status.contextBudget.percentage), true); assert.match(conversation.status.lastActiveAt, /^\d{4}-/);
 });
 
 test("sessions 根目录本身是符号链接时拒绝读取", async () => {

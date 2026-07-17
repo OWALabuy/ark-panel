@@ -23,11 +23,13 @@ async function fixture() {
 test("settings HTTP 要求登录和 CSRF，并拒绝未知字段", async t => {
   const x = await fixture(); t.after(() => x.server.close());
   assert.equal((await fetch(`${x.base}/api/v1/settings`)).status, 401);
-  assert.deepEqual((await (await fetch(`${x.base}/api/v1/settings`, { headers: { cookie: x.cookie } })).json()).data, { version: 1, appearance: { theme: "system", accent: "default" } });
+  assert.deepEqual((await (await fetch(`${x.base}/api/v1/settings`, { headers: { cookie: x.cookie } })).json()).data, { version: 1, appearance: { theme: "system", accent: "default" }, conversation: { showStatus: true } });
   const noCsrf = await fetch(`${x.base}/api/v1/settings`, { method: "PATCH", headers: { cookie: x.cookie, origin: x.base, "content-type": "application/json" }, body: JSON.stringify({ appearance: { theme: "dark" } }) }); assert.equal(noCsrf.status, 403);
   const headers = { cookie: x.cookie, origin: x.base, "x-csrf-token": x.csrf, "content-type": "application/json" };
   const invalid = await fetch(`${x.base}/api/v1/settings`, { method: "PATCH", headers, body: JSON.stringify({ appearance: { theme: "dark", unknown: true } }) }); assert.equal(invalid.status, 400); assert.equal((await invalid.json()).error.code, "SETTINGS_INVALID");
   const updated = await fetch(`${x.base}/api/v1/settings`, { method: "PATCH", headers, body: JSON.stringify({ appearance: { theme: "dark" } }) }); assert.equal(updated.status, 200); assert.equal((await updated.json()).data.appearance.theme, "dark");
+  const hidden = await fetch(`${x.base}/api/v1/settings`, { method: "PATCH", headers, body: JSON.stringify({ conversation: { showStatus: false } }) }); assert.equal(hidden.status, 200); assert.equal((await hidden.json()).data.conversation.showStatus, false);
+  const invalidConversation = await fetch(`${x.base}/api/v1/settings`, { method: "PATCH", headers, body: JSON.stringify({ conversation: { showStatus: "false" } }) }); assert.equal(invalidConversation.status, 400); assert.equal((await invalidConversation.json()).error.code, "SETTINGS_INVALID");
 });
 
 test("avatar HTTP 校验 allowlist、流式上限、真实格式、缓存与删除", async t => {

@@ -136,6 +136,28 @@ test("appearance preferences are constrained, cached early, and locally scale re
   assert.match(styles,/font-size:var\(--reading-size\)/);
 });
 
+test("conversation status is server-controlled, separate from run status, and labels conservative context estimates", async () => {
+  const source=await readFile("src/frontend/app.js","utf8");
+  const statusHelper=await readFile("src/frontend/conversation-status.js","utf8");
+  const html=await readFile("src/frontend/index.html","utf8");
+  const styles=await readFile("src/frontend/styles.css","utf8");
+
+  assert.match(html,/id="subtitle"[\s\S]*id="conversation-status"/);
+  assert.match(html,/id="show-conversation-status"[^>]*type="checkbox"/);
+  assert.match(source,/body:JSON\.stringify\(\{conversation:\{showStatus:target\}\}\)/);
+  assert.match(source,/confirmedShowConversationStatus=settings\?\.conversation\?\.showStatus!==false/);
+  assert.match(source,/applyConversationStatusSetting\(confirmedShowConversationStatus\)/);
+  assert.match(source,/renderConversationStatus\(conversation\.status\)/);
+  assert.match(source,/activeSource==="panel"\?"默认模型":"来源默认模型"/);
+  assert.match(source,/面板安全预算的保守估算，不是模型厂商的精确 token 计数/);
+  assert.match(source,/contextStatusClass\(percentage\)/);
+  assert.match(statusHelper,/value>=90\?"context-danger":value>=70\?"context-warning":""/);
+  assert.match(statusHelper,/if\(seconds<60\)return"刚刚活跃"/);
+  assert.match(styles,/\.conversation-status\[hidden\]\{display:none\}/);
+  assert.match(styles,/\.conversation-status-item\.context-warning/);
+  assert.match(styles,/\.conversation-status-item\.context-danger/);
+});
+
 test("background run notifications stay unread per session until the conversation is viewed", async () => {
   const source=await readFile("src/frontend/app.js","utf8");
   const styles=await readFile("src/frontend/styles.css","utf8");

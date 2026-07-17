@@ -77,7 +77,7 @@ Legend: ✅ available · 🚧 scheduled · 💡 candidate (not scheduled) · ⛔
 | Appearance | Settings drawer | ✅ | Gear opens Appearance / Reading directly; logout stays in the footer; account preferences persist server-side |
 | Appearance | Custom per-agent avatars | ✅ | Previewed 1:1 crop, capped raster upload, server validation/re-encoding, reset-to-default, and account-level sharing |
 | Appearance | Adjustable reading font size | ✅ | Device-local 85%–130% slider for messages, Markdown, code, tools, and math without scaling navigation/layout |
-| Appearance | Status display (model badge, context gauge, last-active) | 💡 | Recorded as a candidate; not scheduled |
+| Appearance | Conversation status (model overrides, context safety budget, last-active) | ✅ | Compact header summary; account-level server setting can hide it across devices; context is explicitly a conservative panel estimate |
 | Sessions | Collapsible sidebar rail | ✅ | Collapses both desktop sidebars; keeps new-session, search, 10 recent sessions, settings, and the agent switcher; mobile flow remains full-screen |
 | Generation | Background-completion notification | ✅ | Per-session device-local unread state, cross-agent/list markers and title count across concurrent runs; failures notify, user aborts do not |
 | Conversation | Document title reflects session and agent | ✅ | Format `session - agent`; also carries the background-completion marker |
@@ -87,7 +87,7 @@ Legend: ✅ available · 🚧 scheduled · 💡 candidate (not scheduled) · ⛔
 | Operations | Backup, integrity verification, restore, health check, and systemd example | ✅ | Includes deployment smoke and fixture-based browser acceptance coverage |
 | Extras | Attachments/multimodal input | 💡 | Recorded for future evaluation; not currently scheduled |
 
-The appearance, sidebar, avatar, title, and background-completion batch is complete. The near-term order now returns to memory-disposition UI and scratch isolation, followed by the durable long-context strategy with `/compact`. OpenClaw compatibility remains ongoing maintenance. The experience-feature rationale lives in [the UX features decision](docs/decisions/ux-features.md); detailed constraints and acceptance criteria live in the [implementation specification](docs/implementation-spec.md).
+The appearance, sidebar, avatar, title, conversation-status, and background-completion batch is complete. The near-term order now returns to memory-disposition UI and scratch isolation, followed by the durable long-context strategy with `/compact`. OpenClaw compatibility remains ongoing maintenance. The experience-feature rationale lives in [the UX features decision](docs/decisions/ux-features.md); detailed constraints and acceptance criteria live in the [implementation specification](docs/implementation-spec.md).
 
 ## Install and test
 

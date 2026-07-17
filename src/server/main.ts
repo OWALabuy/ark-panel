@@ -12,7 +12,8 @@ import { ExperienceStore } from "./experience-store.js";
 import { loadGatewayStreamAuth, OpenClawStreamObserver } from "../gateway/stream-client.js";
 
 const config = parsePanelConfig(process.env, import.meta.url); await validateAndInitializeConfig(config);
-const readApi = config.dataRoot && config.readAgents.length ? new SessionReadData(config.readAgents, config.dataRoot) : undefined;
+const contextBudget = new ConservativeContextBudget(config.contextHistoryBudgetTokens);
+const readApi = config.dataRoot && config.readAgents.length ? new SessionReadData(config.readAgents, config.dataRoot, contextBudget) : undefined;
 const roots = new Map<string, string>();
 for (const value of config.runtimes.values()) roots.set(value.runtimeAgentId, value.sessionsRoot);
 const gateway = new OpenClawCliClient({ sessionsRoots: roots, gatewayRunTimeoutMs: config.gatewayRunTimeoutMs, watcherGraceMs: config.runWatcherGraceMs });
@@ -29,7 +30,7 @@ if (config.dataRoot && config.runtimes.size) {
   const runtimeByAgent = new Map<string, string>();
   for (const [agentId, value] of config.runtimes) runtimeByAgent.set(agentId, value.runtimeAgentId);
   generationApi = new PanelGenerationApi(bridge,
-    { dataRoot: config.dataRoot, runtimeByAgent, contextBudget: new ConservativeContextBudget(config.contextHistoryBudgetTokens), operations });
+    { dataRoot: config.dataRoot, runtimeByAgent, contextBudget, operations });
   await generationApi.initialize();
 }
 const commandApi = config.dataRoot && readApi ? new PanelCommandApi(config.dataRoot, config.readAgents.map(agent => agent.agentId), {
