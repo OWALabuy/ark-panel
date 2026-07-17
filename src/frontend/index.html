@@ -11,38 +11,38 @@
 <body>
   <main id="login" class="login">
     <form id="login-form" class="login-card">
-      <div class="mark">A</div><h1>ark-panel</h1><p>把每一段会话带上船。</p>
-      <label>账号<input name="username" autocomplete="username" required></label>
-      <label>密码<input name="password" type="password" autocomplete="current-password" required></label>
-      <button>登录</button><output id="login-error"></output>
+      <div class="mark">A</div><h1>ark-panel</h1><p data-i18n="app.tagline">把每一段会话带上船。</p>
+      <label><span data-i18n="auth.username">账号</span><input name="username" autocomplete="username" required></label>
+      <label><span data-i18n="auth.password">密码</span><input name="password" type="password" autocomplete="current-password" required></label>
+      <button data-i18n="auth.login">登录</button><output id="login-error"></output>
     </form>
   </main>
   <aside id="error" class="error-bar" role="alert" hidden>
-    <span id="error-message"></span><button id="retry" type="button">重试</button><button id="dismiss-error" type="button" aria-label="关闭">×</button>
+    <span id="error-message"></span><button id="retry" type="button" data-i18n="common.retry">重试</button><button id="dismiss-error" type="button" aria-label="关闭" data-i18n-aria-label="common.close">×</button>
   </aside>
   <main id="app" class="shell" hidden>
-    <aside id="sidebar-rail" class="sidebar-rail" aria-label="收起的侧边栏">
-      <button id="expand-sidebar" class="rail-button" type="button" aria-label="展开侧边栏" title="展开侧边栏">☰</button>
-      <button id="rail-new-session" class="rail-button" type="button" aria-label="新建会话" title="新建会话">＋</button>
-      <button id="rail-search" class="rail-button" type="button" aria-label="搜索会话" title="搜索会话">⌕</button>
-      <button id="rail-recents" class="rail-button" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="rail-flyout" aria-label="最近会话" title="最近会话">◷</button>
+    <aside id="sidebar-rail" class="sidebar-rail" aria-label="收起的侧边栏" data-i18n-aria-label="nav.collapsed">
+      <button id="expand-sidebar" class="rail-button" type="button" aria-label="展开侧边栏" title="展开侧边栏" data-i18n-aria-label="nav.expand" data-i18n-title="nav.expand">☰</button>
+      <button id="rail-new-session" class="rail-button" type="button" aria-label="新建会话" title="新建会话" data-i18n-aria-label="nav.newSession" data-i18n-title="nav.newSession">＋</button>
+      <button id="rail-search" class="rail-button" type="button" aria-label="搜索会话" title="搜索会话" data-i18n-aria-label="nav.search" data-i18n-title="nav.search">⌕</button>
+      <button id="rail-recents" class="rail-button" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="rail-flyout" aria-label="最近会话" title="最近会话" data-i18n-aria-label="nav.recents" data-i18n-title="nav.recents">◷</button>
       <span class="rail-spacer"></span>
-      <button id="rail-settings" class="rail-button" type="button" aria-label="打开设置" title="设置">⚙</button>
-      <button id="rail-agent" class="rail-agent" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="rail-flyout" aria-label="切换 Agent"></button>
+      <button id="rail-settings" class="rail-button" type="button" aria-label="打开设置" title="设置" data-i18n-aria-label="nav.openSettings" data-i18n-title="nav.settings">⚙</button>
+      <button id="rail-agent" class="rail-agent" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="rail-flyout" aria-label="切换 Agent" data-i18n-aria-label="nav.switchAgent"></button>
     </aside>
-    <aside class="agents"><header><span class="mark small" aria-hidden="true">A</span><button id="collapse-sidebar" type="button" aria-label="收起侧边栏" title="收起侧边栏">‹</button></header><nav id="agents" aria-label="Agent 列表"></nav><button id="open-settings" class="settings-trigger" type="button" aria-label="打开设置" title="设置">⚙</button></aside>
+    <aside class="agents"><header><span class="mark small" aria-hidden="true">A</span><button id="collapse-sidebar" type="button" aria-label="收起侧边栏" title="收起侧边栏" data-i18n-aria-label="nav.collapse" data-i18n-title="nav.collapse">‹</button></header><nav id="agents" aria-label="Agent 列表" data-i18n-aria-label="nav.agentList"></nav><button id="open-settings" class="settings-trigger" type="button" aria-label="打开设置" title="设置" data-i18n-aria-label="nav.openSettings" data-i18n-title="nav.settings">⚙</button></aside>
     <aside class="sessions">
-      <header><button id="back-agents" class="mobile" aria-label="返回 Agent 列表">‹ Agents</button><h1 id="list-title">会话</h1><button id="archive-view" class="dots" type="button">归档</button><button id="new-session" class="new" title="新建会话" aria-label="新建会话">＋</button></header>
-      <label class="search"><span aria-hidden="true">⌕</span><input id="search" aria-label="搜索会话" placeholder="搜索会话"></label><nav id="sessions" aria-label="会话列表"></nav>
+      <header><button id="back-agents" class="mobile" aria-label="返回 Agent 列表" data-i18n="nav.backAgents">‹ Agents</button><h1 id="list-title" data-i18n="nav.sessions">会话</h1><button id="archive-view" class="dots" type="button" data-i18n="nav.archived">归档</button><button id="new-session" class="new" title="新建会话" aria-label="新建会话" data-i18n-title="nav.newSession" data-i18n-aria-label="nav.newSession">＋</button></header>
+      <label class="search"><span aria-hidden="true">⌕</span><input id="search" aria-label="搜索会话" placeholder="搜索会话" data-i18n-aria-label="nav.search" data-i18n-placeholder="nav.search"></label><nav id="sessions" aria-label="会话列表" data-i18n-aria-label="nav.sessionList"></nav>
     </aside>
     <section class="conversation">
-      <header><button id="back-sessions" class="mobile" aria-label="返回会话列表">‹ 会话</button><div class="conversation-heading"><h2 id="title">选择一个会话</h2><small id="subtitle" aria-live="polite"></small><div id="conversation-status" class="conversation-status" aria-label="会话状态" hidden></div></div><nav class="session-actions" aria-label="会话操作"><button id="export-session" class="header-action" type="button" hidden>导出 MD</button><button id="pin-session" class="header-action" type="button" hidden>置顶</button><button id="project-session" class="header-action" type="button" aria-haspopup="menu" aria-expanded="false" hidden>分组</button><button id="rename-session" class="header-action" type="button" hidden>重命名</button><button id="archive-session" class="header-action" type="button" hidden>归档</button><button id="delete-session" class="header-action danger" type="button" hidden>删除</button></nav></header>
-      <div id="messages" class="messages" role="log" aria-label="消息记录"><div class="empty">从左侧选择会话</div></div>
+      <header><button id="back-sessions" class="mobile" aria-label="返回会话列表" data-i18n="nav.backSessions">‹ 会话</button><div class="conversation-heading"><h2 id="title" data-i18n="session.select">选择一个会话</h2><small id="subtitle" aria-live="polite"></small><div id="conversation-status" class="conversation-status" aria-label="会话状态" data-i18n-aria-label="settings.showStatus" hidden></div></div><nav class="session-actions" aria-label="会话操作" data-i18n-aria-label="session.actions"><button id="export-session" class="header-action" type="button" hidden data-i18n="session.export">导出 MD</button><button id="pin-session" class="header-action" type="button" hidden data-i18n="session.pin">置顶</button><button id="project-session" class="header-action" type="button" aria-haspopup="menu" aria-expanded="false" hidden data-i18n="session.group">分组</button><button id="rename-session" class="header-action" type="button" hidden data-i18n="session.rename">重命名</button><button id="archive-session" class="header-action" type="button" hidden data-i18n="session.archive">归档</button><button id="delete-session" class="header-action danger" type="button" hidden data-i18n="session.delete">删除</button></nav></header>
+      <div id="messages" class="messages" role="log" aria-label="消息记录" data-i18n-aria-label="session.messages"><div class="empty" data-i18n="session.select">从左侧选择会话</div></div>
       <form id="composer" class="composer">
-        <div id="command-menu" class="commands" role="listbox" aria-label="斜杠命令" hidden></div>
-        <div id="pending-attachments" class="pending-attachments" aria-label="待发送附件" hidden></div>
-        <textarea id="message" aria-label="消息" rows="1" placeholder="继续这段会话…"></textarea>
-        <div class="composer-foot"><span class="composer-tools"><button id="attach-file" class="attach-file" type="button" aria-label="添加文件" title="添加文件">＋</button><span id="composer-hint">Enter 发送 · Shift+Enter 换行</span></span><button id="send" aria-label="发送">↑</button></div>
+        <div id="command-menu" class="commands" role="listbox" aria-label="斜杠命令" data-i18n-aria-label="composer.commands" hidden></div>
+        <div id="pending-attachments" class="pending-attachments" aria-label="待发送附件" data-i18n-aria-label="composer.attachments" hidden></div>
+        <textarea id="message" aria-label="消息" rows="1" placeholder="继续这段会话…" data-i18n-aria-label="composer.message" data-i18n-placeholder="composer.placeholder"></textarea>
+        <div class="composer-foot"><span class="composer-tools"><button id="attach-file" class="attach-file" type="button" aria-label="添加文件" title="添加文件" data-i18n-aria-label="composer.addFile" data-i18n-title="composer.addFile">＋</button><span id="composer-hint" data-i18n="composer.hint">Enter 发送 · Shift+Enter 换行</span></span><button id="send" aria-label="发送" data-i18n-aria-label="composer.send">↑</button></div>
         <input id="attachment-input" type="file" accept="image/jpeg,image/png,image/gif,image/webp,text/plain,text/markdown,text/html,text/csv,application/json,application/pdf,.docx,.xlsx,.pptx,.odt,.rtf,.epub,.xml,.yaml,.yml,.tsv" multiple hidden>
       </form>
     </section>
@@ -50,14 +50,15 @@
   </main>
   <div id="project-menu" class="project-menu" role="menu" aria-label="移动到分组" tabindex="-1" hidden></div>
   <div id="settings-layer" class="settings-layer" hidden>
-    <button id="settings-backdrop" class="settings-backdrop" type="button" aria-label="关闭设置"></button>
+    <button id="settings-backdrop" class="settings-backdrop" type="button" aria-label="关闭设置" data-i18n-aria-label="nav.closeSettings"></button>
     <aside id="settings-drawer" class="settings-drawer" role="dialog" aria-modal="true" aria-labelledby="settings-title" tabindex="-1">
-      <header><h2 id="settings-title">设置</h2><button id="close-settings" type="button" aria-label="关闭设置">×</button></header>
-      <section><h3>外观</h3><label>主题<select id="theme-setting"><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option><option value="gruvbox-dark-medium">Gruvbox 深色</option><option value="gruvbox-light-medium">Gruvbox 浅色</option></select></label><label>强调色<select id="accent-setting"><option value="default">默认</option><option value="blue">蓝色</option><option value="green">绿色</option><option value="red">红色</option><option value="yellow">黄色</option><option value="magenta">品红</option><option value="cyan">青色</option></select></label><output id="appearance-status" class="setting-status" aria-live="polite"></output></section>
-      <section><h3>阅读</h3><label for="reading-scale">会话内容字号 <output id="reading-scale-value">100%</output></label><input id="reading-scale" type="range" min="85" max="130" step="5" value="100"><button id="reset-reading-scale" class="secondary" type="button">恢复默认</button></section>
-      <section><h3>会话</h3><label class="toggle-setting"><input id="show-conversation-status" type="checkbox" checked><span>显示会话状态</span></label><p class="setting-help">显示模型设置、上下文安全预算和最近活跃时间。此设置保存在服务端并跨终端生效。</p><output id="conversation-setting-status" class="setting-status" aria-live="polite"></output></section>
-      <section class="avatar-settings"><h3>Agent 头像</h3><label>Agent<select id="avatar-agent"></select></label><div id="avatar-preview" class="avatar-preview" aria-live="polite"></div><p class="setting-help">支持 PNG、JPEG、WebP，最大 5 MiB。图片将居中裁成正方形。</p><input id="avatar-file" type="file" accept="image/png,image/jpeg,image/webp" hidden><div class="avatar-actions"><button id="choose-avatar" class="secondary" type="button">选择图片</button><button id="reset-avatar" class="secondary" type="button">恢复默认</button><button id="confirm-avatar" type="button" hidden>使用此头像</button><button id="cancel-avatar" class="secondary" type="button" hidden>取消</button></div><output id="avatar-status" class="setting-status" aria-live="polite"></output></section>
-      <footer><button id="logout" class="danger-button" type="button">退出登录</button></footer>
+      <header><h2 id="settings-title" data-i18n="nav.settings">设置</h2><button id="close-settings" type="button" aria-label="关闭设置" data-i18n-aria-label="nav.closeSettings">×</button></header>
+      <section><h3 data-i18n="settings.appearance">外观</h3><label><span data-i18n="settings.theme">主题</span><select id="theme-setting"><option value="system" data-i18n="settings.theme.system">跟随系统</option><option value="light" data-i18n="settings.theme.light">浅色</option><option value="dark" data-i18n="settings.theme.dark">深色</option><option value="gruvbox-dark-medium" data-i18n="settings.theme.gruvboxDarkMedium">Gruvbox 深色 · Medium</option><option value="gruvbox-light-medium" data-i18n="settings.theme.gruvboxLightMedium">Gruvbox 浅色 · Medium</option></select></label><label><span data-i18n="settings.accent">强调色</span><select id="accent-setting"><option value="default" data-i18n="common.default">默认</option><option value="blue" data-i18n="settings.accent.blue">蓝色</option><option value="green" data-i18n="settings.accent.green">绿色</option><option value="red" data-i18n="settings.accent.red">红色</option><option value="yellow" data-i18n="settings.accent.yellow">黄色</option><option value="magenta" data-i18n="settings.accent.magenta">品红</option><option value="cyan" data-i18n="settings.accent.cyan">青色</option></select></label><output id="appearance-status" class="setting-status" aria-live="polite"></output></section>
+      <section><h3 data-i18n="settings.language">语言</h3><label><span data-i18n="settings.language">语言</span><select id="locale-setting"><option value="zh-CN" data-i18n="settings.language.zhCN">简体中文</option><option value="en" data-i18n="settings.language.en">English</option></select></label><p class="setting-help" data-i18n="settings.languageHelp">界面语言保存在服务端并跨终端生效。</p><output id="locale-status" class="setting-status" aria-live="polite"></output></section>
+      <section><h3 data-i18n="settings.reading">阅读</h3><label for="reading-scale"><span data-i18n="settings.fontSize">会话内容字号</span> <output id="reading-scale-value">100%</output></label><input id="reading-scale" type="range" min="85" max="130" step="5" value="100"><button id="reset-reading-scale" class="secondary" type="button" data-i18n="settings.resetDefault">恢复默认</button></section>
+      <section><h3 data-i18n="settings.conversation">会话</h3><label class="toggle-setting"><input id="show-conversation-status" type="checkbox" checked><span data-i18n="settings.showStatus">显示会话状态</span></label><p class="setting-help" data-i18n="settings.showStatusHelp">显示模型设置、上下文安全预算和最近活跃时间。此设置保存在服务端并跨终端生效。</p><output id="conversation-setting-status" class="setting-status" aria-live="polite"></output></section>
+      <section class="avatar-settings"><h3 data-i18n="settings.avatar">Agent 头像</h3><label><span data-i18n="settings.avatarAgent">Agent</span><select id="avatar-agent"></select></label><div id="avatar-preview" class="avatar-preview" aria-live="polite"></div><p class="setting-help" data-i18n="settings.avatarHelp">支持 PNG、JPEG、WebP，最大 5 MiB。图片将居中裁成正方形。</p><input id="avatar-file" type="file" accept="image/png,image/jpeg,image/webp" hidden><div class="avatar-actions"><button id="choose-avatar" class="secondary" type="button" data-i18n="settings.chooseImage">选择图片</button><button id="reset-avatar" class="secondary" type="button" data-i18n="settings.resetDefault">恢复默认</button><button id="confirm-avatar" type="button" hidden data-i18n="settings.useAvatar">使用此头像</button><button id="cancel-avatar" class="secondary" type="button" hidden data-i18n="common.cancel">取消</button></div><output id="avatar-status" class="setting-status" aria-live="polite"></output></section>
+      <footer><button id="logout" class="danger-button" type="button" data-i18n="settings.logout">退出登录</button></footer>
     </aside>
   </div>
   <dialog id="editor-dialog" class="editor-dialog" aria-labelledby="editor-title" aria-describedby="editor-help editor-error">
@@ -67,7 +68,7 @@
       <input id="editor-input" maxlength="120">
       <textarea id="editor-textarea" rows="7" maxlength="16384" hidden></textarea>
       <output id="editor-error" class="field-error" aria-live="polite"></output>
-      <div class="dialog-actions"><button id="editor-cancel" type="button" class="secondary">取消</button><button id="editor-submit" type="submit">确认</button></div>
+      <div class="dialog-actions"><button id="editor-cancel" type="button" class="secondary" data-i18n="common.cancel">取消</button><button id="editor-submit" type="submit" data-i18n="common.confirm">确认</button></div>
     </form>
   </dialog>
   <script src="/vendor/katex/katex.min.js"></script>

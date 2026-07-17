@@ -11,14 +11,16 @@ async function fixture() { const root = await mkdtemp(join(tmpdir(), "panel-expe
 
 test("settings 使用严格 schema、局部更新和私有原子持久化", async () => {
   const { root, store } = await fixture();
-  assert.deepEqual(await store.settings(), { version: 1, appearance: { theme: "system", accent: "default" }, conversation: { showStatus: true } });
-  assert.deepEqual(await store.patchSettings(validateSettingsPatch({ appearance: { theme: "dark" } })), { version: 1, appearance: { theme: "dark", accent: "default" }, conversation: { showStatus: true } });
-  assert.deepEqual(await store.patchSettings(validateSettingsPatch({ appearance: { accent: "cyan" } })), { version: 1, appearance: { theme: "dark", accent: "cyan" }, conversation: { showStatus: true } });
-  assert.deepEqual(await store.patchSettings(validateSettingsPatch({ conversation: { showStatus: false } })), { version: 1, appearance: { theme: "dark", accent: "cyan" }, conversation: { showStatus: false } });
+  assert.deepEqual(await store.settings(), { version: 1, locale: "zh-CN", appearance: { theme: "system", accent: "default" }, conversation: { showStatus: true } });
+  assert.deepEqual(await store.patchSettings(validateSettingsPatch({ appearance: { theme: "dark" } })), { version: 1, locale: "zh-CN", appearance: { theme: "dark", accent: "default" }, conversation: { showStatus: true } });
+  assert.deepEqual(await store.patchSettings(validateSettingsPatch({ appearance: { accent: "cyan" } })), { version: 1, locale: "zh-CN", appearance: { theme: "dark", accent: "cyan" }, conversation: { showStatus: true } });
+  assert.deepEqual(await store.patchSettings(validateSettingsPatch({ locale: "en" })), { version: 1, locale: "en", appearance: { theme: "dark", accent: "cyan" }, conversation: { showStatus: true } });
+  assert.deepEqual(await store.patchSettings(validateSettingsPatch({ conversation: { showStatus: false } })), { version: 1, locale: "en", appearance: { theme: "dark", accent: "cyan" }, conversation: { showStatus: false } });
   assert.equal((await lstat(join(root, "settings.json"))).mode & 0o777, 0o600);
   assert.deepEqual(JSON.parse(await readFile(join(root, "settings.json"), "utf8")), await store.settings());
   assert.throws(() => validateSettingsPatch({ appearance: { theme: "dark", surprise: true } }), /SETTINGS_INVALID/);
   assert.throws(() => validateSettingsPatch({ appearance: { theme: "midnight" } }), /SETTINGS_INVALID/);
+  assert.throws(() => validateSettingsPatch({ locale: "fr" }), /SETTINGS_INVALID/);
   assert.throws(() => validateSettingsPatch({ conversation: { showStatus: "yes" } }), /SETTINGS_INVALID/);
   assert.throws(() => validateSettingsPatch({ conversation: { showStatus: true, surprise: true } }), /SETTINGS_INVALID/);
   assert.throws(() => validateSettingsPatch({ version: 1 }), /SETTINGS_UPDATE_EMPTY/);
@@ -31,16 +33,16 @@ test("并发 settings patch 不丢失不同字段", async () => {
     store.patchSettings(validateSettingsPatch({ appearance: { accent: "yellow" } })),
     store.patchSettings(validateSettingsPatch({ conversation: { showStatus: false } }))
   ]);
-  assert.deepEqual(await store.settings(), { version: 1, appearance: { theme: "gruvbox-dark-medium", accent: "yellow" }, conversation: { showStatus: false } });
+  assert.deepEqual(await store.settings(), { version: 1, locale: "zh-CN", appearance: { theme: "gruvbox-dark-medium", accent: "yellow" }, conversation: { showStatus: false } });
 });
 
 test("旧 settings 文件缺少 conversation 时采用默认值并在下次更新时迁移", async () => {
   const { root, store } = await fixture();
   await writeFile(join(root, "settings.json"), JSON.stringify({ version: 1, appearance: { theme: "dark", accent: "green" } }));
-  assert.deepEqual(await store.settings(), { version: 1, appearance: { theme: "dark", accent: "green" }, conversation: { showStatus: true } });
+  assert.deepEqual(await store.settings(), { version: 1, locale: "zh-CN", appearance: { theme: "dark", accent: "green" }, conversation: { showStatus: true } });
   await store.patchSettings(validateSettingsPatch({ conversation: { showStatus: false } }));
   const reopened = new ExperienceStore(root, ["claude"]);
-  assert.deepEqual(await reopened.settings(), { version: 1, appearance: { theme: "dark", accent: "green" }, conversation: { showStatus: false } });
+  assert.deepEqual(await reopened.settings(), { version: 1, locale: "zh-CN", appearance: { theme: "dark", accent: "green" }, conversation: { showStatus: false } });
 });
 
 test("损坏或符号链接 settings 不会被静默覆盖", async () => {

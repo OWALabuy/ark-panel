@@ -5,5 +5,7 @@
     const accents=new Set(["default","blue","green","red","yellow","magenta","cyan"]);
     if(value&&themes.has(value.theme))document.documentElement.dataset.theme=value.theme;
     if(value&&accents.has(value.accent))document.documentElement.dataset.accent=value.accent;
+    const locale=localStorage.getItem("ark-panel:locale:v1");
+    if(locale==="zh-CN"||locale==="en")document.documentElement.lang=locale;
   }catch{}
 })();

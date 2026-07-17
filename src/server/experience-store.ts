@@ -6,25 +6,28 @@ import { assertNotSymlink, assertWithin, atomicWrite } from "../storage/atomic.j
 
 export const THEMES = ["system", "light", "dark", "gruvbox-dark-medium", "gruvbox-light-medium"] as const;
 export const ACCENTS = ["default", "blue", "green", "red", "yellow", "magenta", "cyan"] as const;
+export const LOCALES = ["zh-CN", "en"] as const;
 export const MAX_AVATAR_BYTES = 5 * 1024 * 1024;
 export const MAX_STORED_AVATAR_BYTES = 2 * 1024 * 1024;
 const MAX_AVATAR_PIXELS = 4096 * 4096;
 
 export type Theme = typeof THEMES[number];
 export type Accent = typeof ACCENTS[number];
-export interface PanelSettings { version: 1; appearance: { theme: Theme; accent: Accent }; conversation: { showStatus: boolean } }
-export interface SettingsPatch { version?: 1; appearance?: { theme?: Theme; accent?: Accent }; conversation?: { showStatus?: boolean } }
+export type Locale = typeof LOCALES[number];
+export interface PanelSettings { version: 1; locale: Locale; appearance: { theme: Theme; accent: Accent }; conversation: { showStatus: boolean } }
+export interface SettingsPatch { version?: 1; locale?: Locale; appearance?: { theme?: Theme; accent?: Accent }; conversation?: { showStatus?: boolean } }
 export interface StoredAvatar { bytes: Buffer; etag: string }
 
-const DEFAULT_SETTINGS: PanelSettings = { version: 1, appearance: { theme: "system", accent: "default" }, conversation: { showStatus: true } };
+const DEFAULT_SETTINGS: PanelSettings = { version: 1, locale: "zh-CN", appearance: { theme: "system", accent: "default" }, conversation: { showStatus: true } };
 
 function object(value: unknown): value is Record<string, unknown> { return !!value && typeof value === "object" && !Array.isArray(value); }
 function exactKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean { return Object.keys(value).every(key => allowed.includes(key)); }
-function copySettings(value: PanelSettings): PanelSettings { return { version: 1, appearance: { ...value.appearance }, conversation: { ...value.conversation } }; }
+function copySettings(value: PanelSettings): PanelSettings { return { version: 1, locale: value.locale, appearance: { ...value.appearance }, conversation: { ...value.conversation } }; }
 
 export function validateSettingsPatch(value: unknown): SettingsPatch {
-  if (!object(value) || !exactKeys(value, ["version", "appearance", "conversation"]) || Object.keys(value).length === 0) throw new Error("SETTINGS_INVALID");
+  if (!object(value) || !exactKeys(value, ["version", "locale", "appearance", "conversation"]) || Object.keys(value).length === 0) throw new Error("SETTINGS_INVALID");
   if (value.version !== undefined && value.version !== 1) throw new Error("SETTINGS_INVALID");
+  if (value.locale !== undefined && !LOCALES.includes(value.locale as Locale)) throw new Error("SETTINGS_INVALID");
   if (value.appearance !== undefined) {
     if (!object(value.appearance) || !exactKeys(value.appearance, ["theme", "accent"]) || Object.keys(value.appearance).length === 0) throw new Error("SETTINGS_INVALID");
     if (value.appearance.theme !== undefined && !THEMES.includes(value.appearance.theme as Theme)) throw new Error("SETTINGS_INVALID");
@@ -34,15 +37,16 @@ export function validateSettingsPatch(value: unknown): SettingsPatch {
     if (!object(value.conversation) || !exactKeys(value.conversation, ["showStatus"]) || Object.keys(value.conversation).length === 0 ||
         (value.conversation.showStatus !== undefined && typeof value.conversation.showStatus !== "boolean")) throw new Error("SETTINGS_INVALID");
   }
-  if (value.appearance === undefined && value.conversation === undefined && value.version === 1) throw new Error("SETTINGS_UPDATE_EMPTY");
+  if (value.locale === undefined && value.appearance === undefined && value.conversation === undefined && value.version === 1) throw new Error("SETTINGS_UPDATE_EMPTY");
   return value as SettingsPatch;
 }
 
 function validateStoredSettings(value: unknown): PanelSettings {
-  if (!object(value) || !exactKeys(value, ["version", "appearance", "conversation"]) || value.version !== 1 || !object(value.appearance) ||
+  if (!object(value) || !exactKeys(value, ["version", "locale", "appearance", "conversation"]) || value.version !== 1 || !object(value.appearance) ||
       !exactKeys(value.appearance, ["theme", "accent"]) || !THEMES.includes(value.appearance.theme as Theme) || !ACCENTS.includes(value.appearance.accent as Accent)) throw new Error("SETTINGS_CORRUPT");
+  if (value.locale !== undefined && !LOCALES.includes(value.locale as Locale)) throw new Error("SETTINGS_CORRUPT");
   if (value.conversation !== undefined && (!object(value.conversation) || !exactKeys(value.conversation, ["showStatus"]) || typeof value.conversation.showStatus !== "boolean")) throw new Error("SETTINGS_CORRUPT");
-  return { version: 1, appearance: value.appearance as unknown as PanelSettings["appearance"],
+  return { version: 1, locale: value.locale === undefined ? DEFAULT_SETTINGS.locale : value.locale as Locale, appearance: value.appearance as unknown as PanelSettings["appearance"],
     conversation: { showStatus: value.conversation === undefined ? DEFAULT_SETTINGS.conversation.showStatus : value.conversation.showStatus as boolean } };
 }
 
@@ -98,6 +102,7 @@ export class ExperienceStore {
     const operation = this.settingsQueue.then(async () => {
       const current = await this.settings();
       const next: PanelSettings = { version: 1,
+        locale: patch.locale ?? current.locale,
         appearance: { theme: patch.appearance?.theme ?? current.appearance.theme, accent: patch.appearance?.accent ?? current.appearance.accent },
         conversation: { showStatus: patch.conversation?.showStatus ?? current.conversation.showStatus } };
       await atomicWrite(this.settingsPath, JSON.stringify(next, null, 2) + "\n");

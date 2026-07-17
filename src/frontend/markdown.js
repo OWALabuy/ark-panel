@@ -1,3 +1,4 @@
+import {t} from "./i18n/index.js";
 const SAFE_PROTOCOLS=new Set(["http:","https:","mailto:"]);
 const LANGUAGE_ALIASES={javascript:"js",jsx:"js",typescript:"ts",tsx:"ts",shell:"bash",sh:"bash",zsh:"bash",py:"python",yml:"yaml",html:"markup",xml:"markup",svg:"markup"};
 const LANGUAGE_LABELS={js:"JavaScript",ts:"TypeScript",json:"JSON",bash:"Shell",python:"Python",css:"CSS",markup:"HTML",sql:"SQL",yaml:"YAML",diff:"Diff"};
@@ -34,7 +35,7 @@ function appendMath(root,formula,displayMode,raw){
   try{
     if(!globalThis.katex?.render)throw new Error("KaTeX 未加载");
     globalThis.katex.render(formula,node,{displayMode,throwOnError:true,strict:"ignore",trust:false,maxSize:10,maxExpand:1000});
-  }catch(error){node.classList.add("math-error");node.textContent=raw;node.title=error instanceof Error?error.message:"公式渲染失败"}
+  }catch{node.classList.add("math-error");node.textContent=raw;node.title=t("error.formula")}
   root.append(node);
 }
 
@@ -83,13 +84,13 @@ function mathBlock(lines,start){
 }
 
 function addCodeCopy(pre,text,language){
-  const wrap=document.createElement("div"),button=document.createElement("button");wrap.className="code-block";if(language){const label=document.createElement("span");label.className="code-language";label.textContent=LANGUAGE_LABELS[language]||language;wrap.append(label)}button.type="button";button.className="copy-code";button.textContent="复制代码";button.onclick=()=>copyText(text,button,"已复制");wrap.append(button,pre);return wrap;
+  const wrap=document.createElement("div"),button=document.createElement("button");wrap.className="code-block";if(language){const label=document.createElement("span");label.className="code-language";label.textContent=LANGUAGE_LABELS[language]||language;wrap.append(label)}button.type="button";button.className="copy-code";button.textContent=t("error.copyCode");button.onclick=()=>copyText(text,button,t("error.copyDone"));wrap.append(button,pre);return wrap;
 }
 
-export async function copyText(text,button,success="已复制"){
+export async function copyText(text,button,success=t("error.copyDone")){
   const original=button?.textContent;
   try{await navigator.clipboard.writeText(String(text));if(button)button.textContent=success}
-  catch{if(button)button.textContent="复制失败"}
+  catch{if(button)button.textContent=t("error.copy")}
   if(button)setTimeout(()=>{button.textContent=original},1500);
 }
 

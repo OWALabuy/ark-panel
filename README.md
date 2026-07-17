@@ -84,11 +84,11 @@ Legend: ✅ available · 🚧 scheduled · 💡 candidate (not scheduled) · ⛔
 | Generation | Background-completion notification | ✅ | Per-session device-local unread state, cross-agent/list markers and title count across concurrent runs; failures notify, user aborts do not |
 | Conversation | Document title reflects session and agent | ✅ | Format `session - agent`; also carries the background-completion marker |
 | Navigation | Keyboard shortcuts and command palette | 💡 | Candidate, not scheduled; a future version must be configurable and disableable for Vimium compatibility |
-| Localization | Multiple UI languages | 💡 | Candidate, not scheduled; the current UI remains Chinese without a premature string-catalog refactor |
+| Localization | Simplified Chinese and English UI | ✅ | Lightweight semantic-key catalogs; account-level language setting follows the user across devices, with Chinese fallback for legacy settings |
 | Access | In-UI password change | ⛔ | Kept CLI-only (`npm run password-hash`); logout remains at the bottom of the settings drawer |
 | Operations | Backup, integrity verification, restore, health check, and systemd example | ✅ | Includes deployment smoke and fixture-based browser acceptance coverage |
 
-The appearance, sidebar, avatar, title, conversation-status, and background-completion batch is complete. The near-term order now returns to memory-disposition UI and scratch isolation, followed by the durable long-context strategy with `/compact`. OpenClaw compatibility remains ongoing maintenance. The experience-feature rationale lives in [the UX features decision](docs/decisions/ux-features.md); detailed constraints and acceptance criteria live in the [implementation specification](docs/implementation-spec.md).
+The appearance, sidebar, avatar, title, conversation-status, background-completion, and bilingual-UI batches are complete. The near-term order now returns to memory-disposition UI and scratch isolation, followed by the durable long-context strategy with `/compact`. OpenClaw compatibility remains ongoing maintenance. The experience-feature rationale lives in [the UX features decision](docs/decisions/ux-features.md); detailed constraints and acceptance criteria live in the [implementation specification](docs/implementation-spec.md).
 
 ## Install and test
 

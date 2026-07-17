@@ -44,5 +44,5 @@ test("Markdown math sends only valid delimiters to KaTeX and safely falls back",
   assert.match(root.textContent, /\$z\$/);
   const failed = root.children.at(-1)?.children.find(node => node.className.includes("math-error"));
   assert.equal(failed?.textContent, "$bad{$");
-  assert.equal(failed?.title, "bad formula");
+  assert.equal(failed?.title, "公式渲染失败");
 });
