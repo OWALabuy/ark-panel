@@ -1,5 +1,7 @@
 # ark-panel
 
+[English](README.md) · [简体中文](README.zh-CN.md)
+
 > A self-hosted web panel for OpenClaw. Carry every conversation on your own ship.
 
 When the flood comes, an ark is not about escape — it is about what you refuse to leave behind.
