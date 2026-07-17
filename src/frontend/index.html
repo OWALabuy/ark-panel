@@ -40,8 +40,10 @@
       <div id="messages" class="messages" role="log" aria-label="消息记录"><div class="empty">从左侧选择会话</div></div>
       <form id="composer" class="composer">
         <div id="command-menu" class="commands" role="listbox" aria-label="斜杠命令" hidden></div>
+        <div id="pending-attachments" class="pending-attachments" aria-label="待发送附件" hidden></div>
         <textarea id="message" aria-label="消息" rows="1" placeholder="继续这段会话…"></textarea>
-        <div class="composer-foot"><span id="composer-hint">Enter 发送 · Shift+Enter 换行</span><button id="send" aria-label="发送">↑</button></div>
+        <div class="composer-foot"><span class="composer-tools"><button id="attach-file" class="attach-file" type="button" aria-label="添加文件" title="添加文件">＋</button><span id="composer-hint">Enter 发送 · Shift+Enter 换行</span></span><button id="send" aria-label="发送">↑</button></div>
+        <input id="attachment-input" type="file" accept="image/jpeg,image/png,image/gif,image/webp,text/plain,text/markdown,text/html,text/csv,application/json,application/pdf,.docx,.xlsx,.pptx,.odt,.rtf,.epub,.xml,.yaml,.yml,.tsv" multiple hidden>
       </form>
     </section>
     <div id="rail-flyout" class="rail-flyout" role="menu" hidden></div>

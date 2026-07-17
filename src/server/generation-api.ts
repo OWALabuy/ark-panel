@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { lstat } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import type { JsonObject, TranscriptDocument } from "../domain/transcript.js";
 import { commitPanelTranscript, listPanelSessions, loadPanelSession } from "../storage/panel-sessions.js";
 import type { BridgeLifecycleEvent, BridgeOrphanCleanupRequest, BridgeRequest, BridgeResult, BridgeStreamEvent } from "../gateway/adapter.js";
@@ -10,14 +10,28 @@ import { ContextBudgetExceededError } from "../domain/context-budget.js";
 import { SessionOperationCoordinator } from "./session-operation.js";
 import { PanelRunStore, publicRun, terminalRunStatuses, type PanelRunRecord, type PublicPanelRun, type PublicRunStream, type PublicRunTool } from "./run-store.js";
 import { GatewayRunError } from "../gateway/cli-client.js";
+import { assignSessionAttachments, garbageCollectAttachments, getSessionAttachment, pruneSessionAttachments,
+  readSessionAttachmentBytes, removeSessionAttachments, storeSessionAttachment } from "../storage/attachments.js";
 
 interface BridgeRunner { generate(request: BridgeRequest): Promise<BridgeResult>; cleanupOrphanedSession?(request: BridgeOrphanCleanupRequest): Promise<string[]> }
-export interface GenerationConfig { dataRoot: string; runtimeByAgent: ReadonlyMap<string, string>; completedCacheLimit?: number; contextBudget?: ContextBudgetEstimator; operations?: SessionOperationCoordinator }
+export interface GenerationConfig { dataRoot: string; runtimeByAgent: ReadonlyMap<string, string>; workspaceByAgent?: ReadonlyMap<string, string>; completedCacheLimit?: number; contextBudget?: ContextBudgetEstimator; operations?: SessionOperationCoordinator }
 interface InternalRunStream { public: PublicRunStream; lastAssistantSeq: number; toolSeq: Map<string, number> }
+const MAX_GATEWAY_ATTACHMENT_BYTES = 15 * 1024 * 1024;
 
 function latestEntryId(document: TranscriptDocument): string | null {
   for (let index = document.entries.length - 1; index >= 0; index--) if (typeof document.entries[index]!.id === "string") return document.entries[index]!.id as string;
   return null;
+}
+
+function outputMimeType(fileName: string, supplied?: string): string {
+  const normalized = supplied?.split(";", 1)[0]?.trim().toLowerCase();
+  if (normalized && /^[a-z0-9][a-z0-9!#$&^_.+-]{0,62}\/[a-z0-9][a-z0-9!#$&^_.+-]{0,62}$/.test(normalized)) return normalized;
+  const extension = fileName.toLowerCase().split(".").pop();
+  return ({ pdf: "application/pdf", txt: "text/plain", md: "text/markdown", json: "application/json", csv: "text/csv",
+    html: "text/html", png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp",
+    docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation" } as Record<string, string>)[extension ?? ""] ?? "application/octet-stream";
 }
 
 export class PanelGenerationApi implements GenerationApi {
@@ -66,7 +80,7 @@ export class PanelGenerationApi implements GenerationApi {
         const now = new Date().toISOString();
         const committed = record.plannedUserEntryId ? await this.committedRevision(record.recordId, record.plannedUserEntryId) : undefined;
         if (committed) { const cleaned = await this.cleanupOrphan(record); await this.runStore.put(this.scrub({ ...record, sequence: record.sequence + 1, status: "completed", updatedAt: now, finishedAt: now, revision: committed, cleanupPending: !cleaned })); }
-        else if (["materializing", "committing"].includes(record.status) && record.message && record.plannedUserEntryId && record.stagedEntries) {
+        else if (["materializing", "committing"].includes(record.status) && record.message !== undefined && record.plannedUserEntryId && record.stagedEntries) {
           try { await this.commitRecovered(record); }
           catch {
             const latest = await this.runStore.get(record.runId) ?? record;
@@ -76,27 +90,45 @@ export class PanelGenerationApi implements GenerationApi {
             else await this.runStore.put(this.scrub({ ...latest, sequence: latest.sequence + 1, status: "failed", updatedAt: now, finishedAt: now, cleanupPending: !cleaned,
               error: { code: "RUN_RECOVERY_COMMIT_FAILED", message: "服务重启后无法安全提交已生成结果。" } }));
           }
-        } else if (record.status === "accepted" && record.message && record.plannedUserEntryId) {
+        } else if (record.status === "accepted" && record.message !== undefined && record.plannedUserEntryId) {
           this.plannedUserIds.set(record.runId, record.plannedUserEntryId);
-          const execution = this.executeRun(record, record.message, record.expectedRevision).catch(error => { process.stderr.write(`[ark-panel] recovered run failed runId=${record.runId}: ${String(error)}\n`); }).finally(() => this.executions.delete(record.runId));
+          const execution = this.executeRun(record, record.message, record.expectedRevision, record.attachmentIds ?? []).catch(error => { process.stderr.write(`[ark-panel] recovered run failed runId=${record.runId}: ${String(error)}\n`); }).finally(() => this.executions.delete(record.runId));
           this.executions.set(record.runId, execution);
         } else { const cleaned = await this.cleanupOrphan(record); await this.runStore.put(this.scrub({ ...record, sequence: record.sequence + 1, status: "failed", updatedAt: now, finishedAt: now, cleanupPending: !cleaned,
           error: { code: "RUN_ORPHANED_AFTER_RESTART", message: "服务重启后无法安全恢复该任务，请重新发送。" } })); }
       }
+      await this.maintainAttachments(true);
     })();
     await this.initialization;
   }
 
-  async create(recordId: string, message: string, runId: string = randomUUID(), expectedRevision?: string): Promise<PublicPanelRun & { newlyCreated?: boolean }> {
-    const requestHash = createHash("sha256").update(JSON.stringify({ recordId, message, expectedRevision: expectedRevision ?? null })).digest("hex");
+  /** Reclaim abandoned uploads and references not represented by a durable transcript.
+   * Sessions with an active run are skipped so maintenance cannot race materialization. */
+  async maintainAttachments(pruneOrphans = false): Promise<void> {
+    const activeRecords = new Set((await this.runStore.list()).filter(record => !terminalRunStatuses.has(record.status)).map(record => record.recordId));
+    const pendingBefore = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    for (const agentId of this.config.runtimeByAgent.keys()) {
+      for (const session of await listPanelSessions(this.config.dataRoot, agentId)) {
+        if (activeRecords.has(session.recordId)) continue;
+        const { document } = await loadPanelSession(this.config.dataRoot, agentId, session.recordId);
+        await pruneSessionAttachments(this.config.dataRoot, agentId, session.recordId,
+          new Set(document.entries.flatMap(entry => typeof entry.id === "string" ? [entry.id] : [])), pendingBefore, pruneOrphans);
+      }
+    }
+    await garbageCollectAttachments(this.config.dataRoot);
+  }
+
+  async create(recordId: string, message: string, runId: string = randomUUID(), expectedRevision?: string, attachmentIds: readonly string[] = []): Promise<PublicPanelRun & { newlyCreated?: boolean }> {
+    const normalizedAttachments = [...attachmentIds];
+    const requestHash = createHash("sha256").update(JSON.stringify({ recordId, message, expectedRevision: expectedRevision ?? null, attachmentIds: normalizedAttachments })).digest("hex");
     const pending = this.creations.get(runId); if (pending) { if (pending.requestHash !== requestHash) throw new Error("IDEMPOTENCY_KEY_REUSED"); return { ...await pending.promise, newlyCreated: false }; }
-    const creation = this.createOnce(recordId, message, runId, expectedRevision).finally(() => this.creations.delete(runId));
+    const creation = this.createOnce(recordId, message, runId, expectedRevision, normalizedAttachments).finally(() => this.creations.delete(runId));
     this.creations.set(runId, { requestHash, promise: creation }); return await creation;
   }
 
-  private async createOnce(recordId: string, message: string, runId: string, expectedRevision?: string): Promise<PublicPanelRun & { newlyCreated?: boolean }> {
+  private async createOnce(recordId: string, message: string, runId: string, expectedRevision?: string, attachmentIds: readonly string[] = []): Promise<PublicPanelRun & { newlyCreated?: boolean }> {
     await this.initialize();
-    const requestHash = createHash("sha256").update(JSON.stringify({ recordId, message, expectedRevision: expectedRevision ?? null })).digest("hex");
+    const requestHash = createHash("sha256").update(JSON.stringify({ recordId, message, expectedRevision: expectedRevision ?? null, attachmentIds })).digest("hex");
     let release!: () => void; const previous = this.creationGate; this.creationGate = new Promise<void>(resolve => { release = resolve; }); await previous;
     let accepted: PanelRunRecord;
     try {
@@ -106,10 +138,10 @@ export class PanelGenerationApi implements GenerationApi {
       if (active) throw new Error("SESSION_BUSY");
       const now = new Date().toISOString(), plannedUserEntryId = randomUUID();
       accepted = { version: 1, runId, recordId, requestHash, sequence: 1, status: "accepted", createdAt: now, updatedAt: now, message,
-        plannedUserEntryId, ...(expectedRevision ? { expectedRevision } : {}) };
+        plannedUserEntryId, ...(attachmentIds.length ? { attachmentIds: [...attachmentIds] } : {}), ...(expectedRevision ? { expectedRevision } : {}) };
       await this.runStore.put(accepted); this.plannedUserIds.set(runId, plannedUserEntryId);
     } finally { release(); }
-    const execution = this.executeRun(accepted, message, expectedRevision).catch(error => {
+    const execution = this.executeRun(accepted, message, expectedRevision, attachmentIds).catch(error => {
       process.stderr.write(`[ark-panel] run manager failed runId=${runId}: ${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
     }).finally(() => this.executions.delete(runId));
     this.executions.set(runId, execution);
@@ -148,11 +180,11 @@ export class PanelGenerationApi implements GenerationApi {
     return this.visible(updated);
   }
 
-  private async executeRun(accepted: PanelRunRecord, message: string, expectedRevision?: string): Promise<void> {
+  private async executeRun(accepted: PanelRunRecord, message: string, expectedRevision?: string, attachmentIds: readonly string[] = []): Promise<void> {
     let current = await this.transition(accepted, { status: "running", startedAt: new Date().toISOString() });
     try {
       if (this.abortRequested.has(accepted.runId)) throw new Error("BRIDGE_ABORTED");
-      const result = await this.generate(accepted.recordId, message, new AbortController().signal, accepted.runId, expectedRevision);
+      const result = await this.generate(accepted.recordId, message, new AbortController().signal, accepted.runId, expectedRevision, attachmentIds);
       current = (await this.runStore.get(accepted.runId)) ?? current;
       current = await this.transition(current, { status: "completed", finishedAt: new Date().toISOString(), ...(result.revision ? { revision: result.revision } : {}),
         ...(result.runtimeAgentId ? { runtimeAgentId: result.runtimeAgentId } : {}), ...(result.temporarySessionId ? { temporarySessionId: result.temporarySessionId } : {}),
@@ -161,7 +193,7 @@ export class PanelGenerationApi implements GenerationApi {
       let recoverable = await this.runStore.get(accepted.runId);
       const committed = recoverable?.plannedUserEntryId ? await this.committedRevision(recoverable.recordId, recoverable.plannedUserEntryId) : undefined;
       if (recoverable && committed) { await this.transition(recoverable, { status: "completed", finishedAt: new Date().toISOString(), revision: committed }); return; }
-      if (recoverable?.stagedEntries && recoverable.message && recoverable.plannedUserEntryId && !["aborting", "aborted"].includes(recoverable.status)) {
+      if (recoverable?.stagedEntries && recoverable.message !== undefined && recoverable.plannedUserEntryId && !["aborting", "aborted"].includes(recoverable.status)) {
         try { await this.commitRecovered(recoverable); return; }
         catch (recoveryError) { process.stderr.write(`[ark-panel] staged run commit failed runId=${accepted.runId}: ${recoveryError instanceof Error ? recoveryError.message : String(recoveryError)}\n`); }
       }
@@ -172,10 +204,14 @@ export class PanelGenerationApi implements GenerationApi {
       const abortUnconfirmed = gatewayCode === "GATEWAY_ABORT_RELEASE_TIMEOUT" || error instanceof Error && error.message === "RUN_ABORT_UNCONFIRMED";
       const aborted = error instanceof Error && error.message === "BRIDGE_ABORTED";
       const code = abortUnconfirmed ? "RUN_ABORT_UNCONFIRMED" : aborted ? "RUN_ABORTED" : gatewayCode ?? (error instanceof ContextBudgetExceededError ? error.code : error instanceof Error &&
-        ["SESSION_BUSY", "REVISION_CONFLICT", "PANEL_SESSION_NOT_FOUND", "RUNTIME_NOT_CONFIGURED", "IDEMPOTENCY_KEY_REUSED", "SLASH_COMMANDS_UNSUPPORTED"].includes(error.message) ? error.message : "RUN_FAILED");
+        ["SESSION_BUSY", "REVISION_CONFLICT", "PANEL_SESSION_NOT_FOUND", "RUNTIME_NOT_CONFIGURED", "IDEMPOTENCY_KEY_REUSED", "SLASH_COMMANDS_UNSUPPORTED",
+          "ATTACHMENTS_INVALID", "ATTACHMENTS_TOO_LARGE", "ATTACHMENT_ALREADY_ASSIGNED", "ATTACHMENT_NOT_OWNED_BY_SESSION", "GATEWAY_ATTACHMENT_TRANSPORT_UNAVAILABLE"].includes(error.message) ? error.message : "RUN_FAILED");
       const publicMessages: Record<string,string> = { RUN_ABORTED: "任务已停止。", SESSION_BUSY: "该会话正在生成。", REVISION_CONFLICT: "会话已更新，请刷新后重试。",
         PANEL_SESSION_NOT_FOUND: "面板会话不存在。", RUNTIME_NOT_CONFIGURED: "Agent 推理 runtime 未配置。", IDEMPOTENCY_KEY_REUSED: "重试标识已用于其他请求。",
         SLASH_COMMANDS_UNSUPPORTED: "请通过结构化命令入口执行斜杠命令。", GATEWAY_RUN_TIMEOUT: "OpenClaw 运行超时，未提交不完整结果。",
+        ATTACHMENTS_INVALID: "附件列表无效，请重新选择。", ATTACHMENTS_TOO_LARGE: "单次附件总量不能超过 15 MiB。",
+        ATTACHMENT_ALREADY_ASSIGNED: "附件已属于历史消息，请重新上传后发送。", ATTACHMENT_NOT_OWNED_BY_SESSION: "附件不属于当前会话，请重新选择。",
+        GATEWAY_ATTACHMENT_TRANSPORT_UNAVAILABLE: "附件传输通道不可用，请检查 OpenClaw Gateway 认证配置。",
         GATEWAY_RUN_ABORTED: "OpenClaw 中止了本次运行，请重试。", GATEWAY_RUN_FAILED: "OpenClaw 运行失败，请检查服务日志后重试。",
         GATEWAY_RUN_NOT_STARTED: "任务已被 OpenClaw 接受，但在等待期限内未观察到开始执行，请重试。",
         GATEWAY_ABORT_RELEASE_TIMEOUT: "已请求 OpenClaw 停止运行，但未能确认资源释放，请稍后再试。",
@@ -252,7 +288,7 @@ export class PanelGenerationApi implements GenerationApi {
     void task.finally(() => { if (this.streamTails.get(runId) === task) { this.streamTails.delete(runId); } });
   }
   private scrub(record: PanelRunRecord): PanelRunRecord {
-    const { message: _message, expectedRevision: _expectedRevision, stagedEntries: _stagedEntries, ...clean } = record; return clean;
+    const { message: _message, attachmentIds: _attachmentIds, expectedRevision: _expectedRevision, stagedEntries: _stagedEntries, ...clean } = record; return clean;
   }
   private async committedRevision(recordId: string, userEntryId: string): Promise<string | undefined> {
     for (const agentId of this.config.runtimeByAgent.keys()) try {
@@ -265,13 +301,17 @@ export class PanelGenerationApi implements GenerationApi {
   private async commitRecovered(record: PanelRunRecord): Promise<void> {
     let agentId: string | undefined;
     for (const candidate of this.config.runtimeByAgent.keys()) if ((await listPanelSessions(this.config.dataRoot, candidate)).some(item => item.recordId === record.recordId)) { agentId = candidate; break; }
-    if (!agentId || !record.plannedUserEntryId || !record.message || !record.stagedEntries) throw new Error("RUN_RECOVERY_DATA_MISSING");
+    if (!agentId || !record.plannedUserEntryId || record.message === undefined || !record.stagedEntries) throw new Error("RUN_RECOVERY_DATA_MISSING");
     const claim = await this.transition(record, { status: "committing" }); if (claim.status !== "committing") throw new Error("RUN_COMMIT_CLAIM_REJECTED");
     const { metadata, document } = await loadPanelSession(this.config.dataRoot, agentId, record.recordId);
     const transcriptPath = join(this.config.dataRoot, "sessions", agentId, record.recordId, "transcript.jsonl"), before = await lstat(transcriptPath);
     if (record.baseRevision && record.baseRevision !== `${before.size}:${before.mtimeMs}`) throw new Error("REVISION_CONFLICT");
+    const attached = await Promise.all((record.attachmentIds ?? []).map(id => getSessionAttachment(this.config.dataRoot, agentId!, record.recordId, id)));
+    const content: JsonObject[] = record.message ? [{ type: "text", text: record.message }] : [];
+    for (const item of attached) content.push({ type: "attachment", attachmentId: item.manifest.attachmentId, fileName: item.manifest.fileName,
+      name: item.manifest.fileName, mimeType: item.manifest.mimeType, sizeBytes: item.manifest.size, disposition: "input" });
     const userEntry: JsonObject = { type: "message", id: record.plannedUserEntryId, parentId: record.baseParentEntryId ?? null, timestamp: record.createdAt,
-      message: { role: "user", content: [{ type: "text", text: record.message }], timestamp: Date.parse(record.createdAt) } };
+      message: { role: "user", content, timestamp: Date.parse(record.createdAt) } };
     await commitPanelTranscript(this.config.dataRoot, metadata, { header: document.header, entries: [...document.entries, userEntry, ...(record.stagedEntries as JsonObject[])] });
     const after = await lstat(transcriptPath), now = new Date().toISOString();
     const cleaned = await this.cleanupOrphan(claim);
@@ -286,7 +326,7 @@ export class PanelGenerationApi implements GenerationApi {
     catch (error) { process.stderr.write(`[ark-panel] orphan cleanup failed runId=${record.runId}: ${error instanceof Error ? error.message : String(error)}\n`); return false; }
   }
 
-  async generate(recordId: string, message: string, signal: AbortSignal, runId: string = randomUUID(), expectedRevision?: string): Promise<{ runId: string; entries: unknown[]; revision?: string; runtimeAgentId?: string; temporarySessionId?: string; gatewayRunId?: string }> {
+  async generate(recordId: string, message: string, signal: AbortSignal, runId: string = randomUUID(), expectedRevision?: string, attachmentIds: readonly string[] = []): Promise<{ runId: string; entries: unknown[]; revision?: string; runtimeAgentId?: string; temporarySessionId?: string; gatewayRunId?: string }> {
     const done = this.completed.get(runId); if (done) {
       if (done.recordId !== recordId || done.message !== message) throw new Error("IDEMPOTENCY_KEY_REUSED"); return done.value;
     }
@@ -299,7 +339,7 @@ export class PanelGenerationApi implements GenerationApi {
     if (this.abortRequested.has(runId)) controller.abort();
     if (signal?.aborted) controller.abort(); else signal?.addEventListener("abort", forward, { once: true });
     this.controllers.set(runId, controller);
-    const promise = this.generateOnce(recordId, message, controller.signal, runId, expectedRevision);
+    const promise = this.generateOnce(recordId, message, controller.signal, runId, expectedRevision, attachmentIds);
     this.inflight.set(runId, { recordId, message, promise });
     try {
       const value = await promise; this.completed.set(runId, { recordId, message, value });
@@ -309,8 +349,9 @@ export class PanelGenerationApi implements GenerationApi {
     finally { this.inflight.delete(runId); this.controllers.delete(runId); signal?.removeEventListener("abort", forward); }
   }
 
-  private async generateOnce(recordId: string, message: string, signal: AbortSignal, runId: string, expectedRevision?: string): Promise<{ runId: string; entries: unknown[]; revision?: string; runtimeAgentId?: string; temporarySessionId?: string; gatewayRunId?: string }> {
+  private async generateOnce(recordId: string, message: string, signal: AbortSignal, runId: string, expectedRevision?: string, attachmentIds: readonly string[] = []): Promise<{ runId: string; entries: unknown[]; revision?: string; runtimeAgentId?: string; temporarySessionId?: string; gatewayRunId?: string }> {
     if (message.trimStart().startsWith("/")) throw new Error("SLASH_COMMANDS_UNSUPPORTED");
+    if (attachmentIds.length > 10 || new Set(attachmentIds).size !== attachmentIds.length) throw new Error("ATTACHMENTS_INVALID");
     return await this.operations.runGeneration(recordId, async () => {
       let agentId: string | undefined;
       for (const candidate of this.config.runtimeByAgent.keys()) {
@@ -324,11 +365,27 @@ export class PanelGenerationApi implements GenerationApi {
       if (expectedRevision && expectedRevision !== beforeRevision) throw new Error("REVISION_CONFLICT");
       (this.config.contextBudget ?? new ConservativeContextBudget()).assertWithinBudget(document, message);
       const userId = this.plannedUserIds.get(runId) ?? randomUUID(); const now = new Date().toISOString();
+      const storedAttachments = await Promise.all(attachmentIds.map(async attachmentId => {
+        const stored = await getSessionAttachment(this.config.dataRoot, agentId!, recordId, attachmentId);
+        const durableMessageIds = new Set(document.entries.flatMap(entry => typeof entry.id === "string" ? [entry.id] : []));
+        if (stored.reference.role !== "user" || (!stored.reference.messageId.startsWith("pending_") && stored.reference.messageId !== userId && durableMessageIds.has(stored.reference.messageId))) throw new Error("ATTACHMENT_ALREADY_ASSIGNED");
+        return { stored, bytes: await readSessionAttachmentBytes(this.config.dataRoot, agentId!, recordId, attachmentId) };
+      }));
+      if (storedAttachments.reduce((sum, item) => sum + item.bytes.length, 0) > MAX_GATEWAY_ATTACHMENT_BYTES) throw new Error("ATTACHMENTS_TOO_LARGE");
+      const userContent: JsonObject[] = [];
+      if (message) userContent.push({ type: "text", text: message });
+      for (const { stored } of storedAttachments) userContent.push({ type: "attachment", attachmentId: stored.manifest.attachmentId,
+        fileName: stored.manifest.fileName, name: stored.manifest.fileName, mimeType: stored.manifest.mimeType,
+        sizeBytes: stored.manifest.size, disposition: "input" });
       const userEntry: JsonObject = { type: "message", id: userId, parentId: latestEntryId(document), timestamp: now,
-        message: { role: "user", content: [{ type: "text", text: message }], timestamp: Date.now() } };
+        message: { role: "user", content: userContent, timestamp: Date.now() } };
       const managedBeforeBridge = await this.runStore.get(runId); if (managedBeforeBridge) await this.transition(managedBeforeBridge, { status: "running", baseRevision: beforeRevision, baseParentEntryId: latestEntryId(document) });
-      const result = await this.bridge.generate({ runtimeAgentId, historyThroughPreviousRun: document, latestUserMessage: message,
+      const result = await this.bridge.generate({ runtimeAgentId, historyThroughPreviousRun: document, latestUserMessage: message || "请查看随消息提供的附件。",
         latestUserEntryId: userId, idempotencyKey: runId,
+        ...(storedAttachments.length ? { attachments: storedAttachments.map(({ stored, bytes }) => ({ fileName: stored.manifest.fileName,
+          mimeType: stored.manifest.mimeType, content: bytes.toString("base64") })) } : {}),
+        ...(this.config.workspaceByAgent?.get(agentId) ? { outputCapture: { workspaceRoot: this.config.workspaceByAgent.get(agentId)!,
+          cleanupRoot: join(this.config.dataRoot, "files", "output-cleanup") } } : {}),
         overrides: { ...(metadata.modelOverride ? { modelOverride: metadata.modelOverride } : {}),
           ...(metadata.thinkingLevel ? { thinkingLevel: metadata.thinkingLevel } : {}),
           ...(metadata.reasoningLevel ? { reasoningLevel: metadata.reasoningLevel } : {}) }, signal,
@@ -336,13 +393,15 @@ export class PanelGenerationApi implements GenerationApi {
           const current = await this.runStore.get(runId); if (current) await this.transition(current, { cleanupPending: true });
         } });
       const preCommitState = await this.runStore.get(runId); if (signal.aborted || preCommitState?.status === "aborting") throw new Error("BRIDGE_ABORTED");
-      const committed: TranscriptDocument = { header: document.header, entries: [...document.entries, userEntry, ...result.entries] };
+      const materializedEntries = (preCommitState?.stagedEntries ?? result.entries) as JsonObject[];
+      const committed: TranscriptDocument = { header: document.header, entries: [...document.entries, userEntry, ...materializedEntries] };
       const beforeCommit = await this.runStore.get(runId); const claim = beforeCommit ? await this.transition(beforeCommit, { status: "committing" }) : undefined;
       if (claim && claim.status !== "committing") throw new Error("BRIDGE_ABORTED");
+      await assignSessionAttachments(this.config.dataRoot, agentId, recordId, attachmentIds, userId, "user");
       await commitPanelTranscript(this.config.dataRoot, metadata, committed);
       const afterStat = await lstat(transcriptPath); const revision = `${afterStat.size}:${afterStat.mtimeMs}`;
       const afterCommit = await this.runStore.get(runId); if (afterCommit) await this.transition(afterCommit, { status: "committed", revision });
-      return { runId, entries: result.entries, revision,
+      return { runId, entries: materializedEntries, revision,
         runtimeAgentId, temporarySessionId: result.sessionId, gatewayRunId: result.runId };
     });
   }
@@ -354,6 +413,36 @@ export class PanelGenerationApi implements GenerationApi {
       temporarySessionId: event.sessionId, temporarySessionKey: event.sessionKey, temporaryTranscriptPath: event.transcriptPath });
     else if (event.type === "history_materialized") await this.transition(current, { status: "running", previousEntryCount: event.previousEntryCount });
     else if (event.type === "gateway_send_accepted") await this.transition(current, { status: "running", gatewayRunId: event.gatewayRunId });
-    else await this.transition(current, { status: "materializing", stagedEntries: event.entries });
+    else {
+      let agentId: string | undefined;
+      for (const candidate of this.config.runtimeByAgent.keys()) if ((await listPanelSessions(this.config.dataRoot, candidate)).some(item => item.recordId === current.recordId)) { agentId = candidate; break; }
+      if (!agentId || !current.plannedUserEntryId) throw new Error("RUN_ATTACHMENT_OWNER_MISSING");
+      await assignSessionAttachments(this.config.dataRoot, agentId, current.recordId, current.attachmentIds ?? [], current.plannedUserEntryId, "user");
+      const entries = structuredClone(event.entries) as JsonObject[];
+      const createdOutputIds: string[] = [];
+      try {
+        if (event.outputs?.length) {
+        const assistant = [...entries].reverse().find(entry => entry.type === "message" && entry.message && typeof entry.message === "object" && !Array.isArray(entry.message) && (entry.message as JsonObject).role === "assistant");
+        if (!assistant || typeof assistant.id !== "string") throw new Error("OUTPUT_ASSISTANT_ENTRY_MISSING");
+        const message = assistant.message as JsonObject;
+        const content = Array.isArray(message.content) ? message.content as JsonObject[] : [];
+        for (let index = 0; index < event.outputs.length; index++) {
+          const output = event.outputs[index]!;
+          const cleanName = basename(output.fileName.replaceAll("\\", "/")) || `output-${index + 1}.bin`;
+          const stored = await storeSessionAttachment(this.config.dataRoot, { fileName: cleanName,
+            mimeType: outputMimeType(cleanName, output.mimeType), bytes: output.bytes },
+          { agentId, recordId: current.recordId, messageId: assistant.id, role: "assistant" });
+          createdOutputIds.push(stored.manifest.attachmentId);
+          content.push({ type: "attachment", attachmentId: stored.manifest.attachmentId, fileName: stored.manifest.fileName,
+            name: stored.manifest.fileName, mimeType: stored.manifest.mimeType, sizeBytes: stored.manifest.size, disposition: "output" });
+        }
+        message.content = content;
+        }
+        await this.transition(current, { status: "materializing", stagedEntries: entries });
+      } catch (error) {
+        if (createdOutputIds.length) await removeSessionAttachments(this.config.dataRoot, agentId, current.recordId, createdOutputIds).catch(() => undefined);
+        throw error;
+      }
+    }
   }
 }

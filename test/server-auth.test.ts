@@ -5,20 +5,35 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { passwordHash } from "../src/server/auth.js";
-import { createPanelServer, type CommandApi, type GenerationApi, type ReadApi } from "../src/server/app.js";
+import { createPanelServer, type AttachmentApi, type CommandApi, type GenerationApi, type ReadApi } from "../src/server/app.js";
 import type { PublicPanelRun } from "../src/server/run-store.js";
 import { ForkError } from "../src/domain/fork.js";
 
 const testRunId="99999999-9999-4999-8999-999999999999";
 function snapshot(status:PublicPanelRun["status"]="completed",runId=testRunId):PublicPanelRun{return{runId,recordId:"record",status,sequence:1,createdAt:new Date(0).toISOString(),updatedAt:new Date(0).toISOString(),canAbort:["accepted","running","materializing"].includes(status)}}
 function fakeGeneration(overrides:Partial<GenerationApi>={}):GenerationApi{return{async create(){return snapshot("completed")},async get(){return snapshot("completed")},async subscribe(_id,listener){listener(snapshot("completed"));return()=>undefined},async abortRun(){return snapshot("aborted")},async activeForRecord(){return undefined},...overrides}}
-async function fixture(generation?: GenerationApi, reads?: ReadApi, commands?: CommandApi) {
+async function fixture(generation?: GenerationApi, reads?: ReadApi, commands?: CommandApi, attachments?: AttachmentApi) {
   const publicDir = await mkdtemp(join(tmpdir(), "panel-web-")); await writeFile(join(publicDir, "index.html"), "ok");
-  const server = createPanelServer({ auth: { username: "owl", passwordHash: passwordHash("correct", "0011223344556677"), sessionSecret: "test-secret-long-enough" }, publicDir, mock: reads ? false : true, ...(generation ? { generation } : {}), ...(reads ? { reads } : {}), ...(commands ? { commands } : {}) });
+  const server = createPanelServer({ auth: { username: "owl", passwordHash: passwordHash("correct", "0011223344556677"), sessionSecret: "test-secret-long-enough" }, publicDir, mock: reads ? false : true, ...(generation ? { generation } : {}), ...(reads ? { reads } : {}), ...(commands ? { commands } : {}), ...(attachments ? { attachments } : {}) });
   server.listen(0, "127.0.0.1"); await once(server, "listening");
   const address = server.address(); if (!address || typeof address === "string") throw new Error("no address");
   return { server, base: `http://127.0.0.1:${address.port}` };
 }
+test("附件上传下载要求登录与 CSRF，并保持 Office 原始字节", async t => {
+  const original = Buffer.from("raw-docx-bytes"); let uploaded: Buffer | undefined;
+  const attachments: AttachmentApi = { async upload(recordId, input) { assert.equal(recordId, "record"); assert.equal(input.fileName, "报告.docx"); uploaded = Buffer.from(input.bytes); return { id: "att_fixture", fileName: input.fileName, mimeType: input.mimeType, sizeBytes: input.bytes.byteLength }; },
+    async download(id) { assert.equal(id, "att_fixture"); return { fileName: "报告.docx", mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", bytes: original }; } };
+  const x = await fixture(undefined, undefined, undefined, attachments); t.after(() => x.server.close());
+  assert.equal((await fetch(`${x.base}/api/v1/files/att_fixture/download`)).status, 401);
+  const login = await fetch(`${x.base}/api/v1/auth/login`, { method: "POST", headers: { origin: x.base, "content-type": "application/json" }, body: JSON.stringify({ username: "owl", password: "correct" }) });
+  const value = await login.json() as { data: { csrfToken: string } }; const cookies = login.headers.getSetCookie().map(item => item.split(";", 1)[0]).join("; ");
+  const upload = await fetch(`${x.base}/api/v1/sessions/record/attachments`, { method: "POST", headers: { cookie: cookies, origin: x.base,
+    "x-csrf-token": value.data.csrfToken, "x-file-name": encodeURIComponent("报告.docx"), "content-type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document" }, body: original });
+  assert.equal(upload.status, 201); assert.deepEqual(uploaded, original);
+  const download = await fetch(`${x.base}/api/v1/files/att_fixture/download`, { headers: { cookie: cookies } });
+  assert.equal(download.status, 200); assert.deepEqual(Buffer.from(await download.arrayBuffer()), original);
+  assert.match(download.headers.get("content-disposition") ?? "", /filename\*=UTF-8''/);
+});
 test("API rejects unauthenticated requests", async t => { const x = await fixture(); t.after(()=>x.server.close()); const r = await fetch(`${x.base}/api/v1/agents`); assert.equal(r.status, 401); });
 test("non-mock reads are delegated without connecting a real agent", async t => {
   const reads:ReadApi={async agents(){return [{id:"safe"}]},async sessions(agentId){assert.equal(agentId,"safe");return [{recordId:"record"}]},async projects(agentId){assert.equal(agentId,"safe");return["Project"]},async conversation(recordId){assert.equal(recordId,"record");return {title:"safe"}}}; const x=await fixture(undefined,reads);t.after(()=>x.server.close());

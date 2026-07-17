@@ -38,6 +38,19 @@ test("初始化独立 dataRoot 为 0700", async () => {
   const { mode } = await import("node:fs/promises").then(fs => fs.lstat(x.data)); assert.equal(mode & 0o777, 0o700);
 });
 
+test("模型产出 workspace 必须来自服务端配置且与面板数据隔离", async () => {
+  const x = await layout(), read = join(x.root, "read"), runtime = join(x.root, "agents", "panel-runtime-safe", "sessions"), workspace = join(x.root, "workspace");
+  await mkdir(read); await mkdir(runtime, { recursive: true }); await mkdir(workspace);
+  const config = parsePanelConfig({ ...auth, PANEL_PUBLIC_DIR: x.publicDir, PANEL_DATA_DIR: x.data,
+    PANEL_READ_AGENTS: JSON.stringify({ source: { sessionsRoot: read } }),
+    PANEL_AGENT_RUNTIMES: JSON.stringify({ source: { runtimeAgentId: "panel-runtime-safe", sessionsRoot: runtime, workspaceRoot: workspace } }) }, moduleUrl);
+  await validateAndInitializeConfig(config); assert.equal(config.runtimes.get("source")?.workspaceRoot, workspace);
+  const overlapping = parsePanelConfig({ ...auth, PANEL_PUBLIC_DIR: x.publicDir, PANEL_DATA_DIR: join(workspace, "panel-data"),
+    PANEL_READ_AGENTS: JSON.stringify({ source: { sessionsRoot: read } }),
+    PANEL_AGENT_RUNTIMES: JSON.stringify({ source: { runtimeAgentId: "panel-runtime-safe", sessionsRoot: runtime, workspaceRoot: workspace } }) }, moduleUrl);
+  await assert.rejects(validateAndInitializeConfig(overlapping), /workspace 重叠/);
+});
+
 test("运行 timeout 使用长程默认值并校验独立 grace", async () => {
   const defaults = parsePanelConfig(auth, moduleUrl);
   assert.equal(defaults.gatewayRunTimeoutMs, 1_800_000); assert.equal(defaults.runWatcherGraceMs, 30_000);

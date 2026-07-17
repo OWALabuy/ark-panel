@@ -6,13 +6,18 @@ import { mockAgents, mockConversation, mockSessions } from "./mock-data.js";
 import { ForkError } from "../domain/fork.js";
 import type { PublicPanelRun } from "./run-store.js";
 import { MAX_AVATAR_BYTES, validateSettingsPatch, type PanelSettings, type SettingsPatch, type StoredAvatar } from "./experience-store.js";
+import { MAX_ATTACHMENT_BYTES } from "../storage/attachments.js";
 
 export interface GenerationApi {
-  create(recordId: string, message: string, runId?: string, expectedRevision?: string): Promise<PublicPanelRun>;
+  create(recordId: string, message: string, runId?: string, expectedRevision?: string, attachmentIds?: readonly string[]): Promise<PublicPanelRun>;
   get(runId: string): Promise<PublicPanelRun | undefined>;
   subscribe(runId: string, listener: (run: PublicPanelRun) => void): Promise<(() => void) | undefined>;
   abortRun(runId: string): Promise<PublicPanelRun | undefined>;
   activeForRecord(recordId: string): Promise<PublicPanelRun | undefined>;
+}
+export interface AttachmentApi {
+  upload(recordId: string, input: { fileName: string; mimeType: string; bytes: Uint8Array }): Promise<unknown>;
+  download(attachmentId: string): Promise<{ fileName: string; mimeType: string; bytes: Buffer } | undefined>;
 }
 export interface CommandApi { dispatch(recordId: string, request: { command: string; args: string[] }): Promise<unknown> }
 export interface ExperienceApi {
@@ -34,17 +39,17 @@ export interface ReadApi {
   deleteSession?(recordId: string, confirmed: boolean): Promise<unknown>;
   exportMarkdown?(recordId: string): Promise<{ filename: string; markdown: string } | null>;
 }
-export interface AppOptions { auth: AuthConfig; publicDir: string; mock?: boolean; now?: () => number; generation?: GenerationApi; commands?: CommandApi; reads?: ReadApi; experience?: ExperienceApi; allowedHosts?: readonly string[]; publicOrigins?: readonly string[] }
+export interface AppOptions { auth: AuthConfig; publicDir: string; mock?: boolean; now?: () => number; generation?: GenerationApi; commands?: CommandApi; reads?: ReadApi; experience?: ExperienceApi; attachments?: AttachmentApi; allowedHosts?: readonly string[]; publicOrigins?: readonly string[] }
 const jsonHeaders = { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" };
 function send(res: ServerResponse, status: number, body: unknown, headers = {}): void { res.writeHead(status, { ...jsonHeaders, ...headers }); res.end(JSON.stringify(body)); }
 function fail(res: ServerResponse, status: number, code: string, message: string, requestId: string): void { send(res, status, { error: { code, message, requestId } }); }
 class HttpError extends Error { constructor(readonly status: number, readonly code: string) { super(code); } }
 async function body(req: IncomingMessage): Promise<unknown> { const chunks: Buffer[] = []; let size = 0; for await (const chunk of req) { size += chunk.length; if (size > 16_384) throw new HttpError(413, "BODY_TOO_LARGE"); chunks.push(Buffer.from(chunk)); } return JSON.parse(Buffer.concat(chunks).toString("utf8")); }
-async function binaryBody(req: IncomingMessage, maximum: number): Promise<Buffer> {
+async function binaryBody(req: IncomingMessage, maximum: number, code = "AVATAR_TOO_LARGE"): Promise<Buffer> {
   const declared = req.headers["content-length"];
-  if (declared !== undefined && (!/^\d+$/.test(declared) || Number(declared) > maximum)) throw new HttpError(413, "AVATAR_TOO_LARGE");
+  if (declared !== undefined && (!/^\d+$/.test(declared) || Number(declared) > maximum)) throw new HttpError(413, code);
   const chunks: Buffer[] = []; let size = 0;
-  for await (const chunk of req) { const bytes = Buffer.from(chunk); size += bytes.length; if (size > maximum) throw new HttpError(413, "AVATAR_TOO_LARGE"); chunks.push(bytes); }
+  for await (const chunk of req) { const bytes = Buffer.from(chunk); size += bytes.length; if (size > maximum) throw new HttpError(413, code); chunks.push(bytes); }
   return Buffer.concat(chunks, size);
 }
 function sameOrigin(req: IncomingMessage, options: AppOptions): boolean { const origin = req.headers.origin; if (!origin) return false; return options.publicOrigins?.includes(origin) ?? origin === `http://${req.headers.host}`; }
@@ -99,6 +104,29 @@ export function createPanelServer(options: AppOptions) {
         if (avatarMatch && req.method === "DELETE") {
           if (!options.experience) return fail(res, 501, "SETTINGS_NOT_CONNECTED", "设置存储尚未接入", requestId);
           await options.experience.deleteAvatar(decodeURIComponent(avatarMatch[1]!)); return send(res, 200, { data: null });
+        }
+        const attachmentUploadMatch = /^\/api\/v1\/sessions\/([^/]+)\/attachments$/.exec(url.pathname);
+        if (attachmentUploadMatch && req.method === "POST") {
+          if (!options.attachments) return fail(res, 501, "ATTACHMENTS_NOT_CONNECTED", "附件存储尚未接入", requestId);
+          const encodedName = req.headers["x-file-name"];
+          if (typeof encodedName !== "string") return fail(res, 400, "ATTACHMENT_NAME_REQUIRED", "缺少附件文件名", requestId);
+          let fileName: string; try { fileName = decodeURIComponent(encodedName); }
+          catch { return fail(res, 400, "ATTACHMENT_NAME_INVALID", "附件文件名格式无效", requestId); }
+          const mimeType = (req.headers["content-type"] ?? "application/octet-stream").split(";", 1)[0]!.trim().toLowerCase() || "application/octet-stream";
+          const recordId = decodeURIComponent(attachmentUploadMatch[1]!);
+          return send(res, 201, { data: await options.attachments.upload(recordId, { fileName, mimeType,
+            bytes: await binaryBody(req, MAX_ATTACHMENT_BYTES, "ATTACHMENT_TOO_LARGE") }) });
+        }
+        const attachmentDownloadMatch = /^\/api\/v1\/files\/([^/]+)\/download$/.exec(url.pathname);
+        if (attachmentDownloadMatch && req.method === "GET") {
+          if (!options.attachments) return fail(res, 501, "ATTACHMENTS_NOT_CONNECTED", "附件存储尚未接入", requestId);
+          const file = await options.attachments.download(decodeURIComponent(attachmentDownloadMatch[1]!));
+          if (!file) return fail(res, 404, "ATTACHMENT_NOT_FOUND", "附件不存在", requestId);
+          const ascii = file.fileName.replace(/[^\x20-\x7e]/g, "_").replace(/["\\]/g, "_");
+          res.writeHead(200, { "content-type": file.mimeType, "content-length": file.bytes.length,
+            "content-disposition": `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(file.fileName)}`,
+            "cache-control": "no-store", "x-content-type-options": "nosniff" });
+          res.end(file.bytes); return;
         }
         if (req.method === "GET" && url.pathname === "/api/v1/agents") return send(res, 200, { data: options.mock ? mockAgents : await options.reads?.agents() ?? [] });
         if (req.method === "GET" && url.pathname === "/api/v1/sessions") { const agentId = url.searchParams.get("agentId") ?? undefined, archivedValue = url.searchParams.get("archived"); if (archivedValue !== null && !["true", "false"].includes(archivedValue)) return fail(res, 400, "ARCHIVED_FILTER_INVALID", "归档筛选格式无效", requestId); const archived = archivedValue === null ? false : archivedValue === "true"; return send(res, 200, { data: options.mock ? mockSessions.filter(s => !agentId || s.agentId === agentId) : await options.reads?.sessions(agentId, archived) ?? [] }); }
@@ -158,12 +186,15 @@ export function createPanelServer(options: AppOptions) {
           if (!options.generation) return fail(res, 501, "GATEWAY_NOT_CONNECTED", "后台任务适配器尚未接入", requestId);
           const recordId = decodeURIComponent(url.pathname.slice("/api/v1/sessions/".length, -"/runs".length));
           if (options.reads) { const target = await options.reads.conversation(recordId) as { sourceKind?: unknown } | null; if (!target) return fail(res, 404, "SESSION_NOT_FOUND", "会话不存在", requestId); if (target.sourceKind !== "panel") return fail(res, 409, "SOURCE_READ_ONLY", "真实活会话和归档只读，请先 fork 为面板会话", requestId); }
-          const value = await body(req) as { message?: unknown; revision?: unknown };
-          if (typeof value.message !== "string" || !value.message.trim()) return fail(res, 400, "MESSAGE_REQUIRED", "消息不能为空", requestId);
+          const value = await body(req) as { message?: unknown; revision?: unknown; attachmentIds?: unknown };
+          if (typeof value.message !== "string") return fail(res, 400, "MESSAGE_REQUIRED", "消息格式错误", requestId);
+          if (value.attachmentIds !== undefined && (!Array.isArray(value.attachmentIds) || value.attachmentIds.length > 10 || value.attachmentIds.some(item => typeof item !== "string"))) return fail(res, 400, "ATTACHMENTS_INVALID", "附件列表格式错误", requestId);
+          const attachmentIds = (value.attachmentIds ?? []) as string[];
+          if (!value.message.trim() && attachmentIds.length === 0) return fail(res, 400, "MESSAGE_REQUIRED", "消息和附件不能同时为空", requestId);
           if (value.revision !== undefined && typeof value.revision !== "string") return fail(res, 400, "REVISION_INVALID", "revision 格式错误", requestId);
           const retryKey = req.headers["idempotency-key"];
           if (retryKey !== undefined && !validRunId(retryKey)) return fail(res, 400, "IDEMPOTENCY_KEY_INVALID", "Idempotency-Key 格式错误", requestId);
-          const created = await options.generation.create(recordId, value.message, typeof retryKey === "string" ? retryKey : undefined, typeof value.revision === "string" ? value.revision : undefined) as PublicPanelRun & { newlyCreated?: boolean };
+          const created = await options.generation.create(recordId, value.message, typeof retryKey === "string" ? retryKey : undefined, typeof value.revision === "string" ? value.revision : undefined, attachmentIds) as PublicPanelRun & { newlyCreated?: boolean };
           const { newlyCreated, ...snapshot } = created; return send(res, newlyCreated === false ? 200 : 202, { data: snapshot });
         }
         if (req.method === "GET" && /^\/api\/v1\/sessions\/[^/]+\/runs\/active$/.test(url.pathname)) {

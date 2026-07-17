@@ -63,6 +63,8 @@ Legend: ✅ available · 🚧 scheduled · 💡 candidate (not scheduled) · ⛔
 | Messages | Export the current branch as Markdown | ✅ | Includes timestamps, thinking, tool calls and tool results without internal paths or metadata |
 | Messages | Thinking, tool calls, and tool results | ✅ | Structured, collapsible rendering including command output |
 | Composer | Per-session local drafts and generation state | ✅ | Browser-local drafts survive refresh and failure; a run only locks its own conversation, so other drafts remain editable |
+| Composer | Attachments and multimodal input | ✅ | Select, paste, or drop up to 10 supported files; images, text, PDF, and Office files are stored server-side and sent as original bytes |
+| Messages | Download model-produced files | ✅ | Collects OpenClaw artifacts and files written to the current run's isolated output directory; downloads require panel authentication |
 | Conversation | Long-thread scroll following | ✅ | Preserves the reading position and shows a new-message control when the user has scrolled up |
 | Generation | Durable run lifecycle, reconnect, stop, retry, and idempotent sending | ✅ | Server-owned run state survives browser disconnects; SSE can be re-subscribed and completed message groups commit atomically |
 | Generation | Live assistant text and tool status | ✅ | Relays OpenClaw's coalesced updates (currently about every 150 ms), not one event per token; tool stdout and reasoning are not streamed |
@@ -85,7 +87,6 @@ Legend: ✅ available · 🚧 scheduled · 💡 candidate (not scheduled) · ⛔
 | Localization | Multiple UI languages | 💡 | Candidate, not scheduled; the current UI remains Chinese without a premature string-catalog refactor |
 | Access | In-UI password change | ⛔ | Kept CLI-only (`npm run password-hash`); logout remains at the bottom of the settings drawer |
 | Operations | Backup, integrity verification, restore, health check, and systemd example | ✅ | Includes deployment smoke and fixture-based browser acceptance coverage |
-| Extras | Attachments/multimodal input | 💡 | Recorded for future evaluation; not currently scheduled |
 
 The appearance, sidebar, avatar, title, conversation-status, and background-completion batch is complete. The near-term order now returns to memory-disposition UI and scratch isolation, followed by the durable long-context strategy with `/compact`. OpenClaw compatibility remains ongoing maintenance. The experience-feature rationale lives in [the UX features decision](docs/decisions/ux-features.md); detailed constraints and acceptance criteria live in the [implementation specification](docs/implementation-spec.md).
 
@@ -124,16 +125,18 @@ export PANEL_READ_AGENTS='{
 }'
 
 export PANEL_AGENT_RUNTIMES='{
-  "claude":{"runtimeAgentId":"panel-runtime-claude","sessionsRoot":"/home/USER/.openclaw/agents/panel-runtime-claude/sessions"},
-  "main":{"runtimeAgentId":"panel-runtime-main","sessionsRoot":"/home/USER/.openclaw/agents/panel-runtime-main/sessions"}
+  "claude":{"runtimeAgentId":"panel-runtime-claude","sessionsRoot":"/home/USER/.openclaw/agents/panel-runtime-claude/sessions","workspaceRoot":"/home/USER/claude"},
+  "main":{"runtimeAgentId":"panel-runtime-main","sessionsRoot":"/home/USER/.openclaw/agents/panel-runtime-main/sessions","workspaceRoot":"/home/USER/clawd"}
 }'
 ```
 
-`PANEL_READ_AGENTS` is the allowlist of real agents that may be browsed. `PANEL_AGENT_RUNTIMES` maps each browsable agent to a dedicated runtime with no channel bindings; never use a real, channel-bound agent as the panel runtime.
+`PANEL_READ_AGENTS` is the allowlist of real agents that may be browsed. `PANEL_AGENT_RUNTIMES` maps each browsable agent to a dedicated runtime with no channel bindings; never use a real, channel-bound agent as the panel runtime. Set each trusted `workspaceRoot` to enable downloadable model outputs. The browser cannot choose this path.
+
+Uploaded files live under `PANEL_DATA_DIR/files` in content-addressed private storage and are included in normal backups. Office files are deliberately not converted: OpenClaw receives the original file and the model may inspect it with its own Python/skill tooling. Model outputs are accepted only from OpenClaw's run artifacts or `.openclaw/tmp/ark-panel/<run-id>/outputs` below the configured workspace, then copied into panel storage before that temporary directory is removed. Symlinks, hardlinks, special files, path escapes, excessive file counts, and excessive sizes are rejected.
 
 Long-running agent work defaults to a 30-minute OpenClaw execution limit (`PANEL_GATEWAY_RUN_TIMEOUT_MS`). The panel then waits an additional 30 seconds (`PANEL_RUN_WATCHER_GRACE_MS`) for the terminal trajectory event, so an upstream timeout or abort is reported accurately instead of being hidden by a simultaneous panel timeout.
 
-Live preview uses a separate server-side WebSocket connection to the local OpenClaw Gateway and keeps the browser on the panel's authenticated SSE endpoint; the Gateway credential is never sent to the browser. By default the panel reads the local URL and token/password from `~/.openclaw/openclaw.json`. `PANEL_OPENCLAW_GATEWAY_URL`, `PANEL_OPENCLAW_GATEWAY_TOKEN`, and `PANEL_OPENCLAW_GATEWAY_PASSWORD` override those values, while `PANEL_OPENCLAW_STREAMING=0` disables preview. The observer requests only `operator.read`. If it disconnects or cannot authenticate, generation continues through the existing CLI/trajectory path and the UI falls back to a non-streaming waiting state. The completed, verified transcript remains authoritative and replaces the preview atomically.
+Live preview uses a separate server-side WebSocket connection to the local OpenClaw Gateway and keeps the browser on the panel's authenticated SSE endpoint; the Gateway credential is never sent to the browser. By default the panel reads the local URL and token/password from `~/.openclaw/openclaw.json`. `PANEL_OPENCLAW_GATEWAY_URL`, `PANEL_OPENCLAW_GATEWAY_TOKEN`, and `PANEL_OPENCLAW_GATEWAY_PASSWORD` override those values, while `PANEL_OPENCLAW_STREAMING=0` disables preview. The connection requests `operator.read` for observation and `operator.write` for structured attachment sends; Base64 files are sent over WebSocket rather than a size-limited CLI argument. If observation disconnects, ordinary text generation continues through the existing CLI/trajectory path and the UI falls back to a non-streaming waiting state; attachment sends require the authenticated WebSocket transport. The completed, verified transcript remains authoritative and replaces the preview atomically.
 
 Build and start:
 

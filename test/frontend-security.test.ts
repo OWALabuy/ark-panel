@@ -116,7 +116,7 @@ test("generation state only locks the composer for its own session", async () =>
   assert.match(source,/function syncActiveRun\(\)\{activeRun=runsBySession\.get\(activeSession\)\|\|null\}/);
   assert.match(source,/activeSession=id;[\s\S]*?syncActiveRun\(\);[\s\S]*?restoreDraft\(id\);updateComposer\(\)/);
   assert.match(source,/const textarea=\$\("#message"\),running=Boolean\(activeRun\)/);
-  assert.match(source,/textarea\.disabled=running\|\|!writable/);
+  assert.match(source,/textarea\.disabled=busy\|\|!writable/);
   assert.match(source,/if\(activeSession!==run\.recordId\)return;syncActiveRun\(\)/);
 });
 
@@ -229,4 +229,23 @@ test("agent avatars are cropped client-side and uploaded with CSRF protection", 
   assert.match(source,/avatarRequest\(agentId,"PUT",blob\)/);
   assert.match(source,/avatarRequest\(agentId,"DELETE"\)/);
   assert.match(server,/img-src 'self' blob:/);
+});
+
+test("composer uploads raw attachments and preserves their ids for idempotent run recovery", async () => {
+  const source=await readFile("src/frontend/app.js","utf8");
+  const html=await readFile("src/frontend/index.html","utf8");
+  const styles=await readFile("src/frontend/styles.css","utf8");
+
+  assert.match(html,/id="attachment-input"[^>]*\.docx[^>]*\.xlsx[^>]*\.pptx[^>]*multiple/);
+  assert.match(source,/body:item\.file/);
+  assert.doesNotMatch(source,/FileReader|readAsText|arrayBuffer\(\).*docx|mammoth|officegen/);
+  assert.match(source,/addEventListener\("paste"/);
+  assert.match(source,/addEventListener\("drop"/);
+  assert.match(source,/attachmentIds:run\.submittedAttachmentIds\|\|\[\]/);
+  assert.match(source,/submittedAttachmentIds:run\.submittedAttachmentIds/);
+  assert.match(source,/pendingAttachments\.delete\(`session:\$\{run\.recordId\}`\)/);
+  assert.match(source,/if\(run\.status==="completed"\)/);
+  assert.match(source,/\/api\/v1\/files\/\$\{encodeURIComponent\(block\.id\)\}\/download/);
+  assert.match(styles,/\.attachment-card\.output/);
+  assert.match(styles,/\.composer\.dragging/);
 });

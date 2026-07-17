@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import { relative, resolve, sep } from "node:path";
 import type { ReadAgentConfig } from "./read-data.js";
 
-export interface RuntimeConfig { runtimeAgentId: string; sessionsRoot: string }
+export interface RuntimeConfig { runtimeAgentId: string; sessionsRoot: string; workspaceRoot?: string }
 export interface PanelConfig {
   username: string; passwordHash: string; sessionSecret: string; secureCookie: boolean;
   host: "127.0.0.1"; port: number; publicDir: string; dataRoot?: string; mock: boolean;
@@ -45,12 +45,13 @@ export function parsePanelConfig(env: NodeJS.ProcessEnv, moduleUrl: string): Pan
   });
   const runtimes = new Map<string, RuntimeConfig>(), runtimeIds = new Set<string>();
   for (const [agentId, value] of Object.entries(runtime)) {
-    if (typeof value.runtimeAgentId !== "string" || typeof value.sessionsRoot !== "string") throw new Error("PANEL_AGENT_RUNTIMES 格式错误");
+    if (typeof value.runtimeAgentId !== "string" || typeof value.sessionsRoot !== "string" || (value.workspaceRoot !== undefined && typeof value.workspaceRoot !== "string")) throw new Error("PANEL_AGENT_RUNTIMES 格式错误");
     const isolated = value.runtimeAgentId === "paneltest" || value.runtimeAgentId.startsWith("panel-runtime-") || value.runtimeAgentId.endsWith("-runtime");
     if (!isolated) throw new Error("runtime agent 名称不符合隔离约定");
     if (value.runtimeAgentId === agentId && agentId !== "paneltest") throw new Error("真实 agent 不能同时作为推理 runtime");
     if (runtimeIds.has(value.runtimeAgentId)) throw new Error("runtimeAgentId 重复"); runtimeIds.add(value.runtimeAgentId);
-    runtimes.set(agentId, { runtimeAgentId: value.runtimeAgentId, sessionsRoot: resolve(value.sessionsRoot) });
+    runtimes.set(agentId, { runtimeAgentId: value.runtimeAgentId, sessionsRoot: resolve(value.sessionsRoot),
+      ...(typeof value.workspaceRoot === "string" ? { workspaceRoot: resolve(value.workspaceRoot) } : {}) });
   }
   if ((readAgents.length || runtimes.size) && !env.PANEL_DATA_DIR) throw new Error("配置会话数据源时必须设置 PANEL_DATA_DIR");
   return { username: env.PANEL_USERNAME!, passwordHash: env.PANEL_PASSWORD_HASH!, sessionSecret: env.PANEL_SESSION_SECRET!, secureCookie: env.PANEL_SECURE_COOKIE === "1",
@@ -67,17 +68,22 @@ async function safeDirectory(path: string, label: string): Promise<string> {
 export async function validateAndInitializeConfig(config: PanelConfig): Promise<void> {
   const readRoots: string[] = [];
   for (const agent of config.readAgents) readRoots.push(await safeDirectory(agent.sessionsRoot, "read sessions "));
-  const runtimeRoots: string[] = [];
+  const runtimeRoots: string[] = [], workspaceRoots: string[] = [];
   for (const value of config.runtimes.values()) {
     const root = await safeDirectory(value.sessionsRoot, "runtime sessions ");
     if (!root.endsWith(`${sep}agents${sep}${value.runtimeAgentId}${sep}sessions`)) throw new Error("runtime sessions 根目录与 runtime agent 不匹配");
-    if ([...readRoots, ...runtimeRoots].some(other => pathsOverlap(other, root))) throw new Error("runtime sessions 根目录与其它会话根重叠");
+    if ([...readRoots, ...runtimeRoots, ...workspaceRoots].some(other => pathsOverlap(other, root))) throw new Error("runtime sessions 根目录与其它会话根或 workspace 重叠");
     runtimeRoots.push(root);
+    if (value.workspaceRoot) {
+      const workspace = await safeDirectory(value.workspaceRoot, "runtime workspace ");
+      if ([...readRoots, ...runtimeRoots, ...workspaceRoots].some(other => pathsOverlap(other, workspace))) throw new Error("runtime workspace 与会话根或其它 workspace 重叠");
+      workspaceRoots.push(workspace);
+    }
   }
   if (config.dataRoot) {
     await mkdir(config.dataRoot, { recursive: true, mode: 0o700 }); await chmod(config.dataRoot, 0o700);
     const dataRoot = await safeDirectory(config.dataRoot, "panel data ");
-    if ([...readRoots, ...runtimeRoots].some(other => pathsOverlap(other, dataRoot))) throw new Error("PANEL_DATA_DIR 与会话根目录重叠");
+    if ([...readRoots, ...runtimeRoots, ...workspaceRoots].some(other => pathsOverlap(other, dataRoot))) throw new Error("PANEL_DATA_DIR 与会话根目录或 workspace 重叠");
   }
   await safeDirectory(config.publicDir, "public ");
 }

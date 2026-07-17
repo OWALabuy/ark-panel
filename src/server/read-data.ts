@@ -10,6 +10,7 @@ import { loadReadonlyMetadata, updateReadonlyMetadata, type ReadonlySourceIdenti
 import { updatePanelMetadata } from "../storage/panel-sessions.js";
 import { exportTranscriptMarkdown, markdownFilename } from "../domain/markdown-export.js";
 import { ConservativeContextBudget, type ContextBudgetEstimator } from "../domain/context-budget.js";
+import { forkSessionAttachmentReferences, garbageCollectAttachments } from "../storage/attachments.js";
 
 export interface ReadAgentConfig { agentId: string; sessionsRoot: string; label?: string }
 export interface ConversationRecord {
@@ -135,7 +136,11 @@ export class SessionReadData {
 
   async projects(agentId: string): Promise<string[]> {
     const canonical = new Map<string, string>();
-    for (const record of await this.sessions(agentId, null)) {
+    const records = await this.sessions(agentId, null);
+    // When archived and active conversations differ only in casing, prefer the active spelling
+    // instead of letting filesystem timestamp resolution decide which label wins.
+    records.sort((left, right) => Number(left.archived) - Number(right.archived) || right.updatedAt.localeCompare(left.updatedAt));
+    for (const record of records) {
       const project = record.project?.trim(); if (!project) continue;
       const key = project.toLocaleLowerCase(); if (!canonical.has(key)) canonical.set(key, project);
     }
@@ -226,7 +231,9 @@ export class SessionReadData {
     const loaded = await this.load(recordId); if (!loaded) throw new Error("SESSION_NOT_FOUND");
     if (loaded.record.sourceKind === "panel") {
       if (!loaded.record.archived) throw new Error("SESSION_NOT_ARCHIVED");
-      await deletePanelSession(this.dataRoot, loaded.record.agentId, recordId); return { action: "deleted" };
+      await deletePanelSession(this.dataRoot, loaded.record.agentId, recordId);
+      await garbageCollectAttachments(this.dataRoot);
+      return { action: "deleted" };
     }
     const match = loaded.record.sourceKind === "active" ? [loaded.record.sourceKey, undefined] : (() => { const parsed = RESET.exec(loaded.record.sourceKey); return [parsed?.[1], parsed?.[2]]; })();
     if (!match[0]) throw new Error("SESSION_SOURCE_INVALID");
@@ -239,6 +246,9 @@ export class SessionReadData {
     const createdAt = new Date().toISOString(); const newId = randomUUID();
     const document = deriveFork(loaded.document, messageId, { recordId: newId, parentRecordId: recordId, forkedFromMessageId: messageId, createdAt });
     const metadata = await createPanelSession(this.dataRoot, loaded.record.agentId, document, { parentRecordId: recordId, forkedFromMessageId: messageId, recordId: newId, createdAt });
+    if (loaded.record.sourceKind === "panel") await forkSessionAttachmentReferences(this.dataRoot,
+      { agentId: loaded.record.agentId, recordId }, { agentId: loaded.record.agentId, recordId: newId },
+      new Set(document.entries.flatMap(entry => typeof entry.id === "string" ? [entry.id] : [])));
     return { recordId: metadata.recordId, agentId: metadata.agentId, sourceKind: "panel" };
   }
 
@@ -255,6 +265,9 @@ export class SessionReadData {
     const edited: JsonObject = { ...target, id: randomUUID(), parentId: parent, timestamp: createdAt,
       message: { ...message, content: replacement, timestamp: Date.now() } };
     const metadata = await createPanelSession(this.dataRoot, loaded.record.agentId, { ...base, entries: [...base.entries, edited] }, { parentRecordId: recordId, forkedFromMessageId: messageId, recordId: newId, createdAt });
+    if (loaded.record.sourceKind === "panel") await forkSessionAttachmentReferences(this.dataRoot,
+      { agentId: loaded.record.agentId, recordId }, { agentId: loaded.record.agentId, recordId: newId },
+      new Set(base.entries.flatMap(entry => typeof entry.id === "string" ? [entry.id] : [])));
     return { recordId: metadata.recordId, agentId: metadata.agentId, sourceKind: "panel" };
   }
 }

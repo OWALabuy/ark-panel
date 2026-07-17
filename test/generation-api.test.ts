@@ -7,6 +7,40 @@ import { commitPanelTranscript, createPanelSession, loadPanelSession, updatePane
 import { PanelGenerationApi } from "../src/server/generation-api.js";
 import { ConservativeContextBudget } from "../src/domain/context-budget.js";
 import type { BridgeRequest } from "../src/gateway/adapter.js";
+import { listSessionAttachments, readSessionAttachmentBytes, storeSessionAttachment } from "../src/storage/attachments.js";
+
+test("附件原样交给 OpenClaw，输入与本轮模型产出作为消息块持久化", async t => {
+  const root = await mkdtemp(join(tmpdir(), "generation-attachments-")); t.after(() => rm(root, { recursive: true, force: true }));
+  const workspace = await mkdtemp(join(tmpdir(), "generation-workspace-")); t.after(() => rm(workspace, { recursive: true, force: true }));
+  const metadata = await createPanelSession(root, "claude", { header: { type: "session" }, entries: [] });
+  const officeBytes = Buffer.from("raw-office-fixture");
+  const uploaded = await storeSessionAttachment(root, { fileName: "notes.docx",
+    mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", bytes: officeBytes },
+  { agentId: "claude", recordId: metadata.recordId, messageId: "pending_11111111-1111-4111-8111-111111111111", role: "user" });
+  const api = new PanelGenerationApi({ async generate(request) {
+    assert.equal(request.attachments?.[0]?.content, officeBytes.toString("base64"));
+    assert.equal(request.outputCapture?.workspaceRoot, workspace);
+    const entries = [{ type: "message", id: "answer", parentId: request.latestUserEntryId,
+      message: { role: "assistant", content: [{ type: "text", text: "文件已生成" }] } }];
+    await request.lifecycle?.({ type: "entries_materialized", entries, outputs: [
+      { source: "output-directory", fileName: "reports/result.md", mimeType: "text/markdown; charset=utf-8", bytes: Buffer.from("# result") }
+    ] });
+    return { runId: request.idempotencyKey, sessionId: "temp", entries };
+  } }, { dataRoot: root, runtimeByAgent: new Map([["claude", "runtime"]]), workspaceByAgent: new Map([["claude", workspace]]) });
+  const runId = "41414141-4141-4141-8141-414141414141";
+  await api.create(metadata.recordId, "分析附件", runId, undefined, [uploaded.manifest.attachmentId]);
+  for (let index = 0; index < 200 && (await api.get(runId))?.status !== "completed"; index++) await new Promise(resolve => setTimeout(resolve, 5));
+  assert.equal((await api.get(runId))?.status, "completed");
+  const { document } = await loadPanelSession(root, "claude", metadata.recordId);
+  const userContent = (document.entries[0]!.message as { content: Array<Record<string, unknown>> }).content;
+  assert.equal(userContent[1]?.attachmentId, uploaded.manifest.attachmentId);
+  const assistantContent = (document.entries[1]!.message as { content: Array<Record<string, unknown>> }).content;
+  assert.equal(assistantContent[1]?.disposition, "output"); assert.equal(assistantContent[1]?.fileName, "result.md");
+  const stored = await listSessionAttachments(root, "claude", metadata.recordId); assert.equal(stored.length, 2);
+  const output = stored.find(item => item.reference.role === "assistant")!;
+  assert.equal(output.manifest.mimeType, "text/markdown");
+  assert.equal((await readSessionAttachmentBytes(root, "claude", metadata.recordId, output.manifest.attachmentId)).toString(), "# result");
+});
 
 test("GenerationApi 只在完整 bridge 成功后原子提交 user 和 run，并保持 parent 链", async () => {
   const root = await mkdtemp(join(tmpdir(), "generation-api-"));

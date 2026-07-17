@@ -27,6 +27,7 @@ export interface PanelRunRecord {
   baseRevision?: string;
   baseParentEntryId?: string | null;
   message?: string;
+  attachmentIds?: string[];
   expectedRevision?: string;
   plannedUserEntryId?: string;
   stagedEntries?: unknown[];

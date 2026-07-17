@@ -39,12 +39,14 @@ export PANEL_READ_AGENTS='{
 }'
 
 export PANEL_AGENT_RUNTIMES='{
-  "claude":{"runtimeAgentId":"panel-runtime-claude","sessionsRoot":"/home/USER/.openclaw/agents/panel-runtime-claude/sessions"},
-  "main":{"runtimeAgentId":"panel-runtime-main","sessionsRoot":"/home/USER/.openclaw/agents/panel-runtime-main/sessions"}
+  "claude":{"runtimeAgentId":"panel-runtime-claude","sessionsRoot":"/home/USER/.openclaw/agents/panel-runtime-claude/sessions","workspaceRoot":"/home/USER/claude"},
+  "main":{"runtimeAgentId":"panel-runtime-main","sessionsRoot":"/home/USER/.openclaw/agents/panel-runtime-main/sessions","workspaceRoot":"/home/USER/clawd"}
 }'
 ```
 
-`PANEL_READ_AGENTS` 是可浏览的真实 agent allowlist。`PANEL_AGENT_RUNTIMES` 把面板会话所属 agent 映射到无渠道绑定的专用推理 agent；禁止把真实 agent 本身配置成 runtime。`paneltest` 只允许用于显式集成测试。
+`PANEL_READ_AGENTS` 是可浏览的真实 agent allowlist。`PANEL_AGENT_RUNTIMES` 把面板会话所属 agent 映射到无渠道绑定的专用推理 agent；禁止把真实 agent 本身配置成 runtime。`workspaceRoot` 是服务端可信配置，用于创建本轮隔离的模型产出目录；不配置时仍可上传附件，但不会启用该目录的产出收集。`paneltest` 只允许用于显式集成测试。
+
+附件 blob、manifest 和会话引用都在 `PANEL_DATA_DIR/files` / `PANEL_DATA_DIR/sessions` 下，因此现有离线备份会一并包含它们。workspace 中的 `.openclaw/tmp/ark-panel/<run-id>` 只是运行期暂存，不应单独备份；服务会在内容安全复制进面板存储后清理。
 
 启动：
 
