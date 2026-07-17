@@ -36,7 +36,7 @@
       <label class="search"><span aria-hidden="true">⌕</span><input id="search" aria-label="搜索会话" placeholder="搜索会话"></label><nav id="sessions" aria-label="会话列表"></nav>
     </aside>
     <section class="conversation">
-      <header><button id="back-sessions" class="mobile" aria-label="返回会话列表">‹ 会话</button><div class="conversation-heading"><h2 id="title">选择一个会话</h2><small id="subtitle" aria-live="polite"></small><div id="conversation-status" class="conversation-status" aria-label="会话状态" hidden></div></div><nav class="session-actions" aria-label="会话操作"><button id="export-session" class="header-action" type="button" hidden>导出 MD</button><button id="pin-session" class="header-action" type="button" hidden>置顶</button><button id="project-session" class="header-action" type="button" hidden>分组</button><button id="rename-session" class="header-action" type="button" hidden>重命名</button><button id="archive-session" class="header-action" type="button" hidden>归档</button><button id="delete-session" class="header-action danger" type="button" hidden>删除</button></nav></header>
+      <header><button id="back-sessions" class="mobile" aria-label="返回会话列表">‹ 会话</button><div class="conversation-heading"><h2 id="title">选择一个会话</h2><small id="subtitle" aria-live="polite"></small><div id="conversation-status" class="conversation-status" aria-label="会话状态" hidden></div></div><nav class="session-actions" aria-label="会话操作"><button id="export-session" class="header-action" type="button" hidden>导出 MD</button><button id="pin-session" class="header-action" type="button" hidden>置顶</button><button id="project-session" class="header-action" type="button" aria-haspopup="menu" aria-expanded="false" hidden>分组</button><button id="rename-session" class="header-action" type="button" hidden>重命名</button><button id="archive-session" class="header-action" type="button" hidden>归档</button><button id="delete-session" class="header-action danger" type="button" hidden>删除</button></nav></header>
       <div id="messages" class="messages" role="log" aria-label="消息记录"><div class="empty">从左侧选择会话</div></div>
       <form id="composer" class="composer">
         <div id="command-menu" class="commands" role="listbox" aria-label="斜杠命令" hidden></div>
@@ -46,6 +46,7 @@
     </section>
     <div id="rail-flyout" class="rail-flyout" role="menu" hidden></div>
   </main>
+  <div id="project-menu" class="project-menu" role="menu" aria-label="移动到分组" tabindex="-1" hidden></div>
   <div id="settings-layer" class="settings-layer" hidden>
     <button id="settings-backdrop" class="settings-backdrop" type="button" aria-label="关闭设置"></button>
     <aside id="settings-drawer" class="settings-drawer" role="dialog" aria-modal="true" aria-labelledby="settings-title" tabindex="-1">

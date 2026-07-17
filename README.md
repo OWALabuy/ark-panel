@@ -52,7 +52,7 @@ Legend: ✅ available · 🚧 scheduled · 💡 candidate (not scheduled) · ⛔
 | Sessions | Full-text search and source/agent filtering | ✅ | Search includes archived sessions; the current view controls which results are shown |
 | Sessions | Rename, archive, and restore any session source | ✅ | Read-only sources use panel-owned metadata sidecars |
 | Sessions | Permanently delete panel sessions / hide read-only sessions | ✅ | Panel sessions require archive plus explicit confirmation; OpenClaw source files are never deleted |
-| Sessions | Pin and group sessions by project | ✅ | Project groups can be collapsed locally; list items expose quick pin, archive, and export actions |
+| Sessions | Pin and group sessions by project | ✅ | Accessible quick menu assigns existing groups or creates one inline; active and archived sessions share the catalog, groups remain locally collapsible |
 | Branching | Fork from a valid message boundary | ✅ | Preserves tool-call groups and never mutates the source transcript |
 | Branching | Edit a user message and resend as a new branch | ✅ | The original branch remains available |
 | Messages | Safe Markdown rendering | ✅ | Headings, lists, quotes, tables, links, inline code and fenced code; raw HTML is not executed |

@@ -133,6 +133,15 @@ export class SessionReadData {
       .sort((a, b) => Number(b.pinned) - Number(a.pinned) || b.updatedAt.localeCompare(a.updatedAt));
   }
 
+  async projects(agentId: string): Promise<string[]> {
+    const canonical = new Map<string, string>();
+    for (const record of await this.sessions(agentId, null)) {
+      const project = record.project?.trim(); if (!project) continue;
+      const key = project.toLocaleLowerCase(); if (!canonical.has(key)) canonical.set(key, project);
+    }
+    return [...canonical.values()].sort((left, right) => left.localeCompare(right, undefined, { sensitivity: "base" }));
+  }
+
   private async load(recordId: string): Promise<{ record: ConversationRecord; document: TranscriptDocument } | undefined> {
     const record = (await this.sessions(undefined, null, true)).find(item => item.recordId === recordId); if (!record) return undefined;
     if (record.sourceKind === "panel") return { record, document: (await loadPanelSession(this.dataRoot, record.agentId, record.recordId)).document };

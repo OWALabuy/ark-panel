@@ -25,6 +25,7 @@ export interface ExperienceApi {
 }
 export interface ReadApi {
   agents(): Promise<unknown[]>; sessions(agentId?: string, archived?: boolean): Promise<unknown[]>; conversation(recordId: string): Promise<unknown | null>;
+  projects?(agentId: string): Promise<string[]>;
   search?(query: string, agentId?: string): Promise<unknown[]>;
   fork?(recordId: string, messageId: string): Promise<unknown>;
   editAndFork?(recordId: string, messageId: string, replacement: string): Promise<unknown>;
@@ -101,6 +102,7 @@ export function createPanelServer(options: AppOptions) {
         }
         if (req.method === "GET" && url.pathname === "/api/v1/agents") return send(res, 200, { data: options.mock ? mockAgents : await options.reads?.agents() ?? [] });
         if (req.method === "GET" && url.pathname === "/api/v1/sessions") { const agentId = url.searchParams.get("agentId") ?? undefined, archivedValue = url.searchParams.get("archived"); if (archivedValue !== null && !["true", "false"].includes(archivedValue)) return fail(res, 400, "ARCHIVED_FILTER_INVALID", "归档筛选格式无效", requestId); const archived = archivedValue === null ? false : archivedValue === "true"; return send(res, 200, { data: options.mock ? mockSessions.filter(s => !agentId || s.agentId === agentId) : await options.reads?.sessions(agentId, archived) ?? [] }); }
+        if (req.method === "GET" && url.pathname === "/api/v1/projects") { const agentId = url.searchParams.get("agentId"); if (!agentId) return fail(res, 400, "AGENT_REQUIRED", "需要指定 Agent", requestId); return send(res, 200, { data: options.mock ? [] : await options.reads?.projects?.(agentId) ?? [] }); }
         if (req.method === "GET" && url.pathname === "/api/v1/revisions") { const agentId = url.searchParams.get("agentId") ?? undefined; const records = options.mock ? mockSessions : await options.reads?.sessions(agentId) ?? []; return send(res, 200, { data: (records as Array<Record<string, unknown>>).map(item => ({ recordId: item.recordId, revision: item.revision, updatedAt: item.updatedAt })) }); }
         if (req.method === "GET" && url.pathname === "/api/v1/search") { const query = url.searchParams.get("q") ?? "", agentId = url.searchParams.get("agentId") ?? undefined; return send(res, 200, { data: options.mock ? [] : await options.reads?.search?.(query, agentId) ?? [] }); }
         if (req.method === "POST" && url.pathname === "/api/v1/sessions") {

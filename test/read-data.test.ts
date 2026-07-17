@@ -81,6 +81,22 @@ test("面板会话状态只暴露 override、预算估算和活跃时间", async
   assert.equal(conversation.status.contextBudget.method, "utf8-bytes-upper-bound-v2"); assert.equal(Number.isInteger(conversation.status.contextBudget.percentage), true); assert.match(conversation.status.lastActiveAt, /^\d{4}-/);
 });
 
+test("project 目录汇总正常与归档会话、忽略大小写重复和隐藏来源", async () => {
+  const root = await mkdtemp(join(tmpdir(), "panel-read-projects-")), sessions = join(root, "source"), data = join(root, "data");
+  await mkdir(sessions); await mkdir(data);
+  const activeId = "33333333-3333-4333-8333-333333333333";
+  await writeFile(join(sessions, `${activeId}.jsonl`), jsonl(user));
+  await writeFile(join(sessions, `${activeId}.jsonl.reset.2026-07-10T00-00-00Z`), jsonl(user));
+  const reads = new SessionReadData([{ agentId: "fixture", sessionsRoot: sessions }], data);
+  const records = await reads.sessions("fixture"); const active = records.find(item => item.sourceKind === "active")!, reset = records.find(item => item.sourceKind === "reset")!;
+  await reads.updateSession(active.recordId, { project: "Project Alpha" });
+  await reads.updateSession(reset.recordId, { project: "project alpha", archived: true });
+  assert.deepEqual(await reads.projects("fixture"), ["Project Alpha"]);
+  await reads.updateSession(active.recordId, { project: "Hidden Only" });
+  await reads.deleteSession(active.recordId, true);
+  assert.deepEqual(await reads.projects("fixture"), ["project alpha"]);
+});
+
 test("sessions 根目录本身是符号链接时拒绝读取", async () => {
   const root = await mkdtemp(join(tmpdir(), "panel-read-link-")), actual = join(root, "actual"), link = join(root, "link"), data = join(root, "data");
   await mkdir(actual); await mkdir(data); await symlink(actual, link);

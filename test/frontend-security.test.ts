@@ -21,7 +21,11 @@ test("frontend renders untrusted metadata with DOM text nodes", async () => {
   assert.match(source,/重命名会话/);
   assert.match(source,/method:"DELETE"/);
   assert.match(source,/JSON\.stringify\(\{confirm:true\}\)/);
-  assert.match(source,/project:project\.trim\(\)\|\|null/);
+  assert.match(source,/function openProjectMenu\(trigger,record\)/);
+  assert.match(source,/\/projects\?agentId=/);
+  assert.match(source,/function assignProject\(recordId,project\)/);
+  assert.match(source,/JSON\.stringify\(\{project\}\)/);
+  assert.doesNotMatch(source,/title:"会话分组"/);
   assert.match(source,/\/export\.md/);
   assert.match(source,/ark-panel:collapsed-projects:/);
   assert.match(source,/project\?`project:\$\{project\}`:"ungrouped"/);
@@ -35,6 +39,15 @@ test("frontend renders untrusted metadata with DOM text nodes", async () => {
   assert.match(source,/updateSessionFromList\(id,\{pinned:!session\.pinned\}\)/);
   assert.match(source,/updateSessionFromList\(id,\{archived:!viewingArchived\}\)/);
   assert.match(source,/exportSession\(id\)/);
+  assert.match(source,/quickSessionAction\("移动分组"/);
+  assert.match(source,/move\.dataset\.projectRecord=id/);
+  assert.match(source,/aria-haspopup/);
+  assert.match(source,/setAttribute\("role","menuitemradio"\)/);
+  assert.match(source,/project\.toLocaleLowerCase\(\)===value\.toLocaleLowerCase\(\)/);
+  assert.match(source,/event\.key==="Escape"&&projectMenuCreating/);
+  assert.match(source,/\["ArrowDown","ArrowUp","Home","End"\]/);
+  assert.match(source,/closeProjectMenu\(\)/);
+  assert.match(styles,/\.project-menu\{position:fixed/);
   assert.match(styles,/@media\(max-width:760px\),\(hover:none\)\{\.session-quick-actions\{opacity:1;visibility:visible\}/);
   assert.match(markdown,/SAFE_PROTOCOLS=new Set\(\["http:","https:","mailto:"\]\)/);
   assert.match(markdown,/createTextNode/);
