@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { newPanelRecordId } from "../domain/record-id.js";
 import { parseTranscript, serializeTranscript, type TranscriptDocument } from "../domain/transcript.js";
 import { assertWithin, atomicWrite } from "./atomic.js";
+import { removeSessionAttachmentReferences } from "./attachments.js";
 
 export interface PanelMetadata {
   version: 1; recordId: string; agentId: string; createdAt: string;
@@ -102,12 +103,14 @@ export async function deletePanelSession(dataRoot: string, agentId: string, reco
   const directory = assertWithin(dataRoot, join(dataRoot, "sessions", agentId, recordId));
   const stat = await lstat(directory); if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("panel 会话目录不安全");
   const names = (await readdir(directory)).sort();
-  if (names.length !== 2 || names[0] !== "metadata.json" || names[1] !== "transcript.jsonl") throw new Error("PANEL_SESSION_DELETE_UNSAFE");
+  const expected = names.includes("attachments.json") ? ["attachments.json", "metadata.json", "transcript.jsonl"] : ["metadata.json", "transcript.jsonl"];
+  if (names.length !== expected.length || names.some((name, index) => name !== expected[index])) throw new Error("PANEL_SESSION_DELETE_UNSAFE");
   const loaded = await loadPanelSession(dataRoot, agentId, recordId);
   if (!loaded.metadata.archived) throw new Error("SESSION_NOT_ARCHIVED");
   for (const name of names) {
     const path = assertWithin(directory, join(directory, name)); const file = await lstat(path);
     if (!file.isFile() || file.isSymbolicLink()) throw new Error("PANEL_SESSION_DELETE_UNSAFE");
   }
+  if (names.includes("attachments.json")) await removeSessionAttachmentReferences(dataRoot, agentId, recordId);
   await unlink(join(directory, "transcript.jsonl")); await unlink(join(directory, "metadata.json")); await rmdir(directory);
 }
