@@ -29,7 +29,8 @@ test("observer uses backend identity, routes sessions independently, and resubsc
   const factory = () => {
     const socket = new FakeSocket((current, frame) => {
       const method = String(frame.method), id = String(frame.id); methods.push(method);
-      const payload = method === "connect" ? { server: { version: "2026.6.11" }, auth: { scopes: ["operator.read"] } } : { subscribed: true };
+      const payload = method === "connect" ? { server: { version: "2026.6.11" }, auth: { scopes: ["operator.read", "operator.write"] } } :
+        method === "sessions.send" ? { runId: "attachment-run" } : { subscribed: true };
       queueMicrotask(() => current.message({ type: "res", id, ok: true, payload }));
     });
     sockets.push(socket); queueMicrotask(() => socket.challenge()); return socket;
@@ -39,8 +40,13 @@ test("observer uses backend identity, routes sessions independently, and resubsc
   const first: GatewayStreamEvent[] = [], second: GatewayStreamEvent[] = [];
   const unobserveFirst = await observer.observe("agent:a:first", event => first.push(event));
   const unobserveSecond = await observer.observe("agent:a:second", event => second.push(event));
-  const connect = sockets[0]!.sent.find(frame => frame.method === "connect")!.params as { client: { id: string; mode: string } };
+  const connect = sockets[0]!.sent.find(frame => frame.method === "connect")!.params as { client: { id: string; mode: string }; scopes: string[] };
   assert.equal(connect.client.id, "gateway-client"); assert.equal(connect.client.mode, "backend");
+  assert.deepEqual(connect.scopes, ["operator.read", "operator.write"]);
+  assert.deepEqual(await observer.send("agent:a:first", "附件", "11111111-1111-4111-8111-111111111111",
+    [{ fileName: "input.docx", mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", content: "UEs=" }]), { runId: "attachment-run" });
+  const sent = sockets[0]!.sent.find(frame => frame.method === "sessions.send")!.params as { attachments: unknown[] };
+  assert.equal(sent.attachments.length, 1);
   sockets[0]!.message({ type: "event", event: "chat", payload: { runId: "r1", sessionKey: "agent:a:first", seq: 1, state: "delta", message: { content: "one" } } });
   assert.equal(first.some(event => event.type === "assistant_text" && event.text === "one"), true);
   assert.equal(second.some(event => event.type === "assistant_text"), false);

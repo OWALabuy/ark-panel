@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { open, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
-import type { CommandArgument, CommandsCatalog, CreatedSession, GatewayClient, GatewayCommand, GatewayStatus, ModelsCatalog, OpenClawModel, SessionOverrides } from "./adapter.js";
+import type { CollectedOutput, CommandArgument, CommandsCatalog, CreatedSession, GatewayAttachment, GatewayClient, GatewayCommand, GatewayStatus, ModelsCatalog, OpenClawModel, SessionOverrides } from "./adapter.js";
 
 interface CliOptions {
   executable?: string;
@@ -231,8 +231,26 @@ export class OpenClawCliClient implements GatewayClient {
     const output = await this.commandRunner(this.executable, ["models", "list", "--json"], this.requestTimeoutMs);
     return parseModelsCatalog(JSON.parse(output) as unknown);
   }
-  async send(sessionKey: string, message: string, idempotencyKey: string): Promise<{ runId: string }> {
-    return await this.call("sessions.send", { key: sessionKey, agentId: sessionKey.split(":")[1], message, timeoutMs: this.gatewayRunTimeoutMs, idempotencyKey });
+  async send(sessionKey: string, message: string, idempotencyKey: string, attachments?: readonly GatewayAttachment[]): Promise<{ runId: string }> {
+    return await this.call("sessions.send", { key: sessionKey, agentId: sessionKey.split(":")[1], message,
+      ...(attachments?.length ? { attachments } : {}), timeoutMs: this.gatewayRunTimeoutMs, idempotencyKey });
+  }
+  async collectRunArtifacts(sessionKey: string, runId: string): Promise<CollectedOutput[]> {
+    const listed = object(await this.call<unknown>("artifacts.list", { sessionKey, runId }), "ARTIFACTS_LIST");
+    if (!Array.isArray(listed.artifacts)) throw new Error("OPENCLAW_INVALID_ARTIFACTS_LIST");
+    const outputs: CollectedOutput[] = [];
+    for (const value of listed.artifacts) {
+      const summary = object(value, "ARTIFACT");
+      const id = string(summary.id, "ARTIFACT_ID"), fileName = string(summary.title, "ARTIFACT_TITLE");
+      const download = object(summary.download, "ARTIFACT_DOWNLOAD");
+      if (download.mode !== "bytes") continue;
+      const result = object(await this.call<unknown>("artifacts.download", { sessionKey, runId, artifactId: id }), "ARTIFACT_DOWNLOAD_RESULT");
+      if (result.encoding !== "base64" || typeof result.data !== "string") throw new Error("OPENCLAW_INVALID_ARTIFACT_BYTES");
+      const bytes = Buffer.from(result.data, "base64");
+      if (bytes.toString("base64").replace(/=+$/, "") !== result.data.replace(/=+$/, "")) throw new Error("OPENCLAW_INVALID_ARTIFACT_BASE64");
+      outputs.push({ source: "artifact", fileName, ...(typeof summary.mimeType === "string" ? { mimeType: summary.mimeType } : {}), bytes });
+    }
+    return outputs;
   }
   async waitForCompletion(sessionId: string, runId: string, signal?: AbortSignal): Promise<void> {
     const key = this.keysBySessionId.get(sessionId); if (!key) throw new Error("未知 sessionId");

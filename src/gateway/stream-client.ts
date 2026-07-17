@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
+import type { GatewayAttachment } from "./adapter.js";
 
 const MAX_TEXT_BYTES = 2 * 1024 * 1024;
 const MAX_FRAME_BYTES = 4 * 1024 * 1024;
@@ -121,6 +122,14 @@ export class OpenClawStreamObserver {
     };
   }
 
+  /** Write RPC path used for attachment payloads that cannot safely fit in a CLI argv element. */
+  async send(sessionKey: string, message: string, idempotencyKey: string, attachments: readonly GatewayAttachment[]): Promise<{ runId: string }> {
+    this.start(); await this.waitUntilConnected();
+    const result = object(await this.request("sessions.send", { key: sessionKey, agentId: sessionKey.split(":")[1], message,
+      idempotencyKey, deliver: false, attachments }));
+    const runId = nonEmpty(result?.runId); if (!runId) throw new Error("sessions.send 未返回 runId"); return { runId };
+  }
+
   private async waitUntilConnected(): Promise<void> {
     const deadline = Date.now() + this.requestTimeoutMs;
     while (!this.connected) {
@@ -168,7 +177,7 @@ export class OpenClawStreamObserver {
       const auth = this.options.token || this.options.password ? { ...(this.options.token ? { token: this.options.token } : {}), ...(this.options.password ? { password: this.options.password } : {}) } : undefined;
       const hello = object(await this.request("connect", { minProtocol: 4, maxProtocol: 4,
         client: { id: "gateway-client", displayName: "ark-panel-stream", version: "0.1.0", platform: process.platform, mode: "backend", instanceId: randomUUID() },
-        caps: ["tool-events"], ...(auth ? { auth } : {}), role: "operator", scopes: ["operator.read"] }));
+        caps: ["tool-events"], ...(auth ? { auth } : {}), role: "operator", scopes: ["operator.read", "operator.write"] }));
       const server = object(hello?.server), version = nonEmpty(server?.version);
       if (version !== "2026.6.11") throw new Error(`unsupported gateway version ${String(version ?? "unknown")}`);
       const helloAuth = object(hello?.auth); this.diagnostic(`connected with scopes ${Array.isArray(helloAuth?.scopes) ? helloAuth.scopes.join(",") : "unknown"}`);
@@ -208,8 +217,8 @@ export class OpenClawStreamObserver {
 
 interface GatewayAuth { url: string; token?: string; password?: string }
 
-export async function loadGatewayStreamAuth(env: NodeJS.ProcessEnv = process.env): Promise<GatewayAuth | undefined> {
-  if (env.PANEL_OPENCLAW_STREAMING === "0") return undefined;
+export async function loadGatewayStreamAuth(env: NodeJS.ProcessEnv = process.env, allowWhenStreamingDisabled = false): Promise<GatewayAuth | undefined> {
+  if (!allowWhenStreamingDisabled && env.PANEL_OPENCLAW_STREAMING === "0") return undefined;
   const explicitUrl = nonEmpty(env.PANEL_OPENCLAW_GATEWAY_URL), explicitToken = nonEmpty(env.PANEL_OPENCLAW_GATEWAY_TOKEN), explicitPassword = nonEmpty(env.PANEL_OPENCLAW_GATEWAY_PASSWORD);
   if (explicitToken || explicitPassword) return { url: explicitUrl ?? DEFAULT_URL, ...(explicitToken ? { token: explicitToken } : {}), ...(explicitPassword ? { password: explicitPassword } : {}) };
   const path = resolve(env.OPENCLAW_CONFIG_PATH ?? env.OPENCLAW_CONFIG ?? `${env.HOME ?? homedir()}/.openclaw/openclaw.json`);

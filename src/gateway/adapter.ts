@@ -45,10 +45,33 @@ export interface OpenClawModel {
 }
 export interface ModelsCatalog { count: number; models: OpenClawModel[] }
 
+export interface GatewayAttachment {
+  fileName: string;
+  mimeType: string;
+  /** Base64-encoded file bytes. Office documents are passed through unchanged. */
+  content: string;
+}
+
+export interface CollectedOutput {
+  source: "artifact" | "output-directory";
+  fileName: string;
+  mimeType?: string;
+  bytes: Uint8Array;
+}
+
+export interface OutputCaptureRequest {
+  /** Trusted, server-configured workspace root; never take this from an HTTP parameter. */
+  workspaceRoot: string;
+  /** Trusted server-owned directory used to quarantine a capture before recursive deletion. */
+  cleanupRoot: string;
+  maxFiles?: number;
+  maxTotalBytes?: number;
+}
+
 export interface GatewayClient {
   version(): Promise<string>;
   createSession(runtimeAgentId: string): Promise<CreatedSession>;
-  send(sessionKey: string, message: string, idempotencyKey: string): Promise<{ runId: string }>;
+  send(sessionKey: string, message: string, idempotencyKey: string, attachments?: readonly GatewayAttachment[]): Promise<{ runId: string }>;
   waitForCompletion(sessionId: string, runId: string, signal?: AbortSignal): Promise<void>;
   abort(sessionKey: string, runId?: string, sessionId?: string): Promise<void>;
   deleteSession(sessionKey: string): Promise<void>;
@@ -56,6 +79,7 @@ export interface GatewayClient {
   listCommands?(): Promise<CommandsCatalog>;
   status?(): Promise<GatewayStatus>;
   listModels?(): Promise<ModelsCatalog>;
+  collectRunArtifacts?(sessionKey: string, runId: string): Promise<CollectedOutput[]>;
 }
 
 export interface BridgeRequest {
@@ -65,13 +89,15 @@ export interface BridgeRequest {
   latestUserEntryId: string;
   idempotencyKey: string;
   overrides?: SessionOverrides;
+  attachments?: readonly GatewayAttachment[];
+  outputCapture?: OutputCaptureRequest;
   signal?: AbortSignal;
   lifecycle?: BridgeLifecycleCallback;
   stream?: BridgeStreamCallback;
   cleanupFailed?: () => Promise<void>;
 }
 
-export interface BridgeResult { runId: string; sessionId: string; entries: TranscriptDocument["entries"] }
+export interface BridgeResult { runId: string; sessionId: string; entries: TranscriptDocument["entries"]; outputs?: CollectedOutput[] }
 
 // These events are persistence boundaries, not a diagnostic log. In particular,
 // message content is only exposed by entries_materialized, whose payload is the
@@ -80,7 +106,7 @@ export type BridgeLifecycleEvent =
   | { type: "temporary_session_created"; runtimeAgentId: string; sessionId: string; sessionKey: string; transcriptPath: string }
   | { type: "history_materialized"; previousEntryCount: number }
   | { type: "gateway_send_accepted"; gatewayRunId: string }
-  | { type: "entries_materialized"; entries: TranscriptDocument["entries"] };
+  | { type: "entries_materialized"; entries: TranscriptDocument["entries"]; outputs?: CollectedOutput[] };
 
 export type BridgeLifecycleCallback = (event: BridgeLifecycleEvent) => Promise<void>;
 
@@ -124,7 +150,7 @@ export async function runBridge(client: GatewayClient, materializer: BridgeMater
     if (!client.applySessionOverrides) throw new Error("GATEWAY_SESSION_OVERRIDES_UNSUPPORTED");
     await client.applySessionOverrides(created.sessionKey, request.overrides);
   }
-  const { runId } = await client.send(created.sessionKey, request.latestUserMessage, request.idempotencyKey);
+  const { runId } = await client.send(created.sessionKey, request.latestUserMessage, request.idempotencyKey, request.attachments);
   await request.lifecycle?.({ type: "gateway_send_accepted", gatewayRunId: runId });
   const abort = () => {
     void client.abort(created.sessionKey, runId, created.sessionId).catch(() => undefined);

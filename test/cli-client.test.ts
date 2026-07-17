@@ -52,6 +52,30 @@ test("gateway timeout 与 watcher grace 分离，并在 grace 内接住 terminal
   await waiting;
 });
 
+test("send 原样透传结构化附件，包括 Office 文件", async () => {
+  const x = await clientFixture();
+  const attachments = [{ fileName: "预算.xlsx", mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", content: "UEsDBA==" }];
+  await x.client.send(x.created.sessionKey, "请查看附件", "key", attachments);
+  assert.deepEqual(x.sentParams()?.attachments, attachments);
+});
+
+test("按本轮 runId 采集 OpenClaw 明确登记的内联 artifact", async t => {
+  const root = await mkdtemp(join(tmpdir(), "panel-cli-artifact-")); t.after(() => import("node:fs/promises").then(fs => fs.rm(root, { recursive: true, force: true })));
+  const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
+  const client = new OpenClawCliClient({ sessionsRoots: new Map([["runtime", root]]), commandRunner: async (_executable, args) => {
+    const method = String(args[2]), params = JSON.parse(args.at(-1) ?? "{}") as Record<string, unknown>; calls.push({ method, params });
+    if (method === "artifacts.list") return JSON.stringify({ artifacts: [
+      { id: "a1", type: "file", title: "answer.pdf", mimeType: "application/pdf", download: { mode: "bytes" } },
+      { id: "a2", type: "file", title: "unsafe", download: { mode: "unsupported" } }
+    ] });
+    if (method === "artifacts.download") return JSON.stringify({ artifact: {}, encoding: "base64", data: "cGRm" });
+    return "{}";
+  } });
+  const outputs = await client.collectRunArtifacts("agent:runtime:key", "run-1");
+  assert.equal(outputs.length, 1); assert.equal(outputs[0]?.fileName, "answer.pdf"); assert.equal(Buffer.from(outputs[0]!.bytes).toString(), "pdf");
+  assert.deepEqual(calls.map(call => call.params.runId), ["run-1", "run-1"]);
+});
+
 test("增量 trajectory 正确处理跨 append 的 UTF-8 字符", async () => {
   const x = await clientFixture(), path = join(x.root, `${x.sessionId}.trajectory.jsonl`);
   const line = Buffer.from(`${JSON.stringify({ type: "session.ended", runId: "run", data: { status: "success", note: "中文" } })}\n`);

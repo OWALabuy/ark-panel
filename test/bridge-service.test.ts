@@ -25,6 +25,49 @@ test("bridge 成功和失败都先注销并清理", async () => {
   }
 });
 
+test("bridge 在临时 session 清理前汇总本轮 artifact 与专属 outputs", async t => {
+  const sessions = await mkdtemp(join(tmpdir(), "bridge-output-sessions-")); const workspace = await mkdtemp(join(tmpdir(), "bridge-output-workspace-"));
+  t.after(() => Promise.all([rm(sessions, { recursive: true, force: true }), rm(workspace, { recursive: true, force: true })]));
+  const runUuid = "12345678-1234-4234-8234-123456789abc", id = "11111111-1111-4111-8111-111111111111";
+  const created: CreatedSession = { sessionId: id, sessionKey: "agent:runtime:key", transcriptPath: join(sessions, `${id}.jsonl`) };
+  await writeFile(join(sessions, `${id}.jsonl.deleted.fixture`), "x"); const order: string[] = [];
+  const client: GatewayClient = { async version() { return "2026.6.11"; }, async createSession() { return created; },
+    async send(_key, message, _idempotency, attachments) {
+      assert.equal(attachments?.[0]?.fileName, "input.docx");
+      assert.match(message, /仅当用户明确要求生成可下载文件/); assert.match(message, new RegExp(`${runUuid}/outputs`));
+      assert.match(message, /不要将用户上传的输入附件复制到该目录/);
+      const output = join(workspace, ".openclaw", "tmp", "ark-panel", runUuid, "outputs", "answer.txt"); await writeFile(output, "answer");
+      return { runId: "gateway-run" };
+    }, async waitForCompletion() {}, async abort() {}, async deleteSession() { order.push("cleanup"); },
+    async collectRunArtifacts(_key, runId) { assert.equal(runId, "gateway-run"); order.push("artifacts"); return [{ source: "artifact", fileName: "image.png", bytes: Buffer.from("png") }]; } };
+  const materializer: BridgeMaterializer = { async replaceCreatedTranscript() { return 0; }, async readNewEntries() { return [{ type: "message" }]; },
+    verifyAndStripSubmittedUser(entries, expected) { assert.match(expected, /ark-panel 运行指令/); return entries; } };
+  const lifecycle: BridgeLifecycleEvent[] = [];
+  const service = new BridgeService(client, materializer, new Map([["runtime", sessions]]), undefined,
+    { send: async (key, message, idempotencyKey, attachments) => await client.send(key, message, idempotencyKey, attachments) });
+  const result = await service.generate({ runtimeAgentId: "runtime", historyThroughPreviousRun: { header: { type: "session" }, entries: [] },
+    latestUserMessage: "input", latestUserEntryId: "u", idempotencyKey: runUuid,
+    attachments: [{ fileName: "input.docx", mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", content: "UEs=" }],
+    outputCapture: { workspaceRoot: workspace, cleanupRoot: join(workspace, "cleanup") }, lifecycle: async event => { lifecycle.push(event); if (event.type === "entries_materialized") order.push("durable"); } });
+  assert.deepEqual(result.outputs?.map(output => [output.source, output.fileName]), [["artifact", "image.png"], ["output-directory", "answer.txt"]]);
+  assert.deepEqual(order, ["artifacts", "durable", "cleanup"]);
+  assert.equal(lifecycle.at(-1)?.type, "entries_materialized");
+});
+
+test("没有 outputCapture 时 gateway 和验证器收到未改写的面板原文", async t => {
+  const root = await mkdtemp(join(tmpdir(), "bridge-no-output-")); t.after(() => rm(root, { recursive: true, force: true }));
+  const id = "12121212-1212-4212-8212-121212121212", original = "请直接回答，不生成文件";
+  const created: CreatedSession = { sessionId: id, sessionKey: "agent:runtime:no-output", transcriptPath: join(root, `${id}.jsonl`) };
+  await writeFile(join(root, `${id}.jsonl.deleted.fixture`), "x");
+  const client: GatewayClient = { async version() { return "2026.6.11"; }, async createSession() { return created; },
+    async send(_key, message) { assert.equal(message, original); return { runId: "run" }; }, async waitForCompletion() {}, async abort() {}, async deleteSession() {} };
+  const materializer: BridgeMaterializer = { async replaceCreatedTranscript() { return 0; }, async readNewEntries() { return []; },
+    verifyAndStripSubmittedUser(entries, expected) { assert.equal(expected, original); return entries; } };
+  const result = await new BridgeService(client, materializer, new Map([["runtime", root]])).generate({ runtimeAgentId: "runtime",
+    historyThroughPreviousRun: { header: { type: "session" }, entries: [] }, latestUserMessage: original, latestUserEntryId: "u", idempotencyKey: "key" });
+  assert.deepEqual(result.entries, []);
+});
+
 test("连续 20 轮 fixture 生成后无 transcript/trajectory artifact 累积", async t => {
   const root=await mkdtemp(join(tmpdir(),"bridge-durability-"));t.after(()=>rm(root,{recursive:true,force:true}));await writeFile(join(root,"sessions.json"),"{}");let sequence=0;
   const client:GatewayClient={async version(){return"2026.6.11"},async createSession(){sequence++;const id=`00000000-0000-4000-8000-${String(sequence).padStart(12,"0")}`;const transcriptPath=join(root,`${id}.jsonl`);await writeFile(transcriptPath,"fixture\n");await writeFile(join(root,`${id}.trajectory.jsonl`),"trajectory\n");await writeFile(join(root,`${id}.trajectory-path.json`),"{}\n");return{sessionId:id,sessionKey:`agent:runtime:${id}`,transcriptPath}},async send(){return{runId:`run-${sequence}`}},async waitForCompletion(){},async abort(){},async deleteSession(sessionKey){const id=sessionKey.split(":").at(-1)!;await writeFile(join(root,`${id}.jsonl.deleted.fixture`),await readFile(join(root,`${id}.jsonl`)));await import("node:fs/promises").then(fs=>fs.rm(join(root,`${id}.jsonl`)));await writeFile(join(root,"sessions.json"),"{}")}};
