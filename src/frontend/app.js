@@ -16,10 +16,12 @@ const panelCommands=[
   {name:"commands",usage:"/commands",descriptionKey:"command.commands"},
   {name:"help",usage:"/help",descriptionKey:"command.help"},
   {name:"status",usage:"/status",descriptionKey:"command.status"},
-  {name:"models",usage:"/models",descriptionKey:"command.models"}
+  {name:"models",usage:"/models",descriptionKey:"command.models"},
+  {name:"tools",usage:"/tools",descriptionKey:"command.tools"},
+  {name:"usage",usage:"/usage",descriptionKey:"command.usage"}
 ].map(command=>({...command,supported:true}));
 panelCommands.push(...[
-  "compact","stop","reset","config","restart","bash","tools","usage"
+  "compact","stop","reset","config","restart","bash"
 ].map(name=>({name,usage:`/${name}`,descriptionKey:`command.${name}`,supported:false})));
 const commandResults=new Map();
 const BOTTOM_THRESHOLD=96;
@@ -49,7 +51,7 @@ function validateAttachment(file){const extension=file.name.includes(".")?file.n
 function addPendingFiles(files){const key=attachmentDraftKey();if(!key||activeRun||attachmentSubmissionActive)return;const values=pendingAttachments.get(key)||[],incoming=[...files];if(values.length+incoming.length>MAX_ATTACHMENT_FILES){showError(new Error(t("attachment.tooMany",{count:MAX_ATTACHMENT_FILES})));return}try{for(const file of incoming)validateAttachment(file);if([...values,...incoming.map(file=>({file}))].reduce((sum,item)=>sum+item.file.size,0)>MAX_ATTACHMENT_TOTAL)throw new Error(t("attachment.totalTooLarge"));values.push(...incoming.map(file=>({file})));pendingAttachments.set(key,values);renderPendingAttachments();updateComposer()}catch(error){showError(error)}}
 async function uploadPendingAttachments(recordId){const values=currentPendingAttachments(),uploaded=[];for(const item of values){if(item.uploaded?.recordId===recordId){uploaded.push(item.uploaded);continue}const response=await fetch(`/api/v1/sessions/${encodeURIComponent(recordId)}/attachments`,{method:"POST",headers:{"content-type":item.file.type||"application/octet-stream","x-file-name":encodeURIComponent(item.file.name),"x-csrf-token":csrf},body:item.file});let value=null;try{value=await response.json()}catch{}if(!response.ok)throw Object.assign(new Error(t("attachment.uploadFailed",{name:item.file.name})),{status:response.status,code:value?.error?.code});item.uploaded={...value.data,recordId};uploaded.push(item.uploaded)}return uploaded}
 function movePendingAttachments(from,to){if(from===to)return;const values=pendingAttachments.get(from);if(!values?.length)return;pendingAttachments.delete(from);pendingAttachments.set(to,values);renderPendingAttachments()}
-const APPEARANCE_KEY="ark-panel:appearance:v1",READING_SCALE_KEY="ark-panel:reading-scale:v1",SIDEBAR_KEY="ark-panel:sidebar-collapsed:v1",THEMES=new Set(["system","light","dark","gruvbox-dark-medium","gruvbox-light-medium"]),ACCENTS=new Set(["default","blue","green","red","yellow","magenta","cyan"]),MAX_AVATAR_BYTES=5*1024*1024;
+const APPEARANCE_KEY="ark-panel:appearance:v1",READING_SCALE_KEY="ark-panel:reading-scale:v1",SIDEBAR_KEY="ark-panel:sidebar-collapsed:v1",THEMES=new Set(["system","light","dark","gruvbox-dark-hard","gruvbox-dark-medium","gruvbox-dark-soft","gruvbox-light-hard","gruvbox-light-medium","gruvbox-light-soft"]),ACCENTS=new Set(["default","blue","green","red","yellow","magenta","cyan"]),MAX_AVATAR_BYTES=5*1024*1024;
 let accountAppearance={theme:"system",accent:"default"},confirmedAppearance=accountAppearance,desiredAppearance=accountAppearance,confirmedLocale=getLocale(),desiredLocale=getLocale(),showConversationStatus=true,confirmedShowConversationStatus=true,settingsPreviousFocus=null,appearanceSave=Promise.resolve(),localeSave=Promise.resolve(),conversationSettingSave=Promise.resolve(),railPreviousFocus=null,railTrigger=null,pendingAvatar=null,currentConversationStatus=null;
 function normalizeAppearance(value){const appearance=value?.appearance||value||{},theme=String(appearance.theme||"system"),accent=String(appearance.accent||"default");return{theme:THEMES.has(theme)?theme:"system",accent:ACCENTS.has(accent)?accent:"default"}}
 function cacheAppearance(value){try{localStorage.setItem(APPEARANCE_KEY,JSON.stringify(value))}catch{}}

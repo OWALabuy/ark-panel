@@ -3,8 +3,8 @@ import type { JsonObject, TranscriptDocument } from "../domain/transcript.js";
 import { commitPanelTranscript, listPanelSessions, loadPanelSession, updatePanelMetadata, type PanelMetadata } from "../storage/panel-sessions.js";
 import { SessionOperationCoordinator } from "./session-operation.js";
 
-export const PANEL_COMMAND_ALLOWLIST_VERSION = 1;
-export const PANEL_COMMAND_ALLOWLIST = Object.freeze(["model", "think", "reasoning", "new", "commands", "help", "status", "models"] as const);
+export const PANEL_COMMAND_ALLOWLIST_VERSION = 2;
+export const PANEL_COMMAND_ALLOWLIST = Object.freeze(["model", "think", "reasoning", "new", "commands", "help", "status", "models", "tools", "usage"] as const);
 export type PanelCommandName = typeof PANEL_COMMAND_ALLOWLIST[number];
 
 export interface ModelDescriptor { key: string; name?: string; available: boolean; input?: unknown; contextWindow?: number; tags?: string[]; missing?: unknown }
@@ -12,6 +12,7 @@ export interface CommandProviders {
   models(): Promise<ModelDescriptor[]>;
   commands(): Promise<unknown>;
   status(): Promise<unknown>;
+  tools?(agentId: string): Promise<unknown>;
   createPanel(agentId: string, title?: string): Promise<unknown>;
   thinkingLevels?: readonly string[];
   supportsThinkingLevel?(modelKey: string | undefined, level: string): Promise<boolean>;
@@ -29,6 +30,35 @@ function event(command: PanelCommandName, value: string | undefined, document: T
     customType: "panel_command", command, ...(value === undefined ? {} : { value }), message: { role: "system", content: [{ type: "text", text: value === undefined ? `/${command} 已恢复默认` : `/${command} 已设置为 ${value}` }], timestamp: now.getTime() } };
 }
 function commandName(input: string): string { return input.startsWith("/") ? input.slice(1) : input; }
+
+function object(value: unknown): Record<string, unknown> | undefined { return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined; }
+function activeBranch(entries: JsonObject[]): JsonObject[] {
+  const byId = new Map(entries.flatMap(entry => typeof entry.id === "string" ? [[entry.id, entry] as const] : []));
+  let current = [...entries].reverse().find(entry => typeof entry.id === "string" && object(entry.message)); const ids = new Set<string>();
+  while (current && typeof current.id === "string" && !ids.has(current.id)) { ids.add(current.id); current = typeof current.parentId === "string" ? byId.get(current.parentId) : undefined; }
+  return ids.size ? entries.filter(entry => typeof entry.id === "string" && ids.has(entry.id)) : entries;
+}
+function usageNumber(usage: Record<string, unknown>, names: readonly string[]): number | undefined {
+  for (const name of names) { const value = usage[name]; if (typeof value === "number" && Number.isFinite(value) && value >= 0) return value; }
+  return undefined;
+}
+export function transcriptUsage(document: TranscriptDocument): unknown {
+  const totals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, reportedTotal: 0 };
+  let assistantMessages = 0, messagesWithUsage = 0, messagesWithReportedTotal = 0;
+  for (const entry of activeBranch(document.entries)) {
+    const message = object(entry.message); if (message?.role !== "assistant") continue; assistantMessages++;
+    const usage = object(message.usage) ?? object(entry.usage); if (!usage) continue; messagesWithUsage++;
+    totals.input += usageNumber(usage, ["input", "inputTokens", "promptTokens", "input_tokens", "prompt_tokens"]) ?? 0;
+    totals.output += usageNumber(usage, ["output", "outputTokens", "completionTokens", "output_tokens", "completion_tokens"]) ?? 0;
+    totals.cacheRead += usageNumber(usage, ["cacheRead", "cache_read", "cache_read_input_tokens", "cached_tokens"]) ?? 0;
+    totals.cacheWrite += usageNumber(usage, ["cacheWrite", "cache_write", "cache_creation_input_tokens"]) ?? 0;
+    totals.reasoning += usageNumber(usage, ["reasoningTokens", "reasoning_tokens"]) ?? 0;
+    const reported = usageNumber(usage, ["total", "totalTokens", "total_tokens"]); if (reported !== undefined) { totals.reportedTotal += reported; messagesWithReportedTotal++; }
+  }
+  return { source: "model-reported-transcript-usage", scope: "current-branch", estimated: false,
+    coverage: { assistantMessages, messagesWithUsage, messagesWithReportedTotal },
+    tokens: { ...totals, reportedTotal: messagesWithReportedTotal ? totals.reportedTotal : null } };
+}
 
 function commandCatalog(value: unknown): unknown {
   if (!value || typeof value !== "object" || Array.isArray(value)) return value;
@@ -66,12 +96,14 @@ export class PanelCommandApi {
     const name = commandName(request.command);
     if (!(PANEL_COMMAND_ALLOWLIST as readonly string[]).includes(name)) throw new Error("COMMAND_NOT_ALLOWED");
     const command = name as PanelCommandName; if (!Array.isArray(request.args) || request.args.some(arg => typeof arg !== "string")) throw new Error("COMMAND_ARGS_INVALID");
-    if (["commands", "help", "status", "models"].includes(command) && request.args.length) throw new Error("COMMAND_ARGS_INVALID");
+    if (["commands", "help", "status", "models", "tools", "usage"].includes(command) && request.args.length) throw new Error("COMMAND_ARGS_INVALID");
+    const loaded = await this.session(recordId);
     if (command === "commands") return this.result(command, "read", commandCatalog(await this.providers.commands()));
     if (command === "status") return this.result(command, "read", await this.providers.status());
     if (command === "models") return this.result(command, "read", await this.providers.models());
+    if (command === "tools") { if (!this.providers.tools) throw new Error("COMMAND_UNAVAILABLE"); return this.result(command, "read", await this.providers.tools(loaded.metadata.agentId)); }
+    if (command === "usage") return this.result(command, "read", transcriptUsage(loaded.document));
     if (command === "help") return this.result(command, "read", { allowlistVersion: PANEL_COMMAND_ALLOWLIST_VERSION, commands: PANEL_COMMAND_ALLOWLIST });
-    const loaded = await this.session(recordId);
     if (command === "new") {
       const title = request.args.join(" ").trim() || undefined; return this.result(command, "created", await this.providers.createPanel(loaded.metadata.agentId, title));
     }

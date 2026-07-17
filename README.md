@@ -71,11 +71,11 @@ Legend: ✅ available · 🚧 scheduled · 💡 candidate (not scheduled) · ⛔
 | Context | Configurable context-budget protection | ✅ | Rejects oversized requests before generation instead of silently truncating history |
 | Context | Durable compaction and `/compact` | 🚧 | Planned together as the long-conversation strategy; summary boundaries and fork behavior still need design closure |
 | Commands | `/model`, `/think`, `/reasoning`, `/new` | ✅ | Panel-native structured operations; command text is never forwarded as a normal prompt |
-| Commands | `/commands`, `/help`, `/status`, `/models` | ✅ | Read-only structured command API with a default-deny allowlist |
+| Commands | `/commands`, `/help`, `/status`, `/models`, `/tools`, `/usage` | ✅ | Read-only structured command API with a default-deny allowlist; tools are the configured runtime catalog, while usage is model-reported data for the current transcript branch |
 | Commands | `/reset`, `/bash`, config/restart, and arbitrary passthrough | ⛔ | Deliberately excluded because of lifecycle, host, and gateway safety risks |
 | Memory | Store per-session `scratch` / `eligible` disposition | ✅ | Defaults to `scratch`; the control is not exposed in the UI yet |
 | Memory | Memory-disposition UI and scratch isolation during inference | 🚧 | Isolation behavior will be selected through `paneltest` runtime acceptance |
-| Appearance | Switchable themes with named accent colors | ✅ | System/light/dark plus gruvbox medium light/dark; account-level and cross-device; all shipped accent pairs meet WCAG AA |
+| Appearance | Switchable themes with named accent colors | ✅ | System/light/dark plus Gruvbox hard/medium/soft in light and dark variants; account-level and cross-device; all shipped accent pairs meet WCAG AA |
 | Appearance | Settings drawer | ✅ | Gear opens Appearance / Reading directly; logout stays in the footer; account preferences persist server-side |
 | Appearance | Custom per-agent avatars | ✅ | Previewed 1:1 crop, capped raster upload, server validation/re-encoding, reset-to-default, and account-level sharing |
 | Appearance | Adjustable reading font size | ✅ | Device-local 85%–130% slider for messages, Markdown, code, tools, and math without scaling navigation/layout |

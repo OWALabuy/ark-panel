@@ -1,7 +1,7 @@
 (()=>{
   try{
     const value=JSON.parse(localStorage.getItem("ark-panel:appearance:v1")||"null");
-    const themes=new Set(["system","light","dark","gruvbox-dark-medium","gruvbox-light-medium"]);
+    const themes=new Set(["system","light","dark","gruvbox-dark-hard","gruvbox-dark-medium","gruvbox-dark-soft","gruvbox-light-hard","gruvbox-light-medium","gruvbox-light-soft"]);
     const accents=new Set(["default","blue","green","red","yellow","magenta","cyan"]);
     if(value&&themes.has(value.theme))document.documentElement.dataset.theme=value.theme;
     if(value&&accents.has(value.accent))document.documentElement.dataset.accent=value.accent;

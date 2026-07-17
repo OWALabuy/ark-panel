@@ -132,7 +132,7 @@ test("appearance preferences are constrained, cached early, and locally scale re
   assert.match(bootstrap,/document\.documentElement\.dataset\.theme/);
   assert.match(html,/id="settings-drawer"[\s\S]*aria-modal="true"/);
   assert.match(html,/id="reading-scale"[^>]*min="85"[^>]*max="130"[^>]*step="5"/);
-  assert.match(source,/THEMES=new Set\(\["system","light","dark","gruvbox-dark-medium","gruvbox-light-medium"\]\)/);
+  assert.match(source,/THEMES=new Set\(\["system","light","dark","gruvbox-dark-hard","gruvbox-dark-medium","gruvbox-dark-soft","gruvbox-light-hard","gruvbox-light-medium","gruvbox-light-soft"\]\)/);
   assert.match(source,/ACCENTS=new Set\(\["default","blue","green","red","yellow","magenta","cyan"\]\)/);
   assert.match(source,/api\("\/settings",\{method:"PATCH"/);
   assert.match(source,/READING_SCALE_KEY="ark-panel:reading-scale:v1"/);
@@ -141,8 +141,10 @@ test("appearance preferences are constrained, cached early, and locally scale re
   assert.match(source,/desiredAppearance=normalizeAppearance\(\{\.\.\.desiredAppearance,\.\.\.patch\}\)/);
   assert.match(source,/body:JSON\.stringify\(\{appearance:target\}\)/);
   assert.match(source,/if\(sameAppearance\(target,desiredAppearance\)\)\{desiredAppearance=confirmedAppearance;applyAppearance\(confirmedAppearance\)/);
-  assert.match(styles,/\[data-theme="gruvbox-dark-medium"\]/);
-  assert.match(styles,/\[data-theme="gruvbox-light-medium"\]/);
+  for(const theme of ["gruvbox-dark-hard","gruvbox-dark-medium","gruvbox-dark-soft","gruvbox-light-hard","gruvbox-light-medium","gruvbox-light-soft"]){
+    assert.match(styles,new RegExp(`\\[data-theme="${theme}"\\]`));
+    assert.match(html,new RegExp(`value="${theme}"`));
+  }
   assert.match(styles,/--code-background:/);
   assert.match(styles,/--syntax-keyword:/);
   assert.match(styles,/--danger-soft:/);

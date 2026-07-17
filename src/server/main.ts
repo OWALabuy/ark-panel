@@ -45,6 +45,7 @@ const commandApi = config.dataRoot && readApi ? new PanelCommandApi(config.dataR
   models: async () => (await gateway.listModels()).models,
   commands: async () => await gateway.listCommands(),
   status: async () => await gateway.status(),
+  tools: async (agentId) => { const runtimeAgentId = config.runtimes.get(agentId)?.runtimeAgentId; if (!runtimeAgentId) throw new Error("RUNTIME_NOT_CONFIGURED"); return await gateway.configuredTools(runtimeAgentId); },
   createPanel: async (agentId, title) => await readApi.createPanel(agentId, title),
   validateOverrides: async (agentId, overrides) => {
     const runtimeAgentId = config.runtimes.get(agentId)?.runtimeAgentId; if (!runtimeAgentId) throw new Error("RUNTIME_NOT_CONFIGURED");

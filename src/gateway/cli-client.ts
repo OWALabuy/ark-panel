@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { open, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
-import type { CollectedOutput, CommandArgument, CommandsCatalog, CreatedSession, GatewayAttachment, GatewayClient, GatewayCommand, GatewayStatus, ModelsCatalog, OpenClawModel, SessionOverrides } from "./adapter.js";
+import type { CollectedOutput, CommandArgument, CommandsCatalog, ConfiguredToolsCatalog, CreatedSession, GatewayAttachment, GatewayClient, GatewayCommand, GatewayStatus, ModelsCatalog, OpenClawModel, SessionOverrides, ToolCatalogEntry, ToolCatalogGroup } from "./adapter.js";
 
 interface CliOptions {
   executable?: string;
@@ -112,6 +112,26 @@ export function parseModelsCatalog(value: unknown): ModelsCatalog {
       contextWindow: item.contextWindow, available: item.available, tags: stringArray(item.tags), missing: item.missing };
   });
   return { count: models.length, models };
+}
+
+function parseTool(value: unknown): ToolCatalogEntry {
+  const item = object(value, "TOOL_CATALOG_ENTRY"), source = string(item.source, "TOOL_CATALOG_SOURCE");
+  if (source !== "core" && source !== "plugin") throw new Error("OPENCLAW_INVALID_TOOL_CATALOG_SOURCE");
+  const risk = optionalString(item.risk); if (risk !== undefined && !["low", "medium", "high"].includes(risk)) throw new Error("OPENCLAW_INVALID_TOOL_CATALOG_RISK");
+  return { id: string(item.id, "TOOL_CATALOG_ID"), label: string(item.label, "TOOL_CATALOG_LABEL"),
+    description: string(item.description, "TOOL_CATALOG_DESCRIPTION"), source,
+    defaultProfiles: stringArray(item.defaultProfiles), ...(optionalString(item.pluginId) ? { pluginId: item.pluginId as string } : {}),
+    ...(typeof item.optional === "boolean" ? { optional: item.optional } : {}),
+    ...(risk ? { risk: risk as "low" | "medium" | "high" } : {}), ...(Array.isArray(item.tags) ? { tags: stringArray(item.tags) } : {}) };
+}
+
+export function parseConfiguredToolsCatalog(value: unknown): ConfiguredToolsCatalog {
+  const raw = object(value, "TOOLS_CATALOG"); if (!Array.isArray(raw.groups)) throw new Error("OPENCLAW_INVALID_TOOLS_CATALOG");
+  const groups: ToolCatalogGroup[] = raw.groups.map(value => { const item = object(value, "TOOL_CATALOG_GROUP"), source = string(item.source, "TOOL_CATALOG_GROUP_SOURCE");
+    if (source !== "core" && source !== "plugin" || !Array.isArray(item.tools)) throw new Error("OPENCLAW_INVALID_TOOL_CATALOG_GROUP");
+    return { id: string(item.id, "TOOL_CATALOG_GROUP_ID"), label: string(item.label, "TOOL_CATALOG_GROUP_LABEL"), source,
+      ...(optionalString(item.pluginId) ? { pluginId: item.pluginId as string } : {}), tools: item.tools.map(parseTool) }; });
+  return { agentId: string(raw.agentId, "TOOLS_CATALOG_AGENT"), scope: "configured-runtime-catalog", groups };
 }
 
 export function sessionPatchParams(sessionKey: string, overrides: SessionOverrides): Record<string, string> {
@@ -230,6 +250,10 @@ export class OpenClawCliClient implements GatewayClient {
   async listModels(): Promise<ModelsCatalog> {
     const output = await this.commandRunner(this.executable, ["models", "list", "--json"], this.requestTimeoutMs);
     return parseModelsCatalog(JSON.parse(output) as unknown);
+  }
+  async configuredTools(runtimeAgentId: string): Promise<ConfiguredToolsCatalog> {
+    if (!this.sessionsRoots.has(runtimeAgentId)) throw new Error("RUNTIME_NOT_CONFIGURED");
+    return parseConfiguredToolsCatalog(await this.call<unknown>("tools.catalog", { agentId: runtimeAgentId, includePlugins: true }));
   }
   async send(sessionKey: string, message: string, idempotencyKey: string, attachments?: readonly GatewayAttachment[]): Promise<{ runId: string }> {
     return await this.call("sessions.send", { key: sessionKey, agentId: sessionKey.split(":")[1], message,

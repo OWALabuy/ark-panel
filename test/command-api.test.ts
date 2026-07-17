@@ -4,7 +4,7 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createPanelSession, loadPanelSession } from "../src/storage/panel-sessions.js";
-import { PANEL_COMMAND_ALLOWLIST_VERSION, PanelCommandApi } from "../src/server/command-api.js";
+import { PANEL_COMMAND_ALLOWLIST_VERSION, PanelCommandApi, transcriptUsage } from "../src/server/command-api.js";
 
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "panel-command-")), agentId = "agent", recordId = "record";
@@ -13,6 +13,7 @@ async function fixture() {
   const api = new PanelCommandApi(root, [agentId], {
     async models() { return [{ key: "provider/model", name: "Model", available: true, tags: ["alias:fast"] }, { key: "missing/model", available: false }]; },
     async commands() { return { commands: [{ name: "think" }, { name: "dynamic-skill", source: "skill" }] }; }, async status() { return { ok: true }; },
+    async tools(agent) { return { agentId: `runtime-${agent}`, scope: "configured-runtime-catalog", groups: [] }; },
     async createPanel(agent, title) { created.push([agent, title]); return { recordId: "new-record" }; }
   });
   return { root, agentId, recordId, api, created };
@@ -59,8 +60,24 @@ test("C 类命令只读，new 复用面板会话创建能力", async () => {
   assert.deepEqual((await x.api.dispatch(x.recordId, { command: "commands", args: [] })).data, { commands: [
     { name: "think", supported: true }, { name: "dynamic-skill", source: "skill", supported: false }
   ] });
+  assert.deepEqual((await x.api.dispatch(x.recordId, { command: "tools", args: [] })).data, { agentId: "runtime-agent", scope: "configured-runtime-catalog", groups: [] });
+  assert.deepEqual((await x.api.dispatch(x.recordId, { command: "usage", args: [] })).data, { source: "model-reported-transcript-usage", scope: "current-branch", estimated: false,
+    coverage: { assistantMessages: 0, messagesWithUsage: 0, messagesWithReportedTotal: 0 }, tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, reportedTotal: null } });
   await assert.rejects(x.api.dispatch(x.recordId, { command: "dynamic-skill", args: [] }), /COMMAND_NOT_ALLOWED/);
   assert.deepEqual((await x.api.dispatch(x.recordId, { command: "new", args: ["新", "会话"] })).data, { recordId: "new-record" });
   assert.deepEqual(x.created, [[x.agentId, "新 会话"]]);
   const loaded = await loadPanelSession(x.root, x.agentId, x.recordId); assert.equal(loaded.document.entries.length, 0);
+});
+
+test("usage 只汇总当前分支中模型实际上报的 token，并公开覆盖率", () => {
+  const document = { header: { type: "session" }, entries: [
+    { id: "u1", parentId: null, message: { role: "user", content: [] } },
+    { id: "a1", parentId: "u1", message: { role: "assistant", content: [], usage: { input: 10, output: 4, cacheRead: 3, total: 17 } } },
+    { id: "u2", parentId: "a1", message: { role: "user", content: [] } },
+    { id: "old-branch", parentId: "u1", message: { role: "assistant", content: [], usage: { input: 999, output: 999, total: 1998 } } },
+    { id: "a2", parentId: "u2", message: { role: "assistant", content: [], usage: { input_tokens: 8, output_tokens: 2, reasoning_tokens: 1 } } }
+  ] };
+  assert.deepEqual(transcriptUsage(document), { source: "model-reported-transcript-usage", scope: "current-branch", estimated: false,
+    coverage: { assistantMessages: 2, messagesWithUsage: 2, messagesWithReportedTotal: 1 },
+    tokens: { input: 18, output: 6, cacheRead: 3, cacheWrite: 0, reasoning: 1, reportedTotal: 17 } });
 });

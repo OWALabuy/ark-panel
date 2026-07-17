@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-const THEMES=["system","light","dark","gruvbox-dark-medium","gruvbox-light-medium"] as const;
+const THEMES=["system","light","dark","gruvbox-dark-hard","gruvbox-dark-medium","gruvbox-dark-soft","gruvbox-light-hard","gruvbox-light-medium","gruvbox-light-soft"] as const;
 const ACCENTS=["default","blue","green","red","yellow","magenta","cyan"] as const;
 
 function luminance(hex: string): number {

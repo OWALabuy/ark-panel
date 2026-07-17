@@ -4,7 +4,7 @@ import { basename, dirname, join } from "node:path";
 import sharp from "sharp";
 import { assertNotSymlink, assertWithin, atomicWrite } from "../storage/atomic.js";
 
-export const THEMES = ["system", "light", "dark", "gruvbox-dark-medium", "gruvbox-light-medium"] as const;
+export const THEMES = ["system", "light", "dark", "gruvbox-dark-hard", "gruvbox-dark-medium", "gruvbox-dark-soft", "gruvbox-light-hard", "gruvbox-light-medium", "gruvbox-light-soft"] as const;
 export const ACCENTS = ["default", "blue", "green", "red", "yellow", "magenta", "cyan"] as const;
 export const LOCALES = ["zh-CN", "en"] as const;
 export const MAX_AVATAR_BYTES = 5 * 1024 * 1024;

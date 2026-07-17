@@ -17,10 +17,10 @@
 - `system`：跟随操作系统明暗偏好。
 - `light`：内置浅色主题。
 - `dark`：内置暗色主题。
-- `gruvbox-dark-medium`。
-- `gruvbox-light-medium`。
+- `gruvbox-dark-hard` / `gruvbox-dark-medium` / `gruvbox-dark-soft`。
+- `gruvbox-light-hard` / `gruvbox-light-medium` / `gruvbox-light-soft`。
 
-Gruvbox hard/soft 变体和开放式配色盘留作后续。实现时使用 Gruvbox 的规范色值，但这只是色值核对，不再改变首批主题数量。
+Gruvbox 的 hard/medium/soft 以规范背景色区分对比度；开放式配色盘仍留作后续。
 
 强调色选项为 `default`、`blue`、`green`、`red`、`yellow`、`magenta`、`cyan`。用户保存的是具名选择；每套主题分别定义对应色值，因此切换主题时保留强调色语义，而不是沿用旧主题的十六进制颜色。
 
@@ -156,7 +156,7 @@ logo/favicon 仍由用户单独制作，不属于本批实现范围。
 | 多语言 | 2026-07-17 已实现 | 首批支持简体中文与英文；语义键字典保持键和占位符一致，语言为账户级服务端设置，旧配置默认中文。服务端错误码由前端映射，未知错误不把中文正文直接混入英文界面。 |
 | 键盘快捷键 / 命令面板 | 候选、未排期 | 未来实现时必须可在设置中关闭，并允许改键，以避免与 Vimium 冲突。 |
 | 开放式配色盘 | 候选、未排期 | 首批使用具名强调色。 |
-| Gruvbox hard/soft | 候选、未排期 | token 体系稳定后可低成本补充。 |
+| Gruvbox hard/soft | 2026-07-17 已实现 | 明暗主题均提供 hard/medium/soft；继续使用同一套具名强调色与 WCAG AA 对比度测试。 |
 
 UI 内修改密码仍不做，继续使用 CLI `npm run password-hash`；这不影响未来重新评估。
 

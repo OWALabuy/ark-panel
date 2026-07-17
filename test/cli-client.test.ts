@@ -59,6 +59,22 @@ test("send 原样透传结构化附件，包括 Office 文件", async () => {
   assert.deepEqual(x.sentParams()?.attachments, attachments);
 });
 
+test("configuredTools 调用已配置 runtime 的 tools.catalog", async () => {
+  const root = await mkdtemp(join(tmpdir(), "panel-cli-tools-"));
+  let observed: { method: string; params: Record<string, unknown> } | undefined;
+  const client = new OpenClawCliClient({ sessionsRoots: new Map([["runtime", root]]), commandRunner: async (_executable, args) => {
+    const method = String(args[2]), params = JSON.parse(args.at(-1) ?? "{}") as Record<string, unknown>;
+    observed = { method, params };
+    return JSON.stringify({ agentId: "runtime", groups: [{ id: "core", label: "Core", source: "core", tools: [
+      { id: "read", label: "Read", description: "Read files", source: "core" }
+    ] }] });
+  } });
+  const catalog = await client.configuredTools("runtime");
+  assert.deepEqual(observed, { method: "tools.catalog", params: { agentId: "runtime", includePlugins: true } });
+  assert.equal(catalog.scope, "configured-runtime-catalog");
+  await assert.rejects(client.configuredTools("other"), /RUNTIME_NOT_CONFIGURED/);
+});
+
 test("按本轮 runId 采集 OpenClaw 明确登记的内联 artifact", async t => {
   const root = await mkdtemp(join(tmpdir(), "panel-cli-artifact-")); t.after(() => import("node:fs/promises").then(fs => fs.rm(root, { recursive: true, force: true })));
   const calls: Array<{ method: string; params: Record<string, unknown> }> = [];

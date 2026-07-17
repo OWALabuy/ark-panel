@@ -1,4 +1,5 @@
 export default {
+  "settings.theme.gruvboxDarkHard":"Gruvbox 深色 · Hard","settings.theme.gruvboxDarkSoft":"Gruvbox 深色 · Soft","settings.theme.gruvboxLightHard":"Gruvbox 浅色 · Hard","settings.theme.gruvboxLightSoft":"Gruvbox 浅色 · Soft",
   "app.tagline":"把每一段会话带上船。","auth.username":"账号","auth.password":"密码","auth.login":"登录","auth.invalid":"用户名或密码不正确",
   "common.retry":"重试","common.close":"关闭","common.cancel":"取消","common.confirm":"确认","common.save":"保存","common.saved":"已保存","common.saving":"正在保存…","common.saveFailed":"保存失败","common.default":"默认","common.unknown":"未知","common.loading":"正在载入…","common.remove":"移除","common.back":"返回",
   "nav.collapsed":"收起的侧边栏","nav.expand":"展开侧边栏","nav.collapse":"收起侧边栏","nav.newSession":"新建会话","nav.search":"搜索会话","nav.recents":"最近会话","nav.settings":"设置","nav.openSettings":"打开设置","nav.closeSettings":"关闭设置","nav.switchAgent":"切换 Agent","nav.agentList":"Agent 列表","nav.sessions":"会话","nav.archived":"归档","nav.backAgents":"‹ Agents","nav.backSessions":"‹ 会话","nav.sessionList":"会话列表",

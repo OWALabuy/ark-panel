@@ -45,6 +45,13 @@ export interface OpenClawModel {
 }
 export interface ModelsCatalog { count: number; models: OpenClawModel[] }
 
+export interface ToolCatalogEntry {
+  id: string; label: string; description: string; source: "core" | "plugin";
+  pluginId?: string; optional?: boolean; risk?: "low" | "medium" | "high"; tags?: string[]; defaultProfiles: string[];
+}
+export interface ToolCatalogGroup { id: string; label: string; source: "core" | "plugin"; pluginId?: string; tools: ToolCatalogEntry[] }
+export interface ConfiguredToolsCatalog { agentId: string; scope: "configured-runtime-catalog"; groups: ToolCatalogGroup[] }
+
 export interface GatewayAttachment {
   fileName: string;
   mimeType: string;
@@ -79,6 +86,7 @@ export interface GatewayClient {
   listCommands?(): Promise<CommandsCatalog>;
   status?(): Promise<GatewayStatus>;
   listModels?(): Promise<ModelsCatalog>;
+  configuredTools?(runtimeAgentId: string): Promise<ConfiguredToolsCatalog>;
   collectRunArtifacts?(sessionKey: string, runId: string): Promise<CollectedOutput[]>;
 }
 

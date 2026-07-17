@@ -4,7 +4,7 @@
 
 ## 结论
 
-当前实现已适配 A 类面板原生命令（`/model`、`/think`、`/reasoning`、`/new`）与首批 C 类只读命令（`/commands`、`/help`、`/status`、`/models`）。普通消息接口永久拒绝把以 `/` 开头的输入当作模型消息发送；命令只从独立结构化派发接口进入。
+当前实现已适配 A 类面板原生命令（`/model`、`/think`、`/reasoning`、`/new`）与 C 类只读命令（`/commands`、`/help`、`/status`、`/models`、`/tools`、`/usage`）。普通消息接口永久拒绝把以 `/` 开头的输入当作模型消息发送；命令只从独立结构化派发接口进入。
 
 这不是只处理两个命令。OpenClaw `2026.6.11` 当前运行时注册了 48 个核心命令、59 个文本别名；此外还有随渠道、插件和 skill 动态变化的命令。动态目录用于展示和补全，不能被直接视为可执行清单；面板实际执行范围必须是一份经过评审、版本化、default-deny 的静态 allowlist。
 
@@ -48,7 +48,7 @@
 |---|---|---|---|
 | **A 面板原生** | `/model` `/think` `/reasoning` `/new` | 存进**面板会话 metadata**，每轮推理经 `sessions.create` 参数或 `sessions.patch` 应用到临时 session。`/new` = 新建面板会话（已有）。这顺带实现 §8.6「会话中途换模型」——同一件事。 | ✅ 做 |
 | **B `/compact`（特殊）** | `/compact` | 面板会话无持久 gateway session 可压。做法：物化历史 → 临时 session 上调 **`sessions.compact` typed RPC**（**绝不把 `/compact` 送进 `sessions.send`**，否则违反原则 1/2）→ **读回压缩后的 transcript → 采纳进面板存储** → 删临时 session。把 gateway 压缩引擎当计算引擎用。**这就是长上下文策略本身**，与之合流。 | 归长上下文 |
-| **C 信息类**（只读代理，低风险） | 首批 `/help` `/commands` `/status` `/models`；待侦察 `/tools` `/usage` | 调已核实的只读 RPC/CLI，或由面板基于 allowlist 生成。数据来源未核实的命令不进入 allowlist。 | 首批做 4 个 |
+| **C 信息类**（只读代理，低风险） | `/help` `/commands` `/status` `/models` `/tools` `/usage` | 调已核实的只读 RPC/CLI，或由面板基于 allowlist / 权威 transcript 生成。数据来源未核实的命令不进入 allowlist。 | ✅ 已实现 |
 | **D gateway 管理 / owner 全局** | `/config` `/restart` `/mcp` `/plugins` `/reset` | 属于 gateway 管理面。面板是会话 UI，不是 gateway 控制台；`/reset` 对面板会话无对应语义。 | 默认不做 |
 
 - 对**真实活会话**执行任何命令，等同于向活会话写入其与 IM 共享的上下文桶，属于「向活会话发消息」的安全边界（architecture §6.7），随该边界一起推迟，不在本设计范围。
