@@ -29,6 +29,16 @@ test("observer uses backend identity, routes sessions independently, and resubsc
   const factory = () => {
     const socket = new FakeSocket((current, frame) => {
       const method = String(frame.method), id = String(frame.id); methods.push(method);
+      if (method === "sessions.send") {
+        const params = frame.params as Record<string, unknown>;
+        const allowed = new Set(["key", "agentId", "message", "thinking", "attachments", "timeoutMs", "idempotencyKey"]);
+        const unexpected = Object.keys(params).filter(key => !allowed.has(key));
+        if (unexpected.length) {
+          queueMicrotask(() => current.message({ type: "res", id, ok: false,
+            error: { message: `invalid sessions.send params: unexpected property '${unexpected[0]}'` } }));
+          return;
+        }
+      }
       const payload = method === "connect" ? { server: { version: "2026.6.11" }, auth: { scopes: ["operator.read", "operator.write"] } } :
         method === "sessions.send" ? { runId: "attachment-run" } : { subscribed: true };
       queueMicrotask(() => current.message({ type: "res", id, ok: true, payload }));
@@ -45,8 +55,9 @@ test("observer uses backend identity, routes sessions independently, and resubsc
   assert.deepEqual(connect.scopes, ["operator.read", "operator.write"]);
   assert.deepEqual(await observer.send("agent:a:first", "附件", "11111111-1111-4111-8111-111111111111",
     [{ fileName: "input.docx", mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", content: "UEs=" }]), { runId: "attachment-run" });
-  const sent = sockets[0]!.sent.find(frame => frame.method === "sessions.send")!.params as { attachments: unknown[] };
-  assert.equal(sent.attachments.length, 1);
+  const sent = sockets[0]!.sent.find(frame => frame.method === "sessions.send")!.params as Record<string, unknown>;
+  assert.deepEqual(Object.keys(sent).sort(), ["agentId", "attachments", "idempotencyKey", "key", "message"]);
+  assert.equal((sent.attachments as unknown[]).length, 1);
   sockets[0]!.message({ type: "event", event: "chat", payload: { runId: "r1", sessionKey: "agent:a:first", seq: 1, state: "delta", message: { content: "one" } } });
   assert.equal(first.some(event => event.type === "assistant_text" && event.text === "one"), true);
   assert.equal(second.some(event => event.type === "assistant_text"), false);

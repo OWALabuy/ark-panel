@@ -126,7 +126,7 @@ export class OpenClawStreamObserver {
   async send(sessionKey: string, message: string, idempotencyKey: string, attachments: readonly GatewayAttachment[]): Promise<{ runId: string }> {
     this.start(); await this.waitUntilConnected();
     const result = object(await this.request("sessions.send", { key: sessionKey, agentId: sessionKey.split(":")[1], message,
-      idempotencyKey, deliver: false, attachments }));
+      idempotencyKey, attachments }));
     const runId = nonEmpty(result?.runId); if (!runId) throw new Error("sessions.send 未返回 runId"); return { runId };
   }
 
