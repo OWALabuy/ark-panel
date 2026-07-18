@@ -52,7 +52,7 @@ test("observer uses backend identity, routes sessions independently, and resubsc
   const unobserveSecond = await observer.observe("agent:a:second", event => second.push(event));
   const connect = sockets[0]!.sent.find(frame => frame.method === "connect")!.params as { client: { id: string; mode: string }; scopes: string[] };
   assert.equal(connect.client.id, "gateway-client"); assert.equal(connect.client.mode, "backend");
-  assert.deepEqual(connect.scopes, ["operator.read", "operator.write"]);
+  assert.deepEqual(connect.scopes, ["operator.read", "operator.write", "operator.admin"]);
   assert.deepEqual(await observer.send("agent:a:first", "附件", "11111111-1111-4111-8111-111111111111",
     [{ fileName: "input.docx", mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", content: "UEs=" }]), { runId: "attachment-run" });
   const sent = sockets[0]!.sent.find(frame => frame.method === "sessions.send")!.params as Record<string, unknown>;

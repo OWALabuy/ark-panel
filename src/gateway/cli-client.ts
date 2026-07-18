@@ -235,7 +235,8 @@ export class OpenClawCliClient implements GatewayClient {
   async createSession(runtimeAgentId: string): Promise<CreatedSession> {
     const root = this.sessionsRoots.get(runtimeAgentId); if (!root) throw new Error("runtime agent 不在 allowlist");
     const localKey = `panel-${randomUUID()}`; const sessionKey = `agent:${runtimeAgentId}:${localKey}`;
-    const created = object(await this.call<unknown>("sessions.create", { key: localKey, agentId: runtimeAgentId, label: "panel bridge" }), "SESSION_CREATE");
+    const created = object(await this.call<unknown>("sessions.create", { key: localKey, agentId: runtimeAgentId,
+      label: `panel bridge ${localKey.slice(-8)}` }), "SESSION_CREATE");
     const returnedKey = string(created.key, "SESSION_CREATE_KEY"), sessionId = string(created.sessionId, "SESSION_CREATE_ID");
     if (returnedKey !== sessionKey) throw new Error("OPENCLAW_SESSION_CREATE_KEY_MISMATCH");
     this.keysBySessionId.set(sessionId, sessionKey);

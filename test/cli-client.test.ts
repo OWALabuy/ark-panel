@@ -77,6 +77,7 @@ test("生成控制 RPC 复用持久 transport，create 直接采用返回的 ses
   await client.deleteSession(created.sessionKey);
   assert.equal(created.sessionId, sessionId);
   assert.deepEqual(calls.map(call => call.method), ["sessions.create", "sessions.send", "sessions.delete"]);
+  assert.match(String(calls[0]?.params.label), /^panel bridge [0-9a-f]{8}$/);
 });
 
 test("configuredTools 调用已配置 runtime 的 tools.catalog", async () => {

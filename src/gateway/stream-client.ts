@@ -177,7 +177,7 @@ export class OpenClawStreamObserver {
       const auth = this.options.token || this.options.password ? { ...(this.options.token ? { token: this.options.token } : {}), ...(this.options.password ? { password: this.options.password } : {}) } : undefined;
       const hello = object(await this.rawRequest("connect", { minProtocol: 4, maxProtocol: 4,
         client: { id: "gateway-client", displayName: "ark-panel-stream", version: "0.1.0", platform: process.platform, mode: "backend", instanceId: randomUUID() },
-        caps: ["tool-events"], ...(auth ? { auth } : {}), role: "operator", scopes: ["operator.read", "operator.write"] }));
+        caps: ["tool-events"], ...(auth ? { auth } : {}), role: "operator", scopes: ["operator.read", "operator.write", "operator.admin"] }));
       const server = object(hello?.server), version = nonEmpty(server?.version);
       if (version !== "2026.6.11") throw new Error(`unsupported gateway version ${String(version ?? "unknown")}`);
       const helloAuth = object(hello?.auth); this.diagnostic(`connected with scopes ${Array.isArray(helloAuth?.scopes) ? helloAuth.scopes.join(",") : "unknown"}`);
