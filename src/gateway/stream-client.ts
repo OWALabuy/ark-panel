@@ -147,7 +147,10 @@ export class OpenClawStreamObserver {
     this.socket = socket;
     socket.addEventListener("message", event => this.handleMessage(event.data));
     socket.addEventListener("close", event => this.handleClose(socket, event));
-    socket.addEventListener("error", () => this.diagnostic("gateway stream websocket error"));
+    socket.addEventListener("error", () => {
+      this.diagnostic("gateway stream websocket error");
+      this.invalidateSocket(socket, new Error("gateway stream websocket error"), 1011, "websocket error");
+    });
   }
 
   private handleMessage(value: unknown): void {
@@ -206,7 +209,12 @@ export class OpenClawStreamObserver {
     const socket = this.socket; if (!socket || socket.readyState !== 1) return Promise.reject(new Error("gateway stream is not connected"));
     const id = randomUUID();
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { this.pending.delete(id); reject(new Error(`gateway request timeout for ${method}`)); }, this.requestTimeoutMs); timer.unref();
+      const timer = setTimeout(() => {
+        if (!this.pending.has(id)) return;
+        const error = new Error(`gateway request timeout for ${method}`);
+        this.diagnostic(error.message);
+        this.invalidateSocket(socket, error, 1011, "request timeout");
+      }, this.requestTimeoutMs); timer.unref();
       this.pending.set(id, { resolve, reject, timer });
       try { socket.send(JSON.stringify({ type: "req", id, method, params })); }
       catch (error) { clearTimeout(timer); this.pending.delete(id); reject(error instanceof Error ? error : new Error(String(error))); }
@@ -216,6 +224,15 @@ export class OpenClawStreamObserver {
   private handleClose(socket: WebSocketLike, event: WebSocketCloseEvent): void {
     if (this.socket !== socket) return; this.socket = undefined; this.rejectPending(new Error(`gateway stream closed (${event.code}): ${event.reason}`));
     if (this.connected) { this.connected = false; this.subscribed.clear(); this.broadcastConnection("disconnected"); }
+    if (!this.stopped) this.scheduleReconnect();
+  }
+
+  private invalidateSocket(socket: WebSocketLike, error: Error, code: number, reason: string): void {
+    if (this.socket !== socket) return;
+    this.socket = undefined;
+    this.rejectPending(error);
+    if (this.connected) { this.connected = false; this.subscribed.clear(); this.broadcastConnection("disconnected"); }
+    try { socket.close(code, reason); } catch { /* the connection is already unusable */ }
     if (!this.stopped) this.scheduleReconnect();
   }
 
