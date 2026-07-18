@@ -40,22 +40,29 @@ export class BridgeService {
   }
 
   async generate(request: BridgeRequest): Promise<BridgeResult> {
+    const startedAt = performance.now(); let lastAt = startedAt;
+    const timings: Record<string, number> = {};
+    const mark = (phase: string): void => { const now = performance.now(); timings[phase] = Math.round(now - lastAt); lastAt = now; };
     assertSupportedVersion(await this.client.version());
+    mark("version");
     let created: CreatedSession | undefined; let runId: string | undefined; let primaryError: unknown;
     let abortPromise: Promise<void> | undefined; let entriesStaged = false; let cleanupSafe = true; let sendAttempted = false;
     let unsubscribeStream: (() => void) | undefined; let outputCapture: PreparedOutputCapture | undefined;
     const abortCreated = (): Promise<void> => abortPromise ??= created ? this.client.abort(created.sessionKey, runId, created.sessionId) : Promise.resolve();
     try {
       created = await this.client.createSession(request.runtimeAgentId);
+      mark("create_session");
       await request.lifecycle?.({ type: "temporary_session_created", runtimeAgentId: request.runtimeAgentId,
         sessionId: created.sessionId, sessionKey: created.sessionKey, transcriptPath: created.transcriptPath });
       const before = await this.materializer.replaceCreatedTranscript(created, request.historyThroughPreviousRun);
+      mark("materialize_history");
       await request.lifecycle?.({ type: "history_materialized", previousEntryCount: before });
       if (request.outputCapture) outputCapture = await prepareOutputCapture(request.outputCapture, request.idempotencyKey);
       if (request.overrides && Object.keys(request.overrides).length > 0) {
         if (!this.client.applySessionOverrides) throw new Error("GATEWAY_SESSION_OVERRIDES_UNSUPPORTED");
         await this.client.applySessionOverrides(created.sessionKey, request.overrides);
       }
+      mark("prepare_and_patch");
       if (request.signal?.aborted) throw new Error("BRIDGE_ABORTED");
       if (this.streamObserver && request.stream) {
         try {
@@ -70,12 +77,14 @@ export class BridgeService {
           process.stderr.write(`[ark-panel] stream attach degraded: ${error instanceof Error ? error.message : String(error)}\n`);
         }
       }
+      mark("subscribe_stream");
       const gatewayMessage = submittedMessage(request.latestUserMessage, outputCapture);
       sendAttempted = true;
       if (request.attachments?.length) {
         if (!this.attachmentSender) throw new Error("GATEWAY_ATTACHMENT_TRANSPORT_UNAVAILABLE");
         ({ runId } = await this.attachmentSender.send(created.sessionKey, gatewayMessage, request.idempotencyKey, request.attachments));
       } else ({ runId } = await this.client.send(created.sessionKey, gatewayMessage, request.idempotencyKey));
+      mark("send");
       const abort = () => { void abortCreated().catch(() => undefined); };
       request.signal?.addEventListener("abort", abort, { once: true });
       try {
@@ -83,6 +92,7 @@ export class BridgeService {
         await request.lifecycle?.({ type: "gateway_send_accepted", gatewayRunId: runId });
         if (request.signal?.aborted) { await abortCreated().catch(() => undefined); throw new Error("BRIDGE_ABORTED"); }
         await this.client.waitForCompletion(created.sessionId, runId, request.signal);
+        mark("model_run");
       }
       finally { request.signal?.removeEventListener("abort", abort); }
       if (request.signal?.aborted) throw new Error("BRIDGE_ABORTED");
@@ -92,6 +102,7 @@ export class BridgeService {
         ...(outputCapture ? await collectOutputDirectory(outputCapture) : [])];
       enforceOutputLimits(outputs, outputCapture?.maxFiles, outputCapture?.maxTotalBytes);
       await request.lifecycle?.({ type: "entries_materialized", entries, ...(outputs.length ? { outputs } : {}) });
+      mark("read_and_stage");
       entriesStaged = true;
       return { runId, sessionId: created.sessionId, entries, ...(outputs.length ? { outputs } : {}) };
     } catch (error) {
@@ -124,6 +135,10 @@ export class BridgeService {
           if (!primaryError && !entriesStaged) throw cleanupError;
         }
       }
+      mark("cleanup");
+      process.stderr.write(`${JSON.stringify({ event: "bridge_timing", panelRunId: request.idempotencyKey,
+        runtimeAgentId: request.runtimeAgentId, outcome: primaryError ? "error" : "success",
+        totalMs: Math.round(performance.now() - startedAt), phasesMs: timings })}\n`);
     }
   }
 }
