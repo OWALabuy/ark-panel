@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import sharp from "sharp";
 import { listPanelSessions } from "../storage/panel-sessions.js";
 import { getSessionAttachment, readSessionAttachmentBytes, storeSessionAttachment,
   type AttachmentManifest } from "../storage/attachments.js";
@@ -9,6 +10,10 @@ export interface PublicAttachment {
   mimeType: string;
   sizeBytes: number;
 }
+
+const previewMimeByFormat = new Map<string, string>([["png", "image/png"], ["jpeg", "image/jpeg"], ["webp", "image/webp"]]);
+const MAX_PREVIEW_DIMENSION = 8192;
+const MAX_PREVIEW_PIXELS = 40_000_000;
 
 export class PanelAttachmentApi {
   constructor(private readonly dataRoot: string, private readonly agentIds: readonly string[]) {}
@@ -46,5 +51,17 @@ export class PanelAttachmentApi {
       }
     }
     return undefined;
+  }
+
+  async preview(attachmentId: string): Promise<{ mimeType: string; bytes: Buffer } | undefined> {
+    const file = await this.download(attachmentId); if (!file) return undefined;
+    let metadata: sharp.Metadata;
+    try { metadata = await sharp(file.bytes, { animated: true, limitInputPixels: MAX_PREVIEW_PIXELS }).metadata(); }
+    catch { throw new Error("ATTACHMENT_PREVIEW_UNSUPPORTED"); }
+    const mimeType = metadata.format ? previewMimeByFormat.get(metadata.format) : undefined;
+    if (!mimeType || !metadata.width || !metadata.height || metadata.width > MAX_PREVIEW_DIMENSION || metadata.height > MAX_PREVIEW_DIMENSION || (metadata.pages ?? 1) !== 1) {
+      throw new Error("ATTACHMENT_PREVIEW_UNSUPPORTED");
+    }
+    return { mimeType, bytes: file.bytes };
   }
 }

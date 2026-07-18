@@ -65,7 +65,7 @@ Legend: ✅ available · 🚧 scheduled · 💡 candidate (not scheduled) · ⛔
 | Messages | Export the current branch as Markdown | ✅ | Includes timestamps, thinking, tool calls and tool results without internal paths or metadata |
 | Messages | Thinking, tool calls, and tool results | ✅ | Structured, collapsible rendering including command output |
 | Composer | Per-session local drafts and generation state | ✅ | Browser-local drafts survive refresh and failure; a run only locks its own conversation, so other drafts remain editable |
-| Composer | Attachments and multimodal input | ✅ | Select, paste, or drop up to 10 supported files; images, text, PDF, and Office files are stored server-side and sent as original bytes |
+| Composer | Attachments and multimodal input | ✅ | Select, paste, or drop up to 10 supported files; safe raster images have draft thumbnails and authenticated in-message previews, while all files are stored server-side and sent as original bytes |
 | Messages | Download model-produced files | ✅ | Collects OpenClaw artifacts and files written to the current run's isolated output directory; downloads require panel authentication |
 | Conversation | Long-thread scroll following | ✅ | Preserves the reading position and shows a new-message control when the user has scrolled up |
 | Generation | Durable run lifecycle, reconnect, stop, retry, and idempotent sending | ✅ | Server-owned run state survives browser disconnects; SSE can be re-subscribed and completed message groups commit atomically |

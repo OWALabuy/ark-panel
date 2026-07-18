@@ -18,6 +18,7 @@ export interface GenerationApi {
 export interface AttachmentApi {
   upload(recordId: string, input: { fileName: string; mimeType: string; bytes: Uint8Array }): Promise<unknown>;
   download(attachmentId: string): Promise<{ fileName: string; mimeType: string; bytes: Buffer } | undefined>;
+  preview?(attachmentId: string): Promise<{ mimeType: string; bytes: Buffer } | undefined>;
 }
 export interface CommandApi { dispatch(recordId: string, request: { command: string; args: string[] }): Promise<unknown> }
 export interface ExperienceApi {
@@ -126,6 +127,16 @@ export function createPanelServer(options: AppOptions) {
           res.writeHead(200, { "content-type": file.mimeType, "content-length": file.bytes.length,
             "content-disposition": `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(file.fileName)}`,
             "cache-control": "no-store", "x-content-type-options": "nosniff" });
+          res.end(file.bytes); return;
+        }
+        const attachmentPreviewMatch = /^\/api\/v1\/files\/([^/]+)\/preview$/.exec(url.pathname);
+        if (attachmentPreviewMatch && req.method === "GET") {
+          if (!options.attachments?.preview) return fail(res, 501, "ATTACHMENT_PREVIEW_NOT_CONNECTED", "图片预览尚未接入", requestId);
+          const file = await options.attachments.preview(decodeURIComponent(attachmentPreviewMatch[1]!));
+          if (!file) return fail(res, 404, "ATTACHMENT_NOT_FOUND", "附件不存在", requestId);
+          res.writeHead(200, { "content-type": file.mimeType, "content-length": file.bytes.length,
+            "content-disposition": "inline", "cache-control": "private, no-store", "x-content-type-options": "nosniff",
+            "content-security-policy": "default-src 'none'; sandbox" });
           res.end(file.bytes); return;
         }
         if (req.method === "GET" && url.pathname === "/api/v1/agents") return send(res, 200, { data: options.mock ? mockAgents : await options.reads?.agents() ?? [] });
@@ -240,7 +251,7 @@ export function createPanelServer(options: AppOptions) {
       try { const [root, resolved] = await Promise.all([realpath(options.publicDir), realpath(file)]); const fromRoot = relative(root, resolved); if (fromRoot === ".." || fromRoot.startsWith(`..${sep}`) || fromRoot.startsWith(sep)) throw new Error("STATIC_PATH_ESCAPE"); const data = await readFile(resolved); res.writeHead(200, { "content-type": types[extname(resolved)] ?? "application/octet-stream", "cache-control": pathname === "index.html" ? "no-store" : "public, max-age=3600", "x-content-type-options": "nosniff", "content-security-policy": "default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'" }); res.end(data); }
       catch { fail(res, 404, "NOT_FOUND", "页面不存在", requestId); }
     } catch (error) {
-      const known: Record<string, [number, string]> = { AGENT_NOT_ALLOWED: [403, "Agent 不在允许列表中"], SETTINGS_INVALID: [400, "设置格式无效"], SETTINGS_UPDATE_EMPTY: [400, "没有需要修改的设置"], SETTINGS_CORRUPT: [500, "设置存储已损坏"], PANEL_STORAGE_UNSAFE: [500, "设置存储暂不可用"], AVATAR_STORAGE_INVALID: [500, "头像存储异常，请重新上传头像"], AVATAR_TOO_LARGE: [413, "头像文件不能超过 5 MiB"], AVATAR_INVALID: [400, "头像必须是有效的 PNG、JPEG 或 WebP，且不超过 4096×4096"], SESSION_NOT_FOUND: [404, "会话不存在"], SESSION_UPDATE_EMPTY: [400, "没有需要修改的字段"], SESSION_TITLE_INVALID: [400, "标题格式无效"], SESSION_DELETE_CONFIRMATION_REQUIRED: [400, "删除需要明确确认"], SESSION_NOT_ARCHIVED: [409, "面板会话必须先归档才能彻底删除"], PANEL_SESSION_DELETE_UNSAFE: [409, "会话目录包含未知内容，已拒绝删除"], PANEL_SESSION_NOT_FOUND: [404, "面板会话不存在"], EDIT_TARGET_NOT_USER: [409, "只能编辑用户消息"], PANEL_SESSION_CREATE_FAILED: [500, "面板会话创建失败"], COMMAND_NOT_ALLOWED: [403, "该命令未获面板允许"], COMMAND_ARGS_INVALID: [400, "命令参数无效"], MODEL_NOT_AVAILABLE: [400, "模型不可用"], THINKING_LEVEL_INVALID: [400, "思考等级无效"], THINKING_LEVEL_UNSUPPORTED: [409, "当前模型不支持该思考等级"], REASONING_LEVEL_INVALID: [400, "推理显示模式无效"], IDEMPOTENCY_KEY_REUSED: [409, "重试标识已用于其他请求"], SESSION_BUSY: [409, "该会话正在生成"] };
+      const known: Record<string, [number, string]> = { AGENT_NOT_ALLOWED: [403, "Agent 不在允许列表中"], SETTINGS_INVALID: [400, "设置格式无效"], SETTINGS_UPDATE_EMPTY: [400, "没有需要修改的设置"], SETTINGS_CORRUPT: [500, "设置存储已损坏"], PANEL_STORAGE_UNSAFE: [500, "设置存储暂不可用"], AVATAR_STORAGE_INVALID: [500, "头像存储异常，请重新上传头像"], AVATAR_TOO_LARGE: [413, "头像文件不能超过 5 MiB"], AVATAR_INVALID: [400, "头像必须是有效的 PNG、JPEG 或 WebP，且不超过 4096×4096"], ATTACHMENT_PREVIEW_UNSUPPORTED: [415, "该附件不是可安全预览的 PNG、JPEG 或 WebP 图片"], SESSION_NOT_FOUND: [404, "会话不存在"], SESSION_UPDATE_EMPTY: [400, "没有需要修改的字段"], SESSION_TITLE_INVALID: [400, "标题格式无效"], SESSION_DELETE_CONFIRMATION_REQUIRED: [400, "删除需要明确确认"], SESSION_NOT_ARCHIVED: [409, "面板会话必须先归档才能彻底删除"], PANEL_SESSION_DELETE_UNSAFE: [409, "会话目录包含未知内容，已拒绝删除"], PANEL_SESSION_NOT_FOUND: [404, "面板会话不存在"], EDIT_TARGET_NOT_USER: [409, "只能编辑用户消息"], PANEL_SESSION_CREATE_FAILED: [500, "面板会话创建失败"], COMMAND_NOT_ALLOWED: [403, "该命令未获面板允许"], COMMAND_ARGS_INVALID: [400, "命令参数无效"], MODEL_NOT_AVAILABLE: [400, "模型不可用"], THINKING_LEVEL_INVALID: [400, "思考等级无效"], THINKING_LEVEL_UNSUPPORTED: [409, "当前模型不支持该思考等级"], REASONING_LEVEL_INVALID: [400, "推理显示模式无效"], IDEMPOTENCY_KEY_REUSED: [409, "重试标识已用于其他请求"], SESSION_BUSY: [409, "该会话正在生成"] };
       const code = error instanceof ForkError ? error.code : error instanceof Error ? error.message : "INVALID_REQUEST"; const mapped = known[code];
       const status = error instanceof HttpError ? error.status : error instanceof SyntaxError ? 400 : error instanceof ForkError ? 409 : mapped?.[0] ?? 500;
       fail(res, status, error instanceof HttpError ? error.code : error instanceof ForkError ? error.code : mapped ? code : "INVALID_REQUEST", error instanceof ForkError ? error.message : mapped?.[1] ?? "请求无法处理", requestId);

@@ -20,9 +20,10 @@ async function fixture(generation?: GenerationApi, reads?: ReadApi, commands?: C
   return { server, base: `http://127.0.0.1:${address.port}` };
 }
 test("附件上传下载要求登录与 CSRF，并保持 Office 原始字节", async t => {
-  const original = Buffer.from("raw-docx-bytes"); let uploaded: Buffer | undefined;
+  const original = Buffer.from("raw-docx-bytes"), previewBytes = Buffer.from("safe-preview"); let uploaded: Buffer | undefined;
   const attachments: AttachmentApi = { async upload(recordId, input) { assert.equal(recordId, "record"); assert.equal(input.fileName, "报告.docx"); uploaded = Buffer.from(input.bytes); return { id: "att_fixture", fileName: input.fileName, mimeType: input.mimeType, sizeBytes: input.bytes.byteLength }; },
-    async download(id) { assert.equal(id, "att_fixture"); return { fileName: "报告.docx", mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", bytes: original }; } };
+    async download(id) { assert.equal(id, "att_fixture"); return { fileName: "报告.docx", mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", bytes: original }; },
+    async preview(id) { assert.equal(id, "att_fixture"); return { mimeType: "image/png", bytes: previewBytes }; } };
   const x = await fixture(undefined, undefined, undefined, attachments); t.after(() => x.server.close());
   assert.equal((await fetch(`${x.base}/api/v1/files/att_fixture/download`)).status, 401);
   const login = await fetch(`${x.base}/api/v1/auth/login`, { method: "POST", headers: { origin: x.base, "content-type": "application/json" }, body: JSON.stringify({ username: "owl", password: "correct" }) });
@@ -33,6 +34,11 @@ test("附件上传下载要求登录与 CSRF，并保持 Office 原始字节", a
   const download = await fetch(`${x.base}/api/v1/files/att_fixture/download`, { headers: { cookie: cookies } });
   assert.equal(download.status, 200); assert.deepEqual(Buffer.from(await download.arrayBuffer()), original);
   assert.match(download.headers.get("content-disposition") ?? "", /filename\*=UTF-8''/);
+  assert.equal((await fetch(`${x.base}/api/v1/files/att_fixture/preview`)).status, 401);
+  const preview = await fetch(`${x.base}/api/v1/files/att_fixture/preview`, { headers: { cookie: cookies } });
+  assert.equal(preview.status, 200); assert.equal(preview.headers.get("content-type"), "image/png");
+  assert.equal(preview.headers.get("content-disposition"), "inline"); assert.equal(preview.headers.get("x-content-type-options"), "nosniff");
+  assert.equal(preview.headers.get("cache-control"), "private, no-store"); assert.deepEqual(Buffer.from(await preview.arrayBuffer()), previewBytes);
 });
 test("API rejects unauthenticated requests", async t => { const x = await fixture(); t.after(()=>x.server.close()); const r = await fetch(`${x.base}/api/v1/agents`); assert.equal(r.status, 401); });
 test("non-mock reads are delegated without connecting a real agent", async t => {

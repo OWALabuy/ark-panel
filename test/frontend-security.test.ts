@@ -249,6 +249,14 @@ test("composer uploads raw attachments and preserves their ids for idempotent ru
   assert.match(source,/pendingAttachments\.delete\(`session:\$\{run\.recordId\}`\)/);
   assert.match(source,/if\(run\.status==="completed"\)/);
   assert.match(source,/\/api\/v1\/files\/\$\{encodeURIComponent\(block\.id\)\}\/download/);
+  assert.match(source,/\/api\/v1\/files\/\$\{encodeURIComponent\(block\.id\)\}\/preview/);
+  assert.match(source,/PREVIEW_IMAGE_MIMES=new Set\(\["image\/png","image\/jpeg","image\/webp"\]\)/);
+  assert.match(source,/previewUrl:URL\.createObjectURL\(file\)/);
+  assert.match(source,/URL\.revokeObjectURL\(item\.previewUrl\)/);
+  assert.match(source,/image\.loading="lazy"/);
+  assert.match(html,/id="image-preview-dialog"/);
   assert.match(styles,/\.attachment-card\.output/);
+  assert.match(styles,/\.message-image-button/);
+  assert.match(styles,/\.image-preview-dialog/);
   assert.match(styles,/\.composer\.dragging/);
 });
