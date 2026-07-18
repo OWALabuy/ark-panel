@@ -166,6 +166,8 @@ gateway 的会话索引属于其内部状态：它仅使用进程内锁，也没
 > **面板独占写入 transcript 文件及自身索引；gateway 独占写入 `sessions.json`。两个进程不写入同一文件，从架构上避免进程内锁无法协调跨进程写入的问题。**
 
 - 实测可行流程是：调用 `sessions.create` 取得 gateway 已登记的一次性 session；覆盖其 transcript，只物化到上一轮完整 run；用 `sessions.send` 提交尚未写入文件的最新用户消息；完成后从临时 transcript 取得新增的完整 entry 组。最新用户消息只出现一次。一次性 session 不复用。
+- 面板复用一条已认证的持久 Gateway WebSocket 执行生成控制 RPC 与接收流式事件，避免每个 `sessions.create/send/delete` 都启动 CLI、重新握手。CLI 仅保留给本地命令和无持久连接的测试/降级场景。
+- 成功 run 在新增 entries 已写入可恢复的 run record、随后原子提交面板 transcript 后即可向浏览器完成；临时 session 注销与 artifact 清理由后台执行。run record 的 `cleanupPending` 是重启恢复依据，失败路径仍同步 abort/清理，不能把可能仍运行的 session 当作成功释放。
 - `sessions.delete` 能注销索引，但 transcript 只会改名为 `.deleted.*`，trajectory 文件仍会残留。因此 Owl 已选择：每个真实 agent 配置一个无渠道绑定的专用 runtime agent，与目标 agent 共用 workspace、sessions 目录隔离；先用官方 RPC 注销，再在 runtime agent 的 sessions 根目录内执行严格受限的 artifact 清理。不维护 OpenClaw 补丁分支。
 - 清理只接受本轮由服务端创建并记录的 sessionId 和当前版本已知文件类型；拒绝符号链接、路径越界、未知文件和非 allowlist runtime 根目录。OpenClaw 版本不是 `2026.6.11` 时拒绝推理和清理，升级后须重新验证。
 - 权威会话数据采用 OpenClaw transcript 的 JSONL 格式存储，便于直接查看、纳入 Git 管理和迁移。fork 或编辑重发时，面板以 `wx` 模式创建**新的分支 transcript 文件**，避免覆盖现有文件。

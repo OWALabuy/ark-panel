@@ -218,6 +218,7 @@ export class PanelGenerationApi implements GenerationApi {
       current = await this.transition(current, { status: "completed", finishedAt: new Date().toISOString(), ...(result.revision ? { revision: result.revision } : {}),
         ...(result.runtimeAgentId ? { runtimeAgentId: result.runtimeAgentId } : {}), ...(result.temporarySessionId ? { temporarySessionId: result.temporarySessionId } : {}),
         ...(result.gatewayRunId ? { gatewayRunId: result.gatewayRunId } : {}) });
+      if (current.cleanupPending) void this.cleanupCompletedRun(current.runId);
     } catch (error) {
       let recoverable = await this.runStore.get(accepted.runId);
       const committed = recoverable?.plannedUserEntryId ? await this.committedRevision(recoverable.recordId, recoverable.plannedUserEntryId) : undefined;
@@ -355,6 +356,17 @@ export class PanelGenerationApi implements GenerationApi {
     catch (error) { process.stderr.write(`[ark-panel] orphan cleanup failed runId=${record.runId}: ${error instanceof Error ? error.message : String(error)}\n`); return false; }
   }
 
+  private async cleanupCompletedRun(runId: string): Promise<void> {
+    try {
+      const record = await this.runStore.get(runId); if (!record?.cleanupPending || !terminalRunStatuses.has(record.status)) return;
+      const cleaned = await this.cleanupOrphan(record); if (!cleaned) return;
+      const latest = await this.runStore.get(runId); if (!latest?.cleanupPending || !terminalRunStatuses.has(latest.status)) return;
+      await this.runStore.put({ ...latest, sequence: latest.sequence + 1, cleanupPending: false, updatedAt: new Date().toISOString() });
+    } catch (error) {
+      process.stderr.write(`[ark-panel] deferred cleanup failed runId=${runId}: ${error instanceof Error ? error.message : String(error)}\n`);
+    }
+  }
+
   async generate(recordId: string, message: string, signal: AbortSignal, runId: string = randomUUID(), expectedRevision?: string, attachmentIds: readonly string[] = []): Promise<{ runId: string; entries: unknown[]; revision?: string; runtimeAgentId?: string; temporarySessionId?: string; gatewayRunId?: string }> {
     const done = this.completed.get(runId); if (done) {
       if (done.recordId !== recordId || done.message !== message) throw new Error("IDEMPOTENCY_KEY_REUSED"); return done.value;
@@ -419,6 +431,7 @@ export class PanelGenerationApi implements GenerationApi {
         overrides: { ...(metadata.modelOverride ? { modelOverride: metadata.modelOverride } : {}),
           ...(metadata.thinkingLevel ? { thinkingLevel: metadata.thinkingLevel } : {}),
           ...(metadata.reasoningLevel ? { reasoningLevel: metadata.reasoningLevel } : {}) }, signal,
+        deferSuccessfulCleanup: true,
         lifecycle: async event => await this.recordBridgeLifecycle(runId, event), stream: event => this.enqueueBridgeStream(runId, event), cleanupFailed: async () => {
           const current = await this.runStore.get(runId); if (current) await this.transition(current, { cleanupPending: true });
         } });
@@ -468,7 +481,7 @@ export class PanelGenerationApi implements GenerationApi {
         }
         message.content = content;
         }
-        await this.transition(current, { status: "materializing", stagedEntries: entries });
+        await this.transition(current, { status: "materializing", stagedEntries: entries, cleanupPending: true });
       } catch (error) {
         if (createdOutputIds.length) await removeSessionAttachments(this.config.dataRoot, agentId, current.recordId, createdOutputIds).catch(() => undefined);
         throw error;

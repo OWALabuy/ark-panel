@@ -227,6 +227,20 @@ test("entries 已 durable 后 cleanup 失败不推翻结果，并发出 best-eff
   assert.deepEqual(result.entries, entries); assert.equal(events.at(-1), "cleanup_failed");
 });
 
+test("成功结果可在清理前返回，由持久化调用方接管恢复责任", async t => {
+  const root = await mkdtemp(join(tmpdir(), "bridge-deferred-cleanup-")); t.after(() => rm(root, { recursive: true, force: true }));
+  const id = "77777777-7777-4777-8777-777777777777"; let deleted = false;
+  const created: CreatedSession = { sessionId: id, sessionKey: "agent:runtime:deferred", transcriptPath: join(root, `${id}.jsonl`) };
+  const client: GatewayClient = { async version() { return "2026.6.11"; }, async createSession() { return created; },
+    async send() { return { runId: "run" }; }, async waitForCompletion() {}, async abort() {}, async deleteSession() { deleted = true; } };
+  const entries = [{ type: "message", message: { role: "assistant", content: "done" } }];
+  const materializer: BridgeMaterializer = { async replaceCreatedTranscript() { return 0; }, async readNewEntries() { return entries; }, verifyAndStripSubmittedUser(value) { return value; } };
+  const result = await new BridgeService(client, materializer, new Map([["runtime", root]])).generate({ runtimeAgentId: "runtime",
+    historyThroughPreviousRun: { header: { type: "session" }, entries: [] }, latestUserMessage: "prompt", latestUserEntryId: "user",
+    idempotencyKey: "key", deferSuccessfulCleanup: true, lifecycle: async () => undefined });
+  assert.deepEqual(result.entries, entries); assert.equal(deleted, false);
+});
+
 test("主流程与 cleanup 同时失败时保留主错误并登记后续清理", async t => {
   const root = await mkdtemp(join(tmpdir(), "bridge-double-failure-")); t.after(() => rm(root, { recursive: true, force: true }));
   const id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";

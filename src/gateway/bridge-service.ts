@@ -125,7 +125,7 @@ export class BridgeService {
         try { await cleanOutputCapture(outputCapture); }
         catch (cleanupError) { if (!primaryError && !entriesStaged) throw cleanupError; }
       }
-      if (created && cleanupSafe) {
+      if (created && cleanupSafe && !(entriesStaged && request.deferSuccessfulCleanup)) {
         try {
           await unregisterAndClean(this.client, { runtimeAgentId: request.runtimeAgentId, sessionId: created.sessionId,
             sessionKey: created.sessionKey, runtimeSessionsRoot: this.allowedRuntimeRoots.get(request.runtimeAgentId) ?? "",

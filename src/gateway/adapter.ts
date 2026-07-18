@@ -103,6 +103,8 @@ export interface BridgeRequest {
   lifecycle?: BridgeLifecycleCallback;
   stream?: BridgeStreamCallback;
   cleanupFailed?: () => Promise<void>;
+  /** Caller durably stages entries and owns post-commit cleanup recovery. */
+  deferSuccessfulCleanup?: boolean;
 }
 
 export interface BridgeResult { runId: string; sessionId: string; entries: TranscriptDocument["entries"]; outputs?: CollectedOutput[] }
