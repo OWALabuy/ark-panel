@@ -30,12 +30,11 @@ test("保留 terminal 的安全诊断字段并区分上游 timeout/interrupt", a
 
 async function clientFixture(abortResponses: Array<Record<string, unknown>> = []) {
   const root = await mkdtemp(join(tmpdir(), "panel-cli-")), sessionId = "11111111-1111-4111-8111-111111111111";
-  let sentParams: Record<string, unknown> | undefined, abortCalls = 0, createdKey = "";
+  let sentParams: Record<string, unknown> | undefined, abortCalls = 0;
   const client = new OpenClawCliClient({ sessionsRoots: new Map([["runtime", root]]), gatewayRunTimeoutMs: 30, watcherGraceMs: 80, pollIntervalMs: 5,
     commandRunner: async (_executable, args) => {
-      if (args[0] === "sessions") return JSON.stringify({ sessions: [{ key: createdKey, sessionId }] });
       const method = args[2], params = JSON.parse(args.at(-1) ?? "{}") as Record<string, unknown>;
-      if (method === "sessions.create") { createdKey = String(params.key); return "{}"; }
+      if (method === "sessions.create") return JSON.stringify({ key: `agent:runtime:${String(params.key)}`, sessionId });
       if (method === "sessions.send") { sentParams = params; return JSON.stringify({ runId: "run" }); }
       if (method === "sessions.abort") return JSON.stringify(abortResponses[Math.min(abortCalls++, abortResponses.length - 1)] ?? { ok: true, status: "no-active-run", abortedRunId: null });
       return "{}";
@@ -57,6 +56,27 @@ test("send 原样透传结构化附件，包括 Office 文件", async () => {
   const attachments = [{ fileName: "预算.xlsx", mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", content: "UEsDBA==" }];
   await x.client.send(x.created.sessionKey, "请查看附件", "key", attachments);
   assert.deepEqual(x.sentParams()?.attachments, attachments);
+});
+
+test("生成控制 RPC 复用持久 transport，create 直接采用返回的 sessionId", async t => {
+  const root = await mkdtemp(join(tmpdir(), "panel-persistent-rpc-"));
+  t.after(() => import("node:fs/promises").then(fs => fs.rm(root, { recursive: true, force: true })));
+  const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
+  const sessionId = "22222222-2222-4222-8222-222222222222";
+  const client = new OpenClawCliClient({ sessionsRoots: new Map([["runtime", root]]), commandRunner: async () => {
+    throw new Error("generation RPC must not spawn CLI");
+  }, rpc: { async request(method, rawParams) {
+    const params = rawParams as Record<string, unknown>; calls.push({ method, params });
+    if (method === "sessions.create") return { key: `agent:runtime:${String(params.key)}`, sessionId };
+    if (method === "sessions.send") return { runId: "run" };
+    if (method === "sessions.delete") return { ok: true };
+    throw new Error(`unexpected ${method}`);
+  } } });
+  const created = await client.createSession("runtime");
+  await client.send(created.sessionKey, "hello", "key");
+  await client.deleteSession(created.sessionKey);
+  assert.equal(created.sessionId, sessionId);
+  assert.deepEqual(calls.map(call => call.method), ["sessions.create", "sessions.send", "sessions.delete"]);
 });
 
 test("configuredTools 调用已配置 runtime 的 tools.catalog", async () => {

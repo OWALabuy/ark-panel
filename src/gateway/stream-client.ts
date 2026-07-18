@@ -175,7 +175,7 @@ export class OpenClawStreamObserver {
   private async connectHandshake(nonce: string): Promise<void> {
     try {
       const auth = this.options.token || this.options.password ? { ...(this.options.token ? { token: this.options.token } : {}), ...(this.options.password ? { password: this.options.password } : {}) } : undefined;
-      const hello = object(await this.request("connect", { minProtocol: 4, maxProtocol: 4,
+      const hello = object(await this.rawRequest("connect", { minProtocol: 4, maxProtocol: 4,
         client: { id: "gateway-client", displayName: "ark-panel-stream", version: "0.1.0", platform: process.platform, mode: "backend", instanceId: randomUUID() },
         caps: ["tool-events"], ...(auth ? { auth } : {}), role: "operator", scopes: ["operator.read", "operator.write"] }));
       const server = object(hello?.server), version = nonEmpty(server?.version);
@@ -192,7 +192,17 @@ export class OpenClawStreamObserver {
     await this.request("sessions.messages.subscribe", { key: sessionKey }); this.subscribed.add(sessionKey);
   }
 
-  private request(method: string, params: unknown): Promise<unknown> {
+  request(method: string, params: unknown): Promise<unknown> {
+    this.start();
+    return this.requestConnected(method, params);
+  }
+
+  private async requestConnected(method: string, params: unknown): Promise<unknown> {
+    await this.waitUntilConnected();
+    return await this.rawRequest(method, params);
+  }
+
+  private rawRequest(method: string, params: unknown): Promise<unknown> {
     const socket = this.socket; if (!socket || socket.readyState !== 1) return Promise.reject(new Error("gateway stream is not connected"));
     const id = randomUUID();
     return new Promise((resolve, reject) => {

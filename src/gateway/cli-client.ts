@@ -17,6 +17,8 @@ interface CliOptions {
   runTimeoutMs?: number;
   pollIntervalMs?: number;
   commandRunner?: (executable: string, args: string[], timeoutMs: number) => Promise<string>;
+  /** Persistent gateway transport; CLI remains available for local-only commands. */
+  rpc?: { request(method: string, params: unknown): Promise<unknown> };
 }
 
 export type GatewayRunErrorCode = "GATEWAY_RUN_TIMEOUT" | "GATEWAY_RUN_ABORTED" | "GATEWAY_RUN_FAILED" |
@@ -208,10 +210,12 @@ export class OpenClawCliClient implements GatewayClient {
   private readonly keysBySessionId = new Map<string, string>();
   private readonly sessionIdsByKey = new Map<string, string>();
   private readonly commandRunner: (executable: string, args: string[], timeoutMs: number) => Promise<string>;
+  private readonly rpc: { request(method: string, params: unknown): Promise<unknown> } | undefined;
   constructor(options: CliOptions) {
     this.executable = options.executable ?? "openclaw"; this.sessionsRoots = options.sessionsRoots;
     this.requestTimeoutMs = options.requestTimeoutMs ?? 15_000;
     this.commandRunner = options.commandRunner ?? runCommand;
+    this.rpc = options.rpc;
     this.gatewayRunTimeoutMs = options.gatewayRunTimeoutMs ?? options.runTimeoutMs ?? 30 * 60_000;
     this.watcherGraceMs = options.watcherGraceMs ?? 30_000; this.pollIntervalMs = options.pollIntervalMs ?? 500;
     for (const [name, value] of [["gatewayRunTimeoutMs", this.gatewayRunTimeoutMs], ["watcherGraceMs", this.watcherGraceMs], ["pollIntervalMs", this.pollIntervalMs]] as const) {
@@ -219,6 +223,7 @@ export class OpenClawCliClient implements GatewayClient {
     }
   }
   private async call<T>(method: string, params: unknown, timeout = this.requestTimeoutMs): Promise<T> {
+    if (this.rpc) return await this.rpc.request(method, params) as T;
     const output = await this.commandRunner(this.executable, ["gateway", "call", method, "--json", "--timeout", String(timeout), "--params", payload(params)], timeout + 2_000);
     return JSON.parse(output) as T;
   }
@@ -230,13 +235,12 @@ export class OpenClawCliClient implements GatewayClient {
   async createSession(runtimeAgentId: string): Promise<CreatedSession> {
     const root = this.sessionsRoots.get(runtimeAgentId); if (!root) throw new Error("runtime agent 不在 allowlist");
     const localKey = `panel-${randomUUID()}`; const sessionKey = `agent:${runtimeAgentId}:${localKey}`;
-    await this.call("sessions.create", { key: localKey, agentId: runtimeAgentId, label: "panel bridge" });
-    const listed = JSON.parse(await this.commandRunner(this.executable, ["sessions", "--agent", runtimeAgentId, "--json"], this.requestTimeoutMs)) as { sessions?: Array<{ key?: string; sessionId?: string }> };
-    const found = listed.sessions?.find((session) => session.key === localKey || session.key === sessionKey);
-    if (!found?.sessionId) throw new Error("sessions.create 后找不到 sessionId");
-    this.keysBySessionId.set(found.sessionId, sessionKey);
-    this.sessionIdsByKey.set(sessionKey, found.sessionId);
-    return { sessionId: found.sessionId, sessionKey, transcriptPath: join(root, `${found.sessionId}.jsonl`) };
+    const created = object(await this.call<unknown>("sessions.create", { key: localKey, agentId: runtimeAgentId, label: "panel bridge" }), "SESSION_CREATE");
+    const returnedKey = string(created.key, "SESSION_CREATE_KEY"), sessionId = string(created.sessionId, "SESSION_CREATE_ID");
+    if (returnedKey !== sessionKey) throw new Error("OPENCLAW_SESSION_CREATE_KEY_MISMATCH");
+    this.keysBySessionId.set(sessionId, sessionKey);
+    this.sessionIdsByKey.set(sessionKey, sessionId);
+    return { sessionId, sessionKey, transcriptPath: join(root, `${sessionId}.jsonl`) };
   }
   async applySessionOverrides(sessionKey: string, overrides: SessionOverrides): Promise<void> {
     await this.call("sessions.patch", sessionPatchParams(sessionKey, overrides));

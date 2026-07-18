@@ -17,7 +17,6 @@ const contextBudget = new ConservativeContextBudget(config.contextHistoryBudgetT
 const readApi = config.dataRoot && config.readAgents.length ? new SessionReadData(config.readAgents, config.dataRoot, contextBudget) : undefined;
 const roots = new Map<string, string>();
 for (const value of config.runtimes.values()) roots.set(value.runtimeAgentId, value.sessionsRoot);
-const gateway = new OpenClawCliClient({ sessionsRoots: roots, gatewayRunTimeoutMs: config.gatewayRunTimeoutMs, watcherGraceMs: config.runWatcherGraceMs });
 const operations = new SessionOperationCoordinator();
 const experienceAgentIds = new Set([...config.readAgents.map(agent => agent.agentId), ...config.runtimes.keys()]);
 const experience = config.dataRoot ? new ExperienceStore(config.dataRoot, [...experienceAgentIds]) : undefined;
@@ -27,6 +26,8 @@ const gatewayAuth = config.dataRoot && config.runtimes.size ? await loadGatewayS
 const gatewayConnection = gatewayAuth ? new OpenClawStreamObserver({ ...gatewayAuth, requestTimeoutMs: 15_000,
   onDiagnostic: message => process.stderr.write(`[ark-panel] gateway stream: ${message}\n`) }) : undefined;
 gatewayConnection?.start();
+const gateway = new OpenClawCliClient({ sessionsRoots: roots, gatewayRunTimeoutMs: config.gatewayRunTimeoutMs,
+  watcherGraceMs: config.runWatcherGraceMs, ...(gatewayConnection ? { rpc: gatewayConnection } : {}) });
 const streamObserver = process.env.PANEL_OPENCLAW_STREAMING === "0" ? undefined : gatewayConnection;
 const bridge = new BridgeService(gateway, new FileBridgeMaterializer(), roots, streamObserver, gatewayConnection);
 if (config.dataRoot && config.runtimes.size) {
