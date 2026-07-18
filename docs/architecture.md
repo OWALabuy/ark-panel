@@ -194,6 +194,7 @@ gateway 的会话索引属于其内部状态：它仅使用进程内锁，也没
 
 - 浏览器上传的是文件字节和显示名称，不得提交服务器路径。服务端将其写入 `PANEL_DATA_DIR/files`：blob 按 SHA-256 内容寻址，manifest 与会话消息引用分离；目录/文件权限分别收紧到 `0700`/`0600`。
 - 输入附件与 user entry 一起进入 transcript，fork 只继承祖先消息真正引用的附件。图片、文本、PDF 由 OpenClaw/模型按其能力消费；Office 文件原样传递，面板不做 Office → 文本/PDF 转换，模型若需读取应使用自身 Python 或 skill。
+- 面板 transcript 中的 `attachment` 是持久化与 UI 使用的专用块，不能原样物化给 OpenClaw。续聊时，服务端会校验附件与消息的归属，将历史用户图片从私有存储恢复为带真实 Base64 的 OpenClaw `image` 块；其他历史附件只生成文件名与 MIME 文字说明，避免 OpenAI-compatible 适配器把未知块误编码成无效图片。
 - 模型可下载产出只接受两个来源：OpenClaw 为当前 run 明确登记的 artifact，或服务端可信 `workspaceRoot` 下 `.openclaw/tmp/ark-panel/<run-id>/outputs`。客户端不能控制 workspace 或输出目录。
 - 收集发生在临时 OpenClaw session 清理前；内容先安全复制进面板存储，再删除运行目录。路径逃逸、符号链接、硬链接、特殊文件、读取竞态、文件数和总容量越界都会使本轮失败，不提供任意 workspace 文件下载接口。
 - 下载和图片预览均经过面板登录鉴权。下载使用 `Content-Disposition: attachment`；预览只接受服务端真实解码且有尺寸/像素上限的单帧 PNG、JPEG、WebP，并使用 `inline`、`nosniff`、`no-store` 与隔离 CSP。HTML、SVG、动图和伪图片绝不以内联页面执行。

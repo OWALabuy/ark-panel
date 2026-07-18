@@ -42,6 +42,33 @@ test("附件原样交给 OpenClaw，输入与本轮模型产出作为消息块�
   assert.equal((await readSessionAttachmentBytes(root, "claude", metadata.recordId, output.manifest.attachmentId)).toString(), "# result");
 });
 
+test("续聊时把历史图片恢复为 OpenClaw image 块，其他附件降级为文字说明", async t => {
+  const root = await mkdtemp(join(tmpdir(), "generation-history-attachments-")); t.after(() => rm(root, { recursive: true, force: true }));
+  const metadata = await createPanelSession(root, "claude", { header: { type: "session" }, entries: [] });
+  const image = await storeSessionAttachment(root, { fileName: "图片.png", mimeType: "image/png", bytes: Buffer.from("image-bytes") },
+    { agentId: "claude", recordId: metadata.recordId, messageId: "u-image", role: "user" });
+  const office = await storeSessionAttachment(root, { fileName: "说明.docx", mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", bytes: Buffer.from("office-bytes") },
+    { agentId: "claude", recordId: metadata.recordId, messageId: "u-image", role: "user" });
+  await commitPanelTranscript(root, metadata, { header: { type: "session" }, entries: [
+    { type: "message", id: "u-image", parentId: null, message: { role: "user", content: [
+      { type: "text", text: "看图" },
+      { type: "attachment", attachmentId: image.manifest.attachmentId, fileName: image.manifest.fileName, mimeType: image.manifest.mimeType },
+      { type: "attachment", attachmentId: office.manifest.attachmentId, fileName: office.manifest.fileName, mimeType: office.manifest.mimeType }
+    ] } },
+    { type: "message", id: "a-image", parentId: "u-image", message: { role: "assistant", content: [{ type: "text", text: "看到了" }] } }
+  ] });
+  let history: BridgeRequest["historyThroughPreviousRun"] | undefined;
+  const api = new PanelGenerationApi({ async generate(request) { history = request.historyThroughPreviousRun; return { runId: request.idempotencyKey,
+    sessionId: "temp", entries: [{ type: "message", id: "answer", parentId: request.latestUserEntryId, message: { role: "assistant", content: "ok" } }] }; } },
+  { dataRoot: root, runtimeByAgent: new Map([["claude", "runtime"]]) });
+  await api.generate(metadata.recordId, "继续", new AbortController().signal);
+  const blocks = ((history!.entries[0]!.message as { content: Array<Record<string, unknown>> }).content);
+  assert.deepEqual(blocks[1], { type: "image", data: Buffer.from("image-bytes").toString("base64"), mimeType: "image/png" });
+  assert.deepEqual(blocks[2], { type: "text", text: "[附件：说明.docx（application/vnd.openxmlformats-officedocument.wordprocessingml.document）]" });
+  const durable = await loadPanelSession(root, "claude", metadata.recordId);
+  assert.equal(((durable.document.entries[0]!.message as { content: Array<Record<string, unknown>> }).content[1]?.type), "attachment");
+});
+
 test("GenerationApi 只在完整 bridge 成功后原子提交 user 和 run，并保持 parent 链", async () => {
   const root = await mkdtemp(join(tmpdir(), "generation-api-"));
   const metadata = await createPanelSession(root, "claude", { header: { type: "session", version: 3 }, entries: [

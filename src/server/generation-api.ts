@@ -34,6 +34,35 @@ function outputMimeType(fileName: string, supplied?: string): string {
     pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation" } as Record<string, string>)[extension ?? ""] ?? "application/octet-stream";
 }
 
+const OPENCLAW_HISTORY_IMAGE_MIMES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
+
+async function materializeOpenClawHistory(dataRoot: string, agentId: string, recordId: string,
+  document: TranscriptDocument): Promise<TranscriptDocument> {
+  const entries = await Promise.all(document.entries.map(async entry => {
+    if (entry.type !== "message" || !entry.message || typeof entry.message !== "object" || Array.isArray(entry.message)) return entry;
+    const message = entry.message as JsonObject;
+    if (!Array.isArray(message.content) || !message.content.some(block => block && typeof block === "object" && !Array.isArray(block) && (block as JsonObject).type === "attachment")) return entry;
+    const content: JsonObject[] = [];
+    for (const rawBlock of message.content) {
+      if (!rawBlock || typeof rawBlock !== "object" || Array.isArray(rawBlock) || (rawBlock as JsonObject).type !== "attachment") {
+        content.push(rawBlock as JsonObject); continue;
+      }
+      const block = rawBlock as JsonObject;
+      if (typeof block.attachmentId !== "string") throw new Error("历史附件缺少 attachmentId");
+      const stored = await getSessionAttachment(dataRoot, agentId, recordId, block.attachmentId);
+      if (typeof entry.id !== "string" || stored.reference.messageId !== entry.id || stored.reference.role !== message.role) throw new Error("历史附件引用与消息不一致");
+      if (message.role === "user" && OPENCLAW_HISTORY_IMAGE_MIMES.has(stored.manifest.mimeType)) {
+        const bytes = await readSessionAttachmentBytes(dataRoot, agentId, recordId, block.attachmentId);
+        content.push({ type: "image", data: bytes.toString("base64"), mimeType: stored.manifest.mimeType });
+      } else {
+        content.push({ type: "text", text: `[附件：${stored.manifest.fileName}（${stored.manifest.mimeType}）]` });
+      }
+    }
+    return { ...entry, message: { ...message, content } };
+  }));
+  return { header: { ...document.header }, entries };
+}
+
 export class PanelGenerationApi implements GenerationApi {
   private static readonly MAX_COMPLETED = 512;
   private readonly operations: SessionOperationCoordinator;
@@ -364,6 +393,7 @@ export class PanelGenerationApi implements GenerationApi {
       const beforeStat = await lstat(transcriptPath); const beforeRevision = `${beforeStat.size}:${beforeStat.mtimeMs}`;
       if (expectedRevision && expectedRevision !== beforeRevision) throw new Error("REVISION_CONFLICT");
       (this.config.contextBudget ?? new ConservativeContextBudget()).assertWithinBudget(document, message);
+      const openClawHistory = await materializeOpenClawHistory(this.config.dataRoot, agentId, recordId, document);
       const userId = this.plannedUserIds.get(runId) ?? randomUUID(); const now = new Date().toISOString();
       const storedAttachments = await Promise.all(attachmentIds.map(async attachmentId => {
         const stored = await getSessionAttachment(this.config.dataRoot, agentId!, recordId, attachmentId);
@@ -380,7 +410,7 @@ export class PanelGenerationApi implements GenerationApi {
       const userEntry: JsonObject = { type: "message", id: userId, parentId: latestEntryId(document), timestamp: now,
         message: { role: "user", content: userContent, timestamp: Date.now() } };
       const managedBeforeBridge = await this.runStore.get(runId); if (managedBeforeBridge) await this.transition(managedBeforeBridge, { status: "running", baseRevision: beforeRevision, baseParentEntryId: latestEntryId(document) });
-      const result = await this.bridge.generate({ runtimeAgentId, historyThroughPreviousRun: document, latestUserMessage: message || "请查看随消息提供的附件。",
+      const result = await this.bridge.generate({ runtimeAgentId, historyThroughPreviousRun: openClawHistory, latestUserMessage: message || "请查看随消息提供的附件。",
         latestUserEntryId: userId, idempotencyKey: runId,
         ...(storedAttachments.length ? { attachments: storedAttachments.map(({ stored, bytes }) => ({ fileName: stored.manifest.fileName,
           mimeType: stored.manifest.mimeType, content: bytes.toString("base64") })) } : {}),
