@@ -197,7 +197,8 @@ $("#avatar-agent").onchange=()=>{discardPendingAvatar();$("#avatar-status").text
 document.addEventListener("pointerdown",event=>{const flyout=$("#rail-flyout"),project=$("#project-menu");if(!flyout.hidden&&!flyout.contains(event.target)&&!railTrigger?.contains(event.target))closeRailFlyout();if(!project.hidden&&!project.contains(event.target)&&!projectMenuTrigger?.contains(event.target))closeProjectMenu()});document.addEventListener("keydown",event=>{if(event.key==="Escape"&&!$("#project-menu").hidden){event.preventDefault();closeProjectMenu();return}if(event.key==="Escape"&&!$("#rail-flyout").hidden){event.preventDefault();closeRailFlyout()}});
 $("#project-menu").addEventListener("keydown",event=>{if(event.key==="Escape"&&projectMenuCreating){event.preventDefault();event.stopPropagation();projectMenuCreating=false;renderProjectMenu({focus:"new"});return}if(event.target instanceof HTMLInputElement)return;if(!["ArrowDown","ArrowUp","Home","End"].includes(event.key))return;const items=[...$("#project-menu").querySelectorAll('[role^="menuitem"]:not(:disabled)')];if(!items.length)return;event.preventDefault();const current=items.indexOf(document.activeElement),index=event.key==="Home"?0:event.key==="End"?items.length-1:event.key==="ArrowDown"?(current+1+items.length)%items.length:(current-1+items.length)%items.length;items[index].focus()});
 globalThis.addEventListener("resize",positionProjectMenu);
-document.addEventListener("visibilitychange",updateDocumentTitle);
+function handleDocumentVisibility(){if(!document.hidden&&activeSession)clearUnreadRun(activeSession);updateDocumentTitle()}
+document.addEventListener("visibilitychange",handleDocumentVisibility);
 setInterval(()=>{if(currentConversationStatus&&activeSession)renderConversationStatus(currentConversationStatus)},60_000);
 globalThis.addEventListener("storage",event=>{if(event.key!==UNREAD_KEY)return;unreadRuns=readUnreadRuns();refreshUnreadUi()});
 boot();

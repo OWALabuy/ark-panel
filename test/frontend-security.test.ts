@@ -185,8 +185,8 @@ test("background run notifications stay unread per session until the conversatio
   assert.match(source,/activeSession===run\.recordId&&!document\.hidden/);
   assert.match(source,/unreadRuns\.set\(String\(run\.recordId\),\{agentId:String\(run\.agentId\|\|activeAgent\),status:run\.status\}\)/);
   assert.match(source,/if\(!document\.hidden\)clearUnreadRun\(id\)/);
-  assert.match(source,/document\.addEventListener\("visibilitychange",updateDocumentTitle\)/);
-  assert.doesNotMatch(source,/visibilitychange[^\n]*clearUnreadRun/);
+  assert.match(source,/function handleDocumentVisibility\(\)\{if\(!document\.hidden&&activeSession\)clearUnreadRun\(activeSession\);updateDocumentTitle\(\)\}/);
+  assert.match(source,/document\.addEventListener\("visibilitychange",handleDocumentVisibility\)/);
   assert.match(source,/count=document\.hidden\?unreadRuns\.size:0/);
   assert.match(source,/unread-marker/);
   assert.match(source,/unread\.some\(item=>item\.status==="failed"\)/);
