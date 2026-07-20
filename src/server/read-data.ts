@@ -244,27 +244,27 @@ export class SessionReadData {
   async fork(recordId: string, messageId: string): Promise<unknown> {
     const loaded = await this.load(recordId); if (!loaded) throw new Error("SESSION_NOT_FOUND");
     const createdAt = new Date().toISOString(); const newId = randomUUID();
-    const document = deriveFork(loaded.document, messageId, { recordId: newId, parentRecordId: recordId, forkedFromMessageId: messageId, createdAt });
-    const metadata = await createPanelSession(this.dataRoot, loaded.record.agentId, document, { parentRecordId: recordId, forkedFromMessageId: messageId, recordId: newId, createdAt });
+    const inherited = { title: loaded.record.title, ...(loaded.record.project ? { project: loaded.record.project } : {}) };
+    const document = deriveFork(loaded.document, messageId, { recordId: newId, parentRecordId: recordId, forkedFromMessageId: messageId, createdAt, ...inherited });
+    const metadata = await createPanelSession(this.dataRoot, loaded.record.agentId, document, { parentRecordId: recordId, forkedFromMessageId: messageId, recordId: newId, createdAt, ...inherited });
     if (loaded.record.sourceKind === "panel") await forkSessionAttachmentReferences(this.dataRoot,
       { agentId: loaded.record.agentId, recordId }, { agentId: loaded.record.agentId, recordId: newId },
       new Set(document.entries.flatMap(entry => typeof entry.id === "string" ? [entry.id] : [])));
     return { recordId: metadata.recordId, agentId: metadata.agentId, sourceKind: "panel" };
   }
 
-  async editAndFork(recordId: string, messageId: string, replacement: string): Promise<unknown> {
+  async editAndFork(recordId: string, messageId: string, _replacement: string): Promise<unknown> {
     const loaded = await this.load(recordId); if (!loaded) throw new Error("SESSION_NOT_FOUND");
     const index = loaded.document.entries.findIndex(entry => entry.id === messageId); const target = loaded.document.entries[index];
     if (!target || role(target) !== "user") throw new Error("EDIT_TARGET_NOT_USER");
     const parent = typeof target.parentId === "string" ? target.parentId : null; const createdAt = new Date().toISOString(), newId = randomUUID();
     let base: TranscriptDocument;
-    if (parent) base = deriveFork(loaded.document, parent, { recordId: newId, parentRecordId: recordId, forkedFromMessageId: messageId, createdAt });
+    const inherited = { title: loaded.record.title, ...(loaded.record.project ? { project: loaded.record.project } : {}) };
+    if (parent) base = deriveFork(loaded.document, parent, { recordId: newId, parentRecordId: recordId, forkedFromMessageId: messageId, createdAt, ...inherited });
     else base = { header: { ...loaded.document.header, id: randomUUID(), timestamp: createdAt,
-      panel: { recordId: newId, parentRecordId: recordId, forkedFromMessageId: messageId, createdAt } }, entries: [] };
-    const message = target.message as JsonObject;
-    const edited: JsonObject = { ...target, id: randomUUID(), parentId: parent, timestamp: createdAt,
-      message: { ...message, content: replacement, timestamp: Date.now() } };
-    const metadata = await createPanelSession(this.dataRoot, loaded.record.agentId, { ...base, entries: [...base.entries, edited] }, { parentRecordId: recordId, forkedFromMessageId: messageId, recordId: newId, createdAt });
+      panel: { recordId: newId, parentRecordId: recordId, forkedFromMessageId: messageId, createdAt, ...inherited } }, entries: [] };
+    const metadata = await createPanelSession(this.dataRoot, loaded.record.agentId, base,
+      { parentRecordId: recordId, forkedFromMessageId: messageId, recordId: newId, createdAt, ...inherited });
     if (loaded.record.sourceKind === "panel") await forkSessionAttachmentReferences(this.dataRoot,
       { agentId: loaded.record.agentId, recordId }, { agentId: loaded.record.agentId, recordId: newId },
       new Set(base.entries.flatMap(entry => typeof entry.id === "string" ? [entry.id] : [])));

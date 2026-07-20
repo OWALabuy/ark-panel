@@ -194,6 +194,11 @@ test("background run notifications stay unread per session until the conversatio
   assert.match(styles,/\.unread-marker\.failed/);
 });
 
+test("edit and resend opens a fork and submits the replacement through the normal composer run", async () => {
+  const source=await readFile("src/frontend/app.js","utf8");
+  assert.match(source,/async function editAndResend[\s\S]*\/resend[\s\S]*openSession\(String\(created\.recordId\)\)[\s\S]*saveDraft\(replacement\)[\s\S]*requestSubmit\(\)/);
+});
+
 test("desktop navigation can collapse to an accessible persistent rail", async () => {
   const source=await readFile("src/frontend/app.js","utf8");
   const html=await readFile("src/frontend/index.html","utf8");

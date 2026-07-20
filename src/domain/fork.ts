@@ -27,7 +27,7 @@ export function isLegalForkBoundary(entry: JsonObject): boolean {
   return entry.type === "compaction" || entry.type === "compaction_checkpoint";
 }
 
-export interface ForkMetadata { recordId: string; parentRecordId: string; forkedFromMessageId: string; createdAt: string }
+export interface ForkMetadata { recordId: string; parentRecordId: string; forkedFromMessageId: string; createdAt: string; title?: string; project?: string }
 
 export function deriveFork(source: TranscriptDocument, targetId: string, metadata: ForkMetadata): TranscriptDocument {
   const byId = new Map<string, JsonObject>();

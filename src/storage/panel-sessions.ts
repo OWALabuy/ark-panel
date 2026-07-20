@@ -38,10 +38,10 @@ async function readRegular(path: string): Promise<string> {
 }
 
 export async function createPanelSession(dataRoot: string, agentId: string, document: TranscriptDocument,
-  source?: { parentRecordId?: string; forkedFromMessageId?: string; recordId?: string; createdAt?: string; title?: string }): Promise<PanelMetadata> {
+  source?: { parentRecordId?: string; forkedFromMessageId?: string; recordId?: string; createdAt?: string; title?: string; project?: string }): Promise<PanelMetadata> {
   const recordId = source?.recordId ?? newPanelRecordId(); const createdAt = source?.createdAt ?? new Date().toISOString();
   const metadata: PanelMetadata = { version: 1, recordId, agentId, createdAt,
-    archived: false, hidden: false, memoryDisposition: "scratch", ...(source?.title ? { title: source.title } : {}),
+    archived: false, hidden: false, memoryDisposition: "scratch", ...(source?.title ? { title: source.title } : {}), ...(source?.project ? { project: source.project } : {}),
     ...(source?.parentRecordId && source.forkedFromMessageId ? { parentRecordId: source.parentRecordId, forkedFromMessageId: source.forkedFromMessageId } : {}) };
   const directory = assertWithin(dataRoot, join(dataRoot, "sessions", agentId, recordId));
   await mkdir(directory, { recursive: true, mode: 0o700 });
