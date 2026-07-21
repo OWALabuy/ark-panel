@@ -3,7 +3,7 @@
 > 为 Claude agent 自建一个具有 claude.ai 会话管理体验的 Web 面板。
 > **范围更新（2026-07-17）：**当前实现已为 panel 自建 / fork 会话提供 A 类面板原生命令与 C 类只读命令（`/commands`、`/help`、`/status`、`/models`、`/tools`、`/usage`）。普通消息接口仍永久拒绝以 `/` 开头的输入，命令只走独立结构化派发接口。真实 active 会话与 reset 归档保持只读。完整范围见 [`decisions/slash-commands.md`](decisions/slash-commands.md)。
 > 本文档记录当前有效的需求、设计决定和实现依据，供 Owl 与 Codex 共同维护。
-> 最近更新 2026-07-15（补充 Markdown 数学公式渲染及其静态资源与安全边界；后端行为已经过实际环境验证，见 §5）。
+> 最近更新 2026-07-21（重定记忆模块语义：所有会话读取既有记忆，仅 eligible 会话进入可审阅的显式沉淀流程；后端既有行为见 §5）。
 >
 > 历史说明：2026-07-08 曾评估第三方面板 ClawGPT 并写过一版方案。旧版关于设备身份验证和实现方式的部分结论，已经被本轮验证推翻。旧版保留在 Git 历史中，当前实现以本文为准。
 
@@ -31,10 +31,10 @@
 12. **Markdown、数学公式渲染与复制**：消息正文按 Markdown 渲染（标题、列表、代码块、表格、链接等），并用 KaTeX 渲染行内与块级 LaTeX 数学公式；提供整条消息复制，以及代码块单独复制。Markdown 仍走安全 DOM，KaTeX 使用同源静态资源并关闭受信任命令，不引入 CDN 或新的任意 HTML/XSS 路径（与 §6.4 工具/思考块的安全渲染同一要求）。
 13. **消息时间标记**：每条消息在 UI 上显示本地时区的日期与时间（来源是 transcript entry 自带的 `timestamp`）。这是纯展示能力；**是否让模型感知“当前时间”不由面板处理**——系统提示中的时间注入由 gateway 负责，面板不改写消息内容去塞时间。
 14. **会话管理（重命名 / 归档 / 删除）**：见 §6.8。所有会话可重命名（只改面板 metadata，不动源文件）；归档与隐藏是两个正交状态（归档会话仍在归档列表可见，隐藏则从所有列表移除，见 implementation-spec §4.3）；只读会话的“删除”只能是隐藏，永不触碰源文件；面板自建会话归档后才可彻底删除。
-15. **面板记忆系统**：面板会话里的新内容基本沉淀不进 OpenClaw 原生 `MEMORY.md`（缺口），且共用 workspace 存在调试噪音渗入真实记忆的通路。首版以“会话记忆倾向标记（memory-eligible / scratch）”做控制层打底，按需再把该进记忆的内容喂给 OpenClaw 原生 promote。详见 [`decisions/panel-memory.md`](decisions/panel-memory.md)。
+15. **面板记忆系统**：所有面板会话（包括 `scratch`）都读取目标 agent 的既有记忆，保证人格与上下文连续；`memoryDisposition` 只决定当前会话能否进入面板管理的候选提炼和写入流程。只有 `eligible` 会话可在用户预览确认后写入独立的 OpenClaw 短期记忆文件，后续索引与 promote 仍交给 OpenClaw。详见 [`decisions/panel-memory.md`](decisions/panel-memory.md)。
 
 ### 范围补充（部分后续已实现）
-- **面板内看记忆**：优先级低，MVP 不做。Owl 可以直接 ssh 上去用 vim 查看 `MEMORY.md` 等文件。后续可选。
+- **面板内看记忆**：已进入记忆模块排期；首版只读列出和查看 `MEMORY.md`、`DREAMS.md` 与 `memory/**/*.md`，不开放任意 workspace 浏览或在线编辑。
 - **会话置顶（pin）**：已实现，状态只存面板 metadata；会话列表提供快捷操作。
 - **导出会话为 Markdown**：已实现当前权威分支下载，包含时间、思考与工具调用结果，不包含内部路径和隐藏 metadata。
 - **草稿与输入状态**：已实现为按 agent + session 隔离的浏览器本地草稿，不同步服务端；发送失败保留，成功后清除。浏览器也按 session 保存正在生成的 run，只有该 run 所属会话的输入框会锁定；切换到其他会话后仍可编辑其草稿。
@@ -180,17 +180,19 @@ gateway 的会话索引属于其内部状态：它仅使用进程内锁，也没
 
 ### 5.4 2a′ 的能力边界与必要约束
 
-**两种记忆归档机制的适用情况不同：**
-- **cron 归档（promote → `MEMORY.md` / REM → `DREAMS.md`）仍然有效。** 该机制以 workspace 为单位，由 cron 驱动并读取短期 recall store，不依赖推理工作区会话是否继续保留。因此，推理完成后清理工作区会话不会影响它。
-- **压缩前的 memory flush 基本不会触发。** 该机制要求活跃会话累积到压缩阈值，而本方案会在单次推理后清理工作区会话。
+**记忆读取与新内容沉淀的适用情况不同：**
+- **读取既有记忆仍然有效。** runtime 与目标 agent 共用 workspace，并保留完整 bootstrap 与 `memory_search` / `memory_get`。`scratch` 也必须走这条路径，不能切换到无记忆 workspace。
+- **面板新内容不会可靠地自动进入记忆。** 权威 transcript 在面板数据目录，OpenClaw 不会稳定扫描；一次性 runtime session 又会被清理，不能依赖 transcript sweep 的竞态。
+- **压缩前的 memory flush 基本不会触发。** 该机制要求活跃 session 累积到压缩阈值，而本方案每轮使用新的临时 session。
+- **显式沉淀走独立短期文件。** eligible 会话经增量提炼、用户确认后写入唯一的 `memory/YYYY-MM-DD-ark-panel-<batch>.md`；OpenClaw 继续负责索引、dreaming 与 promote，面板不直接编辑 `MEMORY.md` / `DREAMS.md`。
 
-**⚠️ 必须遵守的约束：** recall store 的内容来自 agent 推理期间调用 `memory_search` 的结果，并按 `workspaceDir` 归档。为保证 cron 归档持续工作，面板发起的推理必须：（1）使用**固定的 `workspaceDir`**；（2）保留完整的 prompt 和工具配置，**不得使用 `promptMode:none/minimal` 移除 `memory_search`**。默认配置已经满足这两项要求。
+**⚠️ 必须遵守的约束：** 为保证所有会话都能读取同一份既有记忆，面板发起的普通推理必须：（1）使用目标 agent 的固定共享 `workspaceDir`；（2）保留完整 prompt 和工具配置，**不得根据 `scratch` 状态使用 `promptMode:none/minimal` 或移除 `memory_search` / `memory_get`**。`memoryDisposition` 只在面板自己的沉淀 API 与任务选择器中生效。
 
 **通过 gateway RPC 可直接复用的能力：**系统提示组装；SOUL、USER、MEMORY、IDENTITY、HEARTBEAT、BOOTSTRAP 的具名注入（首轮或满足条件时）；每日记忆注入；不可信上下文隔离；`memory_search` / `memory_get` 工具装配；cron promote / REM（需满足上述约束）；指令解析和 prompt prelude。
 
 **需要面板处理或上线前验证的能力：**压缩前 memory flush 无法依赖；尚未确认 `AGENTS.md` / `TOOLS.md` 是否会自动注入，如有依赖，应由面板加入 `extraSystemPrompt`；browser、canvas、skills 等非记忆扩展机制预计可以沿用，但需逐项进行上线前测试。
 
-**由此产生的核心责任：**面板每次提供完整历史，gateway 不会持续累积并压缩同一会话，因此**长对话的截断和压缩必须由面板负责**。第一版已实现保守预算保护：在触达 gateway 前估算完整历史与本轮消息，超过可配置安全预算就返回 `CONTEXT_BUDGET_EXCEEDED`，不写 transcript，并提示从较早位置 fork；不会静默截断或伪造摘要。后续仍需设计正式压缩策略。若需保留相关记忆，应在压缩点执行一次侧重 `memory_search` 的推理，以补充记忆归档。
+**由此产生的核心责任：**面板每次提供完整历史，gateway 不会持续累积并压缩同一会话，因此**长对话的截断和压缩必须由面板负责**。第一版已实现保守预算保护：在触达 gateway 前估算完整历史与本轮消息，超过可配置安全预算就返回 `CONTEXT_BUDGET_EXCEEDED`，不写 transcript，并提示从较早位置 fork；不会静默截断或伪造摘要。后续仍需设计正式压缩策略。压缩 eligible 会话前可以提示用户运行显式记忆整理，但压缩本身不得绕过确认流程，更不能沉淀 scratch 会话。
 
 #### 5.4.1 附件与产出文件边界
 
@@ -297,7 +299,8 @@ gateway 的会话索引属于其内部状态：它仅使用进程内锁，也没
 | 发消息 | 调 `chat.send` | 直接 |
 | 停止生成 | 调 `chat.abort` / `sessions.abort` | 直接 |
 | 拉历史 / 实时更新 | `chat.history` + `sessions.messages.subscribe` | 直接 |
-| 看记忆 | 服务端直接读 workspace 文件(`~/claude/MEMORY.md` 等) | 直接 |
+| 看记忆 | 服务端只读 allowlist 内的 `MEMORY.md`、`DREAMS.md`、`memory/**/*.md`，拒绝客户端路径 | 中，需路径与内容安全边界 |
+| 整理进记忆 | eligible 会话增量提炼 → 预览确认 → 唯一短期记忆文件 → OpenClaw 索引/promote | 中，需 ledger/checkpoint 与失败恢复 |
 | **列全部会话(含 reset)** | **服务端自己扫 `sessions/` 目录**建索引 | 中,规律清晰 |
 | **从任意点 fork** | 面板截取对话前缀并创建新的 transcript 分支，见 §5 | 重，核心功能 |
 | **编辑重发** | 同 fork 一套机制 | 重,与 fork 同源 |

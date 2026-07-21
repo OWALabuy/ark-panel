@@ -75,8 +75,9 @@ Legend: ✅ available · 🚧 scheduled · 💡 candidate (not scheduled) · ⛔
 | Commands | `/model`, `/think`, `/reasoning`, `/new` | ✅ | Panel-native structured operations; command text is never forwarded as a normal prompt |
 | Commands | `/commands`, `/help`, `/status`, `/models`, `/tools`, `/usage` | ✅ | Read-only structured command API with a default-deny allowlist; tools are the configured runtime catalog, while usage is model-reported data for the current transcript branch |
 | Commands | `/reset`, `/bash`, config/restart, and arbitrary passthrough | ⛔ | Deliberately excluded because of lifecycle, host, and gateway safety risks |
-| Memory | Store per-session `scratch` / `eligible` disposition | ✅ | Defaults to `scratch`; the control is not exposed in the UI yet |
-| Memory | Memory-disposition UI and scratch isolation during inference | 🚧 | Isolation behavior will be selected through `paneltest` runtime acceptance |
+| Memory | Store per-session `scratch` / `eligible` disposition | ✅ | Defaults to `scratch`; both states read the target agent's existing memory, while only eligible conversations may enter panel-managed consolidation; the control is not exposed yet |
+| Memory | Disposition UI and read-only memory center | 🚧 | Cross-device “do not consolidate / allow consolidation” control plus safe viewing of `MEMORY.md`, `DREAMS.md`, and daily notes; no arbitrary paths or inline editing |
+| Memory | Incremental consolidation for eligible conversations | 🚧 | Manually distills unprocessed messages, previews them for confirmation, then writes a separate short-term note; OpenClaw keeps ownership of indexing and promotion |
 | Appearance | Switchable themes with named accent colors | ✅ | System/light/dark plus Gruvbox hard/medium/soft in light and dark variants; account-level and cross-device; all shipped accent pairs meet WCAG AA |
 | Appearance | Settings drawer | ✅ | Gear opens Appearance / Reading directly; logout stays in the footer; account preferences persist server-side |
 | Appearance | Custom per-agent avatars | ✅ | Previewed 1:1 crop, capped raster upload, server validation/re-encoding, reset-to-default, and account-level sharing |
@@ -90,7 +91,7 @@ Legend: ✅ available · 🚧 scheduled · 💡 candidate (not scheduled) · ⛔
 | Access | In-UI password change | ⛔ | Kept CLI-only (`npm run password-hash`); logout remains at the bottom of the settings drawer |
 | Operations | Backup, integrity verification, restore, health check, and systemd example | ✅ | Includes deployment smoke and fixture-based browser acceptance coverage |
 
-The appearance, sidebar, avatar, title, conversation-status, background-completion, and bilingual-UI batches are complete. The near-term order now returns to memory-disposition UI and scratch isolation, followed by the durable long-context strategy with `/compact`. OpenClaw compatibility remains ongoing maintenance. The experience-feature rationale lives in [the UX features decision](docs/decisions/ux-features.md); detailed constraints and acceptance criteria live in the [implementation specification](docs/implementation-spec.md).
+The appearance, sidebar, avatar, title, conversation-status, background-completion, and bilingual-UI batches are complete. The near-term order is the memory-disposition UI, a read-only memory center, and reviewed incremental consolidation for eligible conversations, followed by the durable long-context strategy with `/compact`. Scratch conversations still read existing memory; they simply do not enter the panel-managed consolidation path. The detailed boundary lives in [the memory-module decision](docs/decisions/panel-memory.md). OpenClaw compatibility remains ongoing maintenance. The experience-feature rationale lives in [the UX features decision](docs/decisions/ux-features.md); detailed constraints and acceptance criteria live in the [implementation specification](docs/implementation-spec.md).
 
 ## Install and test
 

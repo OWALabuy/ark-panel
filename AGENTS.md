@@ -48,7 +48,9 @@ the panel's authoritative data model.
 - Panel transcripts and metadata are authoritative. Derived indexes must remain
   disposable and rebuildable.
 - Existing OpenClaw active and reset transcripts are read-only sources. Never
-  write to, rename, archive, or delete them.
+  write to, rename, or delete their source files. Panel-owned sidecar metadata
+  may rename, archive, or hide their representation in the panel without
+  mutating the source.
 - The panel and OpenClaw must not write the same authoritative file. Preserve
   the existing materialization and one-use runtime-session boundary.
 - Complete runs and mutable metadata must use the established atomic-write and
@@ -57,8 +59,11 @@ the panel's authoritative data model.
 - Reject symlinks, hardlinks where required, special files, path traversal, and
   paths outside configured allowlisted roots. Browser input must never select a
   host filesystem path.
-- Keep secrets, gateway credentials, message bodies, prompts, and full private
-  paths out of logs, fixtures, errors, documentation, and commits.
+- Keep secrets, gateway credentials, message bodies, prompts, and unnecessary
+  user-specific private paths out of logs, fixtures, errors, documentation, and
+  commits. When an operations or dated acceptance document needs a concrete
+  local path as evidence, include only the minimum non-secret path required and
+  never include file contents merely to prove that the path exists.
 - Preserve authentication, fixed-host/origin checks, CSRF protection, request
   limits, and same-origin asset boundaries on HTTP changes.
 - Treat the completed and validated transcript as authoritative; streaming is
