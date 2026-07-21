@@ -161,6 +161,10 @@ test("mobile navigation uses scrollable agent lists and finger-sized action menu
   assert.match(source,/quickMenu\.className="session-quick-menu"/);
   assert.match(source,/quickToggle\.setAttribute\("aria-label",t\("session\.quickActions"/);
   assert.match(source,/closest\("details"\)\?\.removeAttribute\("open"\)/);
+  assert.match(source,/function positionQuickSessionMenu\(menu\)/);
+  assert.match(source,/menu\.scrollIntoView\(\{block:"nearest"\}\)/);
+  assert.match(source,/menu\.classList\.toggle\("opens-up"/);
+  assert.match(styles,/\.session-quick-menu\.opens-up \.session-quick-actions\{top:auto;bottom:46px\}/);
   assert.match(styles,/\.session-row\{display:grid;grid-template-columns:minmax\(0,1fr\) auto;position:relative\}/);
   assert.match(styles,/\.session-quick-menu>summary\{[^}]*width:44px;height:44px/);
   assert.match(styles,/\.session-quick-action\{min-height:44px/);
