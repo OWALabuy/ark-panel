@@ -158,6 +158,23 @@ test("mobile navigation uses scrollable agent lists and finger-sized action menu
   assert.match(styles,/\.composer-foot \.attach-file,\.composer-foot #send\{width:44px;height:44px\}/);
 });
 
+test("mobile viewport follows software keyboards, safe areas, and browser history", async () => {
+  const source=await readFile("src/frontend/app.js","utf8");
+  const html=await readFile("src/frontend/index.html","utf8");
+  const styles=await readFile("src/frontend/styles.css","utf8");
+
+  assert.match(html,/viewport-fit=cover,interactive-widget=resizes-content/);
+  assert.match(source,/function viewportMetrics\(\)/);
+  assert.match(source,/--visual-viewport-height/);
+  assert.match(source,/globalThis\.visualViewport\?\.addEventListener\("resize"/);
+  assert.match(source,/history\.pushState\(\{\.\.\.history\.state,arkPanelView:view\}/);
+  assert.match(source,/globalThis\.addEventListener\("popstate"/);
+  assert.match(source,/function backShellView/);
+  assert.match(styles,/\.shell\{position:fixed;top:var\(--visual-viewport-top\);right:0;left:0;height:var\(--visual-viewport-height\)\}/);
+  assert.match(styles,/safe-area-inset-bottom/);
+  assert.match(styles,/\.image-preview-dialog\{top:var\(--visual-viewport-top\);left:0;width:100vw;height:var\(--visual-viewport-height\);margin:0\}/);
+});
+
 test("appearance preferences are constrained, cached early, and locally scale reading content", async () => {
   const source=await readFile("src/frontend/app.js","utf8");
   const html=await readFile("src/frontend/index.html","utf8");
