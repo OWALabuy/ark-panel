@@ -77,7 +77,7 @@ Legend: ✅ available · 🚧 scheduled · 💡 candidate (not scheduled) · ⛔
 | Commands | `/reset`, `/bash`, config/restart, and arbitrary passthrough | ⛔ | Deliberately excluded because of lifecycle, host, and gateway safety risks |
 | Memory | Store per-session `scratch` / `eligible` disposition | ✅ | Defaults to `scratch`; both states read the target agent's existing memory, while only eligible conversations may enter panel-managed consolidation; the control is not exposed yet |
 | Memory | Disposition UI and read-only memory center | 🚧 | Cross-device “do not consolidate / allow consolidation” control plus safe viewing of `MEMORY.md`, `DREAMS.md`, and daily notes; no arbitrary paths or inline editing |
-| Memory | Incremental consolidation for eligible conversations | 🚧 | Manually distills unprocessed messages, previews them for confirmation, then writes a separate short-term note; OpenClaw keeps ownership of indexing and promotion |
+| Memory | Incremental consolidation for eligible conversations | 🚧 | Uses the same effective model in a separate side-effect-free session whose internal trace never enters chat context; after whole-draft review, writes a separate short-term note |
 | Appearance | Switchable themes with named accent colors | ✅ | System/light/dark plus Gruvbox hard/medium/soft in light and dark variants; account-level and cross-device; all shipped accent pairs meet WCAG AA |
 | Appearance | Settings drawer | ✅ | Gear opens Appearance / Reading directly; logout stays in the footer; account preferences persist server-side |
 | Appearance | Custom per-agent avatars | ✅ | Previewed 1:1 crop, capped raster upload, server validation/re-encoding, reset-to-default, and account-level sharing |
