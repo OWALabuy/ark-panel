@@ -144,6 +144,20 @@ test("mobile conversation actions collapse and command menu stays inside the sho
   assert.match(styles,/\.commands\{max-height:min\(320px,calc\(100dvh - 190px\)\)\}/);
 });
 
+test("mobile navigation uses scrollable agent lists and finger-sized action menus", async () => {
+  const source=await readFile("src/frontend/app.js","utf8");
+  const styles=await readFile("src/frontend/styles.css","utf8");
+
+  assert.match(source,/quickMenu\.className="session-quick-menu"/);
+  assert.match(source,/quickToggle\.setAttribute\("aria-label",t\("session\.quickActions"/);
+  assert.match(source,/closest\("details"\)\?\.removeAttribute\("open"\)/);
+  assert.match(styles,/\.session-row\{display:grid;grid-template-columns:minmax\(0,1fr\) auto;position:relative\}/);
+  assert.match(styles,/\.session-quick-menu>summary\{[^}]*width:44px;height:44px/);
+  assert.match(styles,/\.session-quick-action\{min-height:44px/);
+  assert.match(styles,/\.agents nav\{flex:1;min-height:0;overflow-y:auto;padding-bottom:72px\}/);
+  assert.match(styles,/\.composer-foot \.attach-file,\.composer-foot #send\{width:44px;height:44px\}/);
+});
+
 test("appearance preferences are constrained, cached early, and locally scale reading content", async () => {
   const source=await readFile("src/frontend/app.js","utf8");
   const html=await readFile("src/frontend/index.html","utf8");
