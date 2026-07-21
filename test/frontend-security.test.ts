@@ -305,7 +305,7 @@ test("agent avatars are cropped client-side and uploaded with CSRF protection", 
   assert.match(source,/fetch\(avatarUrl\(agentId\),\{method,body,headers:\{"x-csrf-token":csrf/);
   assert.match(source,/avatarRequest\(agentId,"PUT",blob\)/);
   assert.match(source,/avatarRequest\(agentId,"DELETE"\)/);
-  assert.match(server,/img-src 'self' blob:/);
+  assert.match(server,/img-src 'self' blob: https: http:/);
 });
 
 test("composer uploads raw attachments and preserves their ids for idempotent run recovery", async () => {
