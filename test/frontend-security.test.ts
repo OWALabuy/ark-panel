@@ -130,6 +130,16 @@ test("mobile conversation keeps a constrained touch-scroll viewport", async () =
   assert.match(styles,/\.messages\{padding:25px 18px;overscroll-behavior-y:contain;-webkit-overflow-scrolling:touch;touch-action:pan-y\}/);
 });
 
+test("coarse-pointer keyboards insert new lines instead of submitting", async () => {
+  const source=await readFile("src/frontend/app.js","utf8");
+  const zh=await readFile("src/frontend/i18n/zh-CN.js","utf8");
+
+  assert.match(source,/const coarsePointer=globalThis\.matchMedia\("\(hover:none\), \(pointer:coarse\)"\)/);
+  assert.match(source,/event\.key==="Enter"&&!event\.shiftKey&&!event\.isComposing&&!coarsePointer\.matches/);
+  assert.match(source,/coarsePointer\.matches\?"composer\.mobileHint"/);
+  assert.match(zh,/"composer\.mobileHint":"回车换行 · 点击 ↑ 发送/);
+});
+
 test("mobile conversation actions collapse and command menu stays inside the short viewport", async () => {
   const source=await readFile("src/frontend/app.js","utf8");
   const html=await readFile("src/frontend/index.html","utf8");
