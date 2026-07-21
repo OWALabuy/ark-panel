@@ -121,6 +121,15 @@ test("generation state only locks the composer for its own session", async () =>
   assert.match(source,/if\(activeSession!==run\.recordId\)return;syncActiveRun\(\)/);
 });
 
+test("mobile conversation keeps a constrained touch-scroll viewport", async () => {
+  const styles=await readFile("src/frontend/styles.css","utf8");
+
+  assert.match(styles,/\.shell\{height:100vh;height:100dvh;/);
+  assert.match(styles,/@media\(max-width:760px\)\{/);
+  assert.match(styles,/\.agents,\.sessions,\.shell \.conversation\{position:absolute;inset:0;border:0\}/);
+  assert.match(styles,/\.messages\{padding:25px 18px;overscroll-behavior-y:contain;-webkit-overflow-scrolling:touch;touch-action:pan-y\}/);
+});
+
 test("appearance preferences are constrained, cached early, and locally scale reading content", async () => {
   const source=await readFile("src/frontend/app.js","utf8");
   const html=await readFile("src/frontend/index.html","utf8");
