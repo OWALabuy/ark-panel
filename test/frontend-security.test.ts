@@ -156,6 +156,7 @@ test("mobile navigation uses scrollable agent lists and finger-sized action menu
   assert.match(styles,/\.session-quick-action\{min-height:44px/);
   assert.match(styles,/\.agents nav\{flex:1;min-height:0;overflow-y:auto;padding-bottom:72px\}/);
   assert.match(styles,/\.composer-foot \.attach-file,\.composer-foot #send\{width:44px;height:44px\}/);
+  assert.match(styles,/\.composer-foot #send\{flex:none\}/);
 });
 
 test("mobile viewport follows software keyboards, safe areas, and browser history", async () => {
