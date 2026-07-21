@@ -130,6 +130,20 @@ test("mobile conversation keeps a constrained touch-scroll viewport", async () =
   assert.match(styles,/\.messages\{padding:25px 18px;overscroll-behavior-y:contain;-webkit-overflow-scrolling:touch;touch-action:pan-y\}/);
 });
 
+test("mobile conversation actions collapse and command menu stays inside the short viewport", async () => {
+  const source=await readFile("src/frontend/app.js","utf8");
+  const html=await readFile("src/frontend/index.html","utf8");
+  const styles=await readFile("src/frontend/styles.css","utf8");
+
+  assert.match(html,/id="session-actions-toggle"[^>]*aria-haspopup="menu"[^>]*aria-controls="session-actions"/);
+  assert.match(source,/function closeSessionActions/);
+  assert.match(source,/function toggleSessionActions/);
+  assert.match(source,/sessionActions\.classList\.contains\("mobile-open"\)/);
+  assert.match(styles,/\.session-actions\.mobile-open\{display:grid;grid-template-columns:1fr 1fr\}/);
+  assert.match(styles,/\.conversation-status\{display:none!important\}/);
+  assert.match(styles,/\.commands\{max-height:min\(320px,calc\(100dvh - 190px\)\)\}/);
+});
+
 test("appearance preferences are constrained, cached early, and locally scale reading content", async () => {
   const source=await readFile("src/frontend/app.js","utf8");
   const html=await readFile("src/frontend/index.html","utf8");
