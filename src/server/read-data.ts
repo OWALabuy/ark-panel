@@ -17,6 +17,7 @@ export interface ConversationRecord {
   recordId: string; agentId: string; sourceKind: "active" | "reset" | "panel"; sourceKey: string;
   revision: string; updatedAt: string; messageCount: number; title: string;
   archived: boolean; hidden: boolean; pinned: boolean; project?: string;
+  memoryDisposition: "eligible" | "scratch";
 }
 
 export interface ConversationStatus {
@@ -108,7 +109,8 @@ export class SessionReadData {
       records.push({ recordId: externalRecordId(agent.agentId, sourceKind, sourceKey), agentId: agent.agentId, sourceKind, sourceKey,
         revision: `${stat.size}:${stat.mtimeMs}`, updatedAt: stat.mtime.toISOString(), messageCount: document.entries.filter(entry => entry.type === "message").length,
         title: metadata.title ?? documentTitle(document), archived: metadata.archived, hidden: metadata.hidden,
-        pinned: metadata.pinned ?? false, ...(metadata.project ? { project: metadata.project } : {}) });
+        pinned: metadata.pinned ?? false, memoryDisposition: metadata.memoryDisposition,
+        ...(metadata.project ? { project: metadata.project } : {}) });
     }
     return records;
   }
@@ -121,7 +123,8 @@ export class SessionReadData {
       result.push({ recordId: metadata.recordId, agentId, sourceKind: "panel", sourceKey: metadata.recordId,
         revision: `${stat.size}:${stat.mtimeMs}`, updatedAt: stat.mtime.toISOString(), messageCount: loaded.document.entries.filter(entry => entry.type === "message").length,
         title: metadata.title ?? documentTitle(loaded.document), archived: metadata.archived ?? false, hidden: metadata.hidden ?? false,
-        pinned: metadata.pinned ?? false, ...(metadata.project ? { project: metadata.project } : {}) });
+        pinned: metadata.pinned ?? false, memoryDisposition: metadata.memoryDisposition ?? "scratch",
+        ...(metadata.project ? { project: metadata.project } : {}) });
     }
     return result;
   }
@@ -210,18 +213,18 @@ export class SessionReadData {
     return matches;
   }
 
-  async updateSession(recordId: string, patch: { title?: string; archived?: boolean; pinned?: boolean; project?: string | null }): Promise<ConversationRecord> {
-    if (patch.title === undefined && patch.archived === undefined && patch.pinned === undefined && patch.project === undefined) throw new Error("SESSION_UPDATE_EMPTY");
+  async updateSession(recordId: string, patch: { title?: string; archived?: boolean; pinned?: boolean; project?: string | null; memoryDisposition?: "eligible" | "scratch" }): Promise<ConversationRecord> {
+    if (patch.title === undefined && patch.archived === undefined && patch.pinned === undefined && patch.project === undefined && patch.memoryDisposition === undefined) throw new Error("SESSION_UPDATE_EMPTY");
     const title = patch.title?.trim(); if (patch.title !== undefined && (!title || title.length > 120)) throw new Error("SESSION_TITLE_INVALID");
     const project = patch.project?.trim(); if (patch.project !== undefined && patch.project !== null && (!project || project.length > 60 || /[\u0000-\u001f\u007f]/.test(project))) throw new Error("SESSION_PROJECT_INVALID");
     const loaded = await this.load(recordId); if (!loaded) throw new Error("SESSION_NOT_FOUND");
     if (loaded.record.sourceKind === "panel") {
-      await updatePanelMetadata(this.dataRoot, loaded.record.agentId, recordId, current => { const next = { ...current, ...(title ? { title } : {}), ...(patch.archived !== undefined ? { archived: patch.archived } : {}), ...(patch.pinned !== undefined ? { pinned: patch.pinned } : {}), ...(project ? { project } : {}) }; if (patch.project === null) delete next.project; return next; });
+      await updatePanelMetadata(this.dataRoot, loaded.record.agentId, recordId, current => { const next = { ...current, ...(title ? { title } : {}), ...(patch.archived !== undefined ? { archived: patch.archived } : {}), ...(patch.pinned !== undefined ? { pinned: patch.pinned } : {}), ...(patch.memoryDisposition ? { memoryDisposition: patch.memoryDisposition } : {}), ...(project ? { project } : {}) }; if (patch.project === null) delete next.project; return next; });
     } else {
       const match = loaded.record.sourceKind === "active" ? [loaded.record.sourceKey, undefined] : (() => { const parsed = RESET.exec(loaded.record.sourceKey); return [parsed?.[1], parsed?.[2]]; })();
       if (!match[0]) throw new Error("SESSION_SOURCE_INVALID");
       const identity: ReadonlySourceIdentity = { sourceKind: loaded.record.sourceKind, agentId: loaded.record.agentId, sourceSessionId: match[0], ...(match[1] ? { resetTimestamp: match[1] } : {}) };
-      await updateReadonlyMetadata(this.dataRoot, identity, current => { const next = { ...current, ...(title ? { title } : {}), ...(patch.archived !== undefined ? { archived: patch.archived } : {}), ...(patch.pinned !== undefined ? { pinned: patch.pinned } : {}), ...(project ? { project } : {}) }; if (patch.project === null) delete next.project; return next; });
+      await updateReadonlyMetadata(this.dataRoot, identity, current => { const next = { ...current, ...(title ? { title } : {}), ...(patch.archived !== undefined ? { archived: patch.archived } : {}), ...(patch.pinned !== undefined ? { pinned: patch.pinned } : {}), ...(patch.memoryDisposition ? { memoryDisposition: patch.memoryDisposition } : {}), ...(project ? { project } : {}) }; if (patch.project === null) delete next.project; return next; });
     }
     const updated = (await this.sessions(undefined, null, true)).find(item => item.recordId === recordId); if (!updated) throw new Error("SESSION_NOT_FOUND"); return updated;
   }

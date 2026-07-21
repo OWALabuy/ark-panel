@@ -5,16 +5,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { passwordHash } from "../src/server/auth.js";
-import { createPanelServer, type AttachmentApi, type CommandApi, type GenerationApi, type ReadApi } from "../src/server/app.js";
+import { createPanelServer, type AttachmentApi, type CommandApi, type GenerationApi, type MemoryApi, type ReadApi } from "../src/server/app.js";
 import type { PublicPanelRun } from "../src/server/run-store.js";
 import { ForkError } from "../src/domain/fork.js";
 
 const testRunId="99999999-9999-4999-8999-999999999999";
 function snapshot(status:PublicPanelRun["status"]="completed",runId=testRunId):PublicPanelRun{return{runId,recordId:"record",status,sequence:1,createdAt:new Date(0).toISOString(),updatedAt:new Date(0).toISOString(),canAbort:["accepted","running","materializing"].includes(status)}}
 function fakeGeneration(overrides:Partial<GenerationApi>={}):GenerationApi{return{async create(){return snapshot("completed")},async get(){return snapshot("completed")},async subscribe(_id,listener){listener(snapshot("completed"));return()=>undefined},async abortRun(){return snapshot("aborted")},async activeForRecord(){return undefined},...overrides}}
-async function fixture(generation?: GenerationApi, reads?: ReadApi, commands?: CommandApi, attachments?: AttachmentApi) {
+async function fixture(generation?: GenerationApi, reads?: ReadApi, commands?: CommandApi, attachments?: AttachmentApi, memory?: MemoryApi) {
   const publicDir = await mkdtemp(join(tmpdir(), "panel-web-")); await writeFile(join(publicDir, "index.html"), "ok");
-  const server = createPanelServer({ auth: { username: "owl", passwordHash: passwordHash("correct", "0011223344556677"), sessionSecret: "test-secret-long-enough" }, publicDir, mock: reads ? false : true, ...(generation ? { generation } : {}), ...(reads ? { reads } : {}), ...(commands ? { commands } : {}), ...(attachments ? { attachments } : {}) });
+  const server = createPanelServer({ auth: { username: "owl", passwordHash: passwordHash("correct", "0011223344556677"), sessionSecret: "test-secret-long-enough" }, publicDir, mock: reads ? false : true, ...(generation ? { generation } : {}), ...(reads ? { reads } : {}), ...(commands ? { commands } : {}), ...(attachments ? { attachments } : {}), ...(memory ? { memory } : {}) });
   server.listen(0, "127.0.0.1"); await once(server, "listening");
   const address = server.address(); if (!address || typeof address === "string") throw new Error("no address");
   return { server, base: `http://127.0.0.1:${address.port}` };
@@ -41,6 +41,21 @@ test("附件上传下载要求登录与 CSRF，并保持 Office 原始字节", a
   assert.equal(preview.headers.get("cache-control"), "private, no-store"); assert.deepEqual(Buffer.from(await preview.arrayBuffer()), previewBytes);
 });
 test("API rejects unauthenticated requests", async t => { const x = await fixture(); t.after(()=>x.server.close()); const r = await fetch(`${x.base}/api/v1/agents`); assert.equal(r.status, 401); });
+test("记忆中心要求登录并只委托 agentId 与相对标识", async t => {
+  const calls: string[] = [], memory: MemoryApi = {
+    async list(agentId) { calls.push(`list:${agentId}`); return [{ path: "MEMORY.md", sizeBytes: 8 }]; },
+    async read(agentId, path) { calls.push(`read:${agentId}:${path}`); return { path, content: "# safe" }; }
+  };
+  const x = await fixture(undefined, undefined, undefined, undefined, memory); t.after(() => x.server.close());
+  assert.equal((await fetch(`${x.base}/api/v1/memory?agentId=safe`)).status, 401);
+  const login = await fetch(`${x.base}/api/v1/auth/login`, { method: "POST", headers: { origin: x.base, "content-type": "application/json" }, body: JSON.stringify({ username: "owl", password: "correct" }) });
+  const cookies = login.headers.getSetCookie().map(value => value.split(";", 1)[0]).join("; ");
+  assert.equal((await fetch(`${x.base}/api/v1/memory`, { headers: { cookie: cookies } })).status, 400);
+  assert.equal((await fetch(`${x.base}/api/v1/memory?agentId=safe`, { headers: { cookie: cookies } })).status, 200);
+  const file = await fetch(`${x.base}/api/v1/memory/file?agentId=safe&path=${encodeURIComponent("memory/2026-07-22.md")}`, { headers: { cookie: cookies } });
+  assert.equal(file.status, 200); assert.equal(file.headers.get("cache-control"), "no-store");
+  assert.deepEqual(calls, ["list:safe", "read:safe:memory/2026-07-22.md"]);
+});
 test("non-mock reads are delegated without connecting a real agent", async t => {
   const reads:ReadApi={async agents(){return [{id:"safe"}]},async sessions(agentId){assert.equal(agentId,"safe");return [{recordId:"record"}]},async projects(agentId){assert.equal(agentId,"safe");return["Project"]},async conversation(recordId){assert.equal(recordId,"record");return {title:"safe"}}}; const x=await fixture(undefined,reads);t.after(()=>x.server.close());
   const login=await fetch(`${x.base}/api/v1/auth/login`,{method:"POST",headers:{origin:x.base,"content-type":"application/json"},body:JSON.stringify({username:"owl",password:"correct"})});const cookies=login.headers.getSetCookie().map(value=>value.split(";",1)[0]).join("; ");

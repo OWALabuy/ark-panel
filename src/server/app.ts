@@ -36,11 +36,12 @@ export interface ReadApi {
   fork?(recordId: string, messageId: string): Promise<unknown>;
   editAndFork?(recordId: string, messageId: string, replacement: string): Promise<unknown>;
   createPanel?(agentId: string, title?: string): Promise<unknown>;
-  updateSession?(recordId: string, patch: { title?: string; archived?: boolean; pinned?: boolean; project?: string | null }): Promise<unknown>;
+  updateSession?(recordId: string, patch: { title?: string; archived?: boolean; pinned?: boolean; project?: string | null; memoryDisposition?: "eligible" | "scratch" }): Promise<unknown>;
   deleteSession?(recordId: string, confirmed: boolean): Promise<unknown>;
   exportMarkdown?(recordId: string): Promise<{ filename: string; markdown: string } | null>;
 }
-export interface AppOptions { auth: AuthConfig; publicDir: string; mock?: boolean; now?: () => number; generation?: GenerationApi; commands?: CommandApi; reads?: ReadApi; experience?: ExperienceApi; attachments?: AttachmentApi; allowedHosts?: readonly string[]; publicOrigins?: readonly string[] }
+export interface MemoryApi { list(agentId: string): Promise<unknown[]>; read(agentId: string, path: string): Promise<unknown> }
+export interface AppOptions { auth: AuthConfig; publicDir: string; mock?: boolean; now?: () => number; generation?: GenerationApi; commands?: CommandApi; reads?: ReadApi; experience?: ExperienceApi; attachments?: AttachmentApi; memory?: MemoryApi; allowedHosts?: readonly string[]; publicOrigins?: readonly string[] }
 const jsonHeaders = { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" };
 function send(res: ServerResponse, status: number, body: unknown, headers = {}): void { res.writeHead(status, { ...jsonHeaders, ...headers }); res.end(JSON.stringify(body)); }
 function fail(res: ServerResponse, status: number, code: string, message: string, requestId: string): void { send(res, status, { error: { code, message, requestId } }); }
@@ -140,6 +141,18 @@ export function createPanelServer(options: AppOptions) {
           res.end(file.bytes); return;
         }
         if (req.method === "GET" && url.pathname === "/api/v1/agents") return send(res, 200, { data: options.mock ? mockAgents : await options.reads?.agents() ?? [] });
+        if (req.method === "GET" && url.pathname === "/api/v1/memory") {
+          if (!options.memory) return fail(res, 501, "MEMORY_NOT_CONNECTED", "记忆中心尚未接入", requestId);
+          const agentId = url.searchParams.get("agentId"); if (!agentId) return fail(res, 400, "AGENT_REQUIRED", "需要指定 Agent", requestId);
+          return send(res, 200, { data: await options.memory.list(agentId) });
+        }
+        if (req.method === "GET" && url.pathname === "/api/v1/memory/file") {
+          if (!options.memory) return fail(res, 501, "MEMORY_NOT_CONNECTED", "记忆中心尚未接入", requestId);
+          const agentId = url.searchParams.get("agentId"), path = url.searchParams.get("path");
+          if (!agentId) return fail(res, 400, "AGENT_REQUIRED", "需要指定 Agent", requestId);
+          if (!path) return fail(res, 400, "MEMORY_PATH_REQUIRED", "需要指定记忆文件", requestId);
+          return send(res, 200, { data: await options.memory.read(agentId, path) });
+        }
         if (req.method === "GET" && url.pathname === "/api/v1/sessions") { const agentId = url.searchParams.get("agentId") ?? undefined, archivedValue = url.searchParams.get("archived"); if (archivedValue !== null && !["true", "false"].includes(archivedValue)) return fail(res, 400, "ARCHIVED_FILTER_INVALID", "归档筛选格式无效", requestId); const archived = archivedValue === null ? false : archivedValue === "true"; return send(res, 200, { data: options.mock ? mockSessions.filter(s => !agentId || s.agentId === agentId) : await options.reads?.sessions(agentId, archived) ?? [] }); }
         if (req.method === "GET" && url.pathname === "/api/v1/projects") { const agentId = url.searchParams.get("agentId"); if (!agentId) return fail(res, 400, "AGENT_REQUIRED", "需要指定 Agent", requestId); return send(res, 200, { data: options.mock ? [] : await options.reads?.projects?.(agentId) ?? [] }); }
         if (req.method === "GET" && url.pathname === "/api/v1/revisions") { const agentId = url.searchParams.get("agentId") ?? undefined; const records = options.mock ? mockSessions : await options.reads?.sessions(agentId) ?? []; return send(res, 200, { data: (records as Array<Record<string, unknown>>).map(item => ({ recordId: item.recordId, revision: item.revision, updatedAt: item.updatedAt })) }); }
@@ -151,13 +164,14 @@ export function createPanelServer(options: AppOptions) {
         }
         if (req.method === "PATCH" && /^\/api\/v1\/sessions\/[^/]+$/.test(url.pathname)) {
           if (!options.reads?.updateSession) return fail(res, 501, "DATA_NOT_CONNECTED", "数据层尚未接入", requestId);
-          const value = await body(req) as { title?: unknown; archived?: unknown; pinned?: unknown; project?: unknown };
-          if (value.title === undefined && value.archived === undefined && value.pinned === undefined && value.project === undefined) return fail(res, 400, "SESSION_UPDATE_EMPTY", "没有需要修改的字段", requestId);
+          const value = await body(req) as { title?: unknown; archived?: unknown; pinned?: unknown; project?: unknown; memoryDisposition?: unknown };
+          if (value.title === undefined && value.archived === undefined && value.pinned === undefined && value.project === undefined && value.memoryDisposition === undefined) return fail(res, 400, "SESSION_UPDATE_EMPTY", "没有需要修改的字段", requestId);
           if (value.title !== undefined && (typeof value.title !== "string" || !value.title.trim() || value.title.trim().length > 120)) return fail(res, 400, "SESSION_TITLE_INVALID", "标题格式无效", requestId);
           if (value.archived !== undefined && typeof value.archived !== "boolean") return fail(res, 400, "SESSION_ARCHIVED_INVALID", "归档状态格式无效", requestId);
           if (value.pinned !== undefined && typeof value.pinned !== "boolean") return fail(res, 400, "SESSION_PINNED_INVALID", "置顶状态格式无效", requestId);
           if (value.project !== undefined && value.project !== null && (typeof value.project !== "string" || !value.project.trim() || value.project.trim().length > 60 || /[\u0000-\u001f\u007f]/.test(value.project))) return fail(res, 400, "SESSION_PROJECT_INVALID", "project 格式无效", requestId);
-          const recordId = decodeURIComponent(url.pathname.slice("/api/v1/sessions/".length)); return send(res, 200, { data: await options.reads.updateSession(recordId, { ...(typeof value.title === "string" ? { title: value.title.trim() } : {}), ...(typeof value.archived === "boolean" ? { archived: value.archived } : {}), ...(typeof value.pinned === "boolean" ? { pinned: value.pinned } : {}), ...(typeof value.project === "string" || value.project === null ? { project: value.project } : {}) }) });
+          if (value.memoryDisposition !== undefined && !["eligible", "scratch"].includes(String(value.memoryDisposition))) return fail(res, 400, "MEMORY_DISPOSITION_INVALID", "记忆处置状态格式无效", requestId);
+          const recordId = decodeURIComponent(url.pathname.slice("/api/v1/sessions/".length)); return send(res, 200, { data: await options.reads.updateSession(recordId, { ...(typeof value.title === "string" ? { title: value.title.trim() } : {}), ...(typeof value.archived === "boolean" ? { archived: value.archived } : {}), ...(typeof value.pinned === "boolean" ? { pinned: value.pinned } : {}), ...(typeof value.project === "string" || value.project === null ? { project: value.project } : {}), ...(value.memoryDisposition === "eligible" || value.memoryDisposition === "scratch" ? { memoryDisposition: value.memoryDisposition } : {}) }) });
         }
         if (req.method === "DELETE" && /^\/api\/v1\/sessions\/[^/]+$/.test(url.pathname)) {
           if (!options.reads?.deleteSession) return fail(res, 501, "DATA_NOT_CONNECTED", "数据层尚未接入", requestId);
@@ -251,7 +265,7 @@ export function createPanelServer(options: AppOptions) {
       try { const [root, resolved] = await Promise.all([realpath(options.publicDir), realpath(file)]); const fromRoot = relative(root, resolved); if (fromRoot === ".." || fromRoot.startsWith(`..${sep}`) || fromRoot.startsWith(sep)) throw new Error("STATIC_PATH_ESCAPE"); const data = await readFile(resolved); res.writeHead(200, { "content-type": types[extname(resolved)] ?? "application/octet-stream", "cache-control": pathname === "index.html" ? "no-store" : "public, max-age=3600", "x-content-type-options": "nosniff", "content-security-policy": "default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' blob: https: http:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'" }); res.end(data); }
       catch { fail(res, 404, "NOT_FOUND", "页面不存在", requestId); }
     } catch (error) {
-      const known: Record<string, [number, string]> = { AGENT_NOT_ALLOWED: [403, "Agent 不在允许列表中"], SETTINGS_INVALID: [400, "设置格式无效"], SETTINGS_UPDATE_EMPTY: [400, "没有需要修改的设置"], SETTINGS_CORRUPT: [500, "设置存储已损坏"], PANEL_STORAGE_UNSAFE: [500, "设置存储暂不可用"], AVATAR_STORAGE_INVALID: [500, "头像存储异常，请重新上传头像"], AVATAR_TOO_LARGE: [413, "头像文件不能超过 5 MiB"], AVATAR_INVALID: [400, "头像必须是有效的 PNG、JPEG 或 WebP，且不超过 4096×4096"], ATTACHMENT_PREVIEW_UNSUPPORTED: [415, "该附件不是可安全预览的 PNG、JPEG 或 WebP 图片"], SESSION_NOT_FOUND: [404, "会话不存在"], SESSION_UPDATE_EMPTY: [400, "没有需要修改的字段"], SESSION_TITLE_INVALID: [400, "标题格式无效"], SESSION_DELETE_CONFIRMATION_REQUIRED: [400, "删除需要明确确认"], SESSION_NOT_ARCHIVED: [409, "面板会话必须先归档才能彻底删除"], PANEL_SESSION_DELETE_UNSAFE: [409, "会话目录包含未知内容，已拒绝删除"], PANEL_SESSION_NOT_FOUND: [404, "面板会话不存在"], EDIT_TARGET_NOT_USER: [409, "只能编辑用户消息"], PANEL_SESSION_CREATE_FAILED: [500, "面板会话创建失败"], COMMAND_NOT_ALLOWED: [403, "该命令未获面板允许"], COMMAND_ARGS_INVALID: [400, "命令参数无效"], MODEL_NOT_AVAILABLE: [400, "模型不可用"], THINKING_LEVEL_INVALID: [400, "思考等级无效"], THINKING_LEVEL_UNSUPPORTED: [409, "当前模型不支持该思考等级"], REASONING_LEVEL_INVALID: [400, "推理显示模式无效"], IDEMPOTENCY_KEY_REUSED: [409, "重试标识已用于其他请求"], SESSION_BUSY: [409, "该会话正在生成"] };
+      const known: Record<string, [number, string]> = { AGENT_NOT_ALLOWED: [403, "Agent 不在允许列表中"], SETTINGS_INVALID: [400, "设置格式无效"], SETTINGS_UPDATE_EMPTY: [400, "没有需要修改的设置"], SETTINGS_CORRUPT: [500, "设置存储已损坏"], PANEL_STORAGE_UNSAFE: [500, "设置存储暂不可用"], AVATAR_STORAGE_INVALID: [500, "头像存储异常，请重新上传头像"], AVATAR_TOO_LARGE: [413, "头像文件不能超过 5 MiB"], AVATAR_INVALID: [400, "头像必须是有效的 PNG、JPEG 或 WebP，且不超过 4096×4096"], ATTACHMENT_PREVIEW_UNSUPPORTED: [415, "该附件不是可安全预览的 PNG、JPEG 或 WebP 图片"], SESSION_NOT_FOUND: [404, "会话不存在"], SESSION_UPDATE_EMPTY: [400, "没有需要修改的字段"], SESSION_TITLE_INVALID: [400, "标题格式无效"], SESSION_DELETE_CONFIRMATION_REQUIRED: [400, "删除需要明确确认"], SESSION_NOT_ARCHIVED: [409, "面板会话必须先归档才能彻底删除"], PANEL_SESSION_DELETE_UNSAFE: [409, "会话目录包含未知内容，已拒绝删除"], PANEL_SESSION_NOT_FOUND: [404, "面板会话不存在"], EDIT_TARGET_NOT_USER: [409, "只能编辑用户消息"], PANEL_SESSION_CREATE_FAILED: [500, "面板会话创建失败"], COMMAND_NOT_ALLOWED: [403, "该命令未获面板允许"], COMMAND_ARGS_INVALID: [400, "命令参数无效"], MODEL_NOT_AVAILABLE: [400, "模型不可用"], THINKING_LEVEL_INVALID: [400, "思考等级无效"], THINKING_LEVEL_UNSUPPORTED: [409, "当前模型不支持该思考等级"], REASONING_LEVEL_INVALID: [400, "推理显示模式无效"], IDEMPOTENCY_KEY_REUSED: [409, "重试标识已用于其他请求"], SESSION_BUSY: [409, "该会话正在生成"], MEMORY_AGENT_NOT_CONFIGURED: [404, "该 Agent 未配置可读取的 workspace"], MEMORY_PATH_NOT_ALLOWED: [403, "记忆文件不在允许范围内"], MEMORY_FILE_NOT_FOUND: [404, "记忆文件不存在"], MEMORY_FILE_TOO_LARGE: [413, "记忆文件超过读取上限"], MEMORY_FILE_LIMIT_EXCEEDED: [413, "记忆文件数量超过读取上限"], MEMORY_FILE_UNSAFE: [409, "记忆文件不安全，已拒绝读取"], MEMORY_WORKSPACE_UNSAFE: [409, "记忆 workspace 不安全，已拒绝读取"] };
       const code = error instanceof ForkError ? error.code : error instanceof Error ? error.message : "INVALID_REQUEST"; const mapped = known[code];
       const status = error instanceof HttpError ? error.status : error instanceof SyntaxError ? 400 : error instanceof ForkError ? 409 : mapped?.[0] ?? 500;
       fail(res, status, error instanceof HttpError ? error.code : error instanceof ForkError ? error.code : mapped ? code : "INVALID_REQUEST", error instanceof ForkError ? error.message : mapped?.[1] ?? "请求无法处理", requestId);

@@ -11,6 +11,7 @@ import { SessionOperationCoordinator } from "./session-operation.js";
 import { ExperienceStore } from "./experience-store.js";
 import { loadGatewayStreamAuth, OpenClawStreamObserver } from "../gateway/stream-client.js";
 import { PanelAttachmentApi } from "./attachment-api.js";
+import { PanelMemoryApi } from "./memory-api.js";
 
 const config = parsePanelConfig(process.env, import.meta.url); await validateAndInitializeConfig(config);
 const contextBudget = new ConservativeContextBudget(config.contextHistoryBudgetTokens);
@@ -55,9 +56,12 @@ const commandApi = config.dataRoot && readApi ? new PanelCommandApi(config.dataR
 }, operations) : undefined;
 const allowedHosts = [`127.0.0.1:${config.port}`, `localhost:${config.port}`];
 const attachments = config.dataRoot && config.runtimes.size ? new PanelAttachmentApi(config.dataRoot, [...config.runtimes.keys()]) : undefined;
+const memoryWorkspaces = new Map<string, string>();
+for (const [agentId, runtime] of config.runtimes) if (runtime.workspaceRoot) memoryWorkspaces.set(agentId, runtime.workspaceRoot);
+const memory = memoryWorkspaces.size ? new PanelMemoryApi(memoryWorkspaces) : undefined;
 const server = createPanelServer({ auth: { username: config.username, passwordHash: config.passwordHash, sessionSecret: config.sessionSecret, secureCookie: config.secureCookie },
   publicDir: config.publicDir, mock: config.mock, allowedHosts, publicOrigins: allowedHosts.map(value => `http://${value}`),
-  ...(generationApi ? { generation: generationApi } : {}), ...(commandApi ? { commands: commandApi } : {}), ...(readApi ? { reads: readApi } : {}), ...(experience ? { experience } : {}), ...(attachments ? { attachments } : {}) });
+  ...(generationApi ? { generation: generationApi } : {}), ...(commandApi ? { commands: commandApi } : {}), ...(readApi ? { reads: readApi } : {}), ...(experience ? { experience } : {}), ...(attachments ? { attachments } : {}), ...(memory ? { memory } : {}) });
 server.listen(config.port, config.host, () => process.stdout.write(`会话面板监听 http://${config.host}:${config.port}\n`));
 
 let stopping = false;
