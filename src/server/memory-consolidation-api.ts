@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { TranscriptDocument, JsonObject } from "../domain/transcript.js";
 import type { BridgeService } from "../gateway/bridge-service.js";
-import type { ConfiguredToolsCatalog } from "../gateway/adapter.js";
+import type { EffectiveToolsInventory } from "../gateway/adapter.js";
 import { workspaceSnapshot } from "../gateway/runtime-acceptance.js";
 import { MemoryConsolidationStore, type MemoryCandidate, type MemoryLedgerEntry } from "../storage/memory-consolidation.js";
 import type { MemoryConversationSource } from "./read-data.js";
@@ -9,7 +9,7 @@ import type { MemoryConversationSource } from "./read-data.js";
 const READ_ONLY_TOOLS = new Set(["memory_search", "memory_get"]);
 export interface MemorySourceProvider { memorySource(recordId: string): Promise<MemoryConversationSource | undefined> }
 export interface MemoryRuntime { runtimeAgentId: string; workspaceRoot: string }
-export interface MemoryToolProvider { configuredTools(runtimeAgentId: string): Promise<ConfiguredToolsCatalog> }
+export interface MemoryToolProvider { effectiveTools(runtimeAgentId: string, sessionKey: string): Promise<EffectiveToolsInventory> }
 
 function messageText(entry: JsonObject): string {
   const message = entry.message; if (!message || typeof message !== "object" || Array.isArray(message)) return "";
@@ -53,9 +53,9 @@ export class PanelMemoryConsolidationApi {
   private runtime(agentId: string): MemoryRuntime {
     const runtime = this.runtimes.get(agentId); if (!runtime) throw new Error("MEMORY_CONSOLIDATION_NOT_CONFIGURED"); return runtime;
   }
-  private async assertRestricted(runtimeAgentId: string): Promise<void> {
-    const catalog = await this.tools.configuredTools(runtimeAgentId), ids = catalog.groups.flatMap(group => group.tools.map(tool => tool.id));
-    if (ids.some(id => !READ_ONLY_TOOLS.has(id))) throw new Error("MEMORY_RUNTIME_NOT_RESTRICTED");
+  private async assertRestricted(runtimeAgentId: string, sessionKey: string): Promise<void> {
+    const inventory = await this.tools.effectiveTools(runtimeAgentId, sessionKey);
+    if (inventory.toolIds.some(id => !READ_ONLY_TOOLS.has(id))) throw new Error("MEMORY_RUNTIME_NOT_RESTRICTED");
   }
   private async serialized<T>(recordId: string, operation: () => Promise<T>): Promise<T> {
     const previous = this.queues.get(recordId) ?? Promise.resolve(); let release!: () => void;
@@ -66,11 +66,12 @@ export class PanelMemoryConsolidationApi {
     return await this.serialized(recordId, async () => {
       const source = await this.sources.memorySource(recordId); if (!source) throw new Error("SESSION_NOT_FOUND");
       if (source.record.memoryDisposition !== "eligible") throw new Error("MEMORY_SOURCE_NOT_ELIGIBLE");
-      const runtime = this.runtime(source.record.agentId); await this.assertRestricted(runtime.runtimeAgentId);
+      const runtime = this.runtime(source.record.agentId);
       const previousCheckpointEntryId = await this.store.checkpoint(recordId), range = fixedRange(source.document, previousCheckpointEntryId), before = await workspaceSnapshot(runtime.workspaceRoot);
       const result = await this.bridge.generate({ runtimeAgentId: runtime.runtimeAgentId, historyThroughPreviousRun: range.document,
         latestUserMessage: "整理上面的固定会话范围，生成一份供用户整份审阅的短期记忆 Markdown。只保留未来对话真正有帮助的稳定事实、偏好、决定、项目状态和待办；去重，不写推理过程，不声称已保存，不调用任何工具。仅输出 Markdown 正文。",
-        latestUserEntryId: randomUUID(), idempotencyKey: randomUUID(), overrides: source.overrides });
+        latestUserEntryId: randomUUID(), idempotencyKey: randomUUID(), overrides: source.overrides,
+        lifecycle: async event => { if (event.type === "temporary_session_created") await this.assertRestricted(runtime.runtimeAgentId, event.sessionKey); } });
       const after = await workspaceSnapshot(runtime.workspaceRoot); if (before.hash !== after.hash) throw new Error("MEMORY_WORKSPACE_CHANGED_DURING_PREVIEW");
       const latest = await this.sources.memorySource(recordId); if (!latest || latest.record.memoryDisposition !== "eligible") throw new Error("MEMORY_SOURCE_NOT_ELIGIBLE");
       if (latest.record.agentId !== source.record.agentId || !rangeIsCurrent(latest.document, previousCheckpointEntryId, range.fromEntryId, range.throughEntryId)) throw new Error("MEMORY_SOURCE_CHANGED_DURING_PREVIEW");

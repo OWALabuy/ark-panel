@@ -96,6 +96,17 @@ test("configuredTools 调用已配置 runtime 的 tools.catalog", async () => {
   await assert.rejects(client.configuredTools("other"), /RUNTIME_NOT_CONFIGURED/);
 });
 
+test("effectiveTools 读取临时 session 经 policy 过滤后的实际工具", async () => {
+  const root = await mkdtemp(join(tmpdir(), "panel-cli-effective-tools-")); let observed: { method: string; params: Record<string, unknown> } | undefined;
+  const client = new OpenClawCliClient({ sessionsRoots: new Map([["runtime", root]]), commandRunner: async (_executable, args) => {
+    const method = String(args[2]), params = JSON.parse(args.at(-1) ?? "{}") as Record<string, unknown>; observed = { method, params };
+    return JSON.stringify({ agentId: "runtime", groups: [{ id: "core", tools: [{ id: "memory_search" }, { id: "memory_get" }] }] });
+  } });
+  assert.deepEqual(await client.effectiveTools("runtime", "agent:runtime:temporary"), { agentId: "runtime", scope: "effective-session-tools", toolIds: ["memory_get", "memory_search"] });
+  assert.deepEqual(observed, { method: "tools.effective", params: { agentId: "runtime", sessionKey: "agent:runtime:temporary" } });
+  await assert.rejects(client.effectiveTools("other", "agent:other:temporary"), /RUNTIME_NOT_CONFIGURED/);
+});
+
 test("按本轮 runId 采集 OpenClaw 明确登记的内联 artifact", async t => {
   const root = await mkdtemp(join(tmpdir(), "panel-cli-artifact-")); t.after(() => import("node:fs/promises").then(fs => fs.rm(root, { recursive: true, force: true })));
   const calls: Array<{ method: string; params: Record<string, unknown> }> = [];

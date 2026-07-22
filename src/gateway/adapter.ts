@@ -51,6 +51,7 @@ export interface ToolCatalogEntry {
 }
 export interface ToolCatalogGroup { id: string; label: string; source: "core" | "plugin"; pluginId?: string; tools: ToolCatalogEntry[] }
 export interface ConfiguredToolsCatalog { agentId: string; scope: "configured-runtime-catalog"; groups: ToolCatalogGroup[] }
+export interface EffectiveToolsInventory { agentId: string; scope: "effective-session-tools"; toolIds: string[] }
 
 export interface GatewayAttachment {
   fileName: string;
@@ -87,6 +88,7 @@ export interface GatewayClient {
   status?(): Promise<GatewayStatus>;
   listModels?(): Promise<ModelsCatalog>;
   configuredTools?(runtimeAgentId: string): Promise<ConfiguredToolsCatalog>;
+  effectiveTools?(runtimeAgentId: string, sessionKey: string): Promise<EffectiveToolsInventory>;
   collectRunArtifacts?(sessionKey: string, runId: string): Promise<CollectedOutput[]>;
 }
 

@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { open, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
-import type { CollectedOutput, CommandArgument, CommandsCatalog, ConfiguredToolsCatalog, CreatedSession, GatewayAttachment, GatewayClient, GatewayCommand, GatewayStatus, ModelsCatalog, OpenClawModel, SessionOverrides, ToolCatalogEntry, ToolCatalogGroup } from "./adapter.js";
+import type { CollectedOutput, CommandArgument, CommandsCatalog, ConfiguredToolsCatalog, CreatedSession, EffectiveToolsInventory, GatewayAttachment, GatewayClient, GatewayCommand, GatewayStatus, ModelsCatalog, OpenClawModel, SessionOverrides, ToolCatalogEntry, ToolCatalogGroup } from "./adapter.js";
 
 interface CliOptions {
   executable?: string;
@@ -135,6 +135,14 @@ export function parseConfiguredToolsCatalog(value: unknown): ConfiguredToolsCata
       ...(optionalString(item.pluginId) ? { pluginId: item.pluginId as string } : {}), tools: item.tools.map(parseTool) }; });
   return { agentId: string(raw.agentId, "TOOLS_CATALOG_AGENT"), scope: "configured-runtime-catalog", groups };
 }
+export function parseEffectiveToolsInventory(value: unknown): EffectiveToolsInventory {
+  const raw = object(value, "TOOLS_EFFECTIVE"); if (!Array.isArray(raw.groups)) throw new Error("OPENCLAW_INVALID_TOOLS_EFFECTIVE_GROUPS");
+  const toolIds = raw.groups.flatMap(group => {
+    const item = object(group, "TOOLS_EFFECTIVE_GROUP"); if (!Array.isArray(item.tools)) throw new Error("OPENCLAW_INVALID_TOOLS_EFFECTIVE_TOOLS");
+    return item.tools.map(tool => string(object(tool, "TOOLS_EFFECTIVE_TOOL").id, "TOOLS_EFFECTIVE_TOOL_ID"));
+  });
+  return { agentId: string(raw.agentId, "TOOLS_EFFECTIVE_AGENT"), scope: "effective-session-tools", toolIds: [...new Set(toolIds)].sort() };
+}
 
 export function sessionPatchParams(sessionKey: string, overrides: SessionOverrides): Record<string, string> {
   return { key: sessionKey, ...(overrides.modelOverride ? { model: overrides.modelOverride } : {}),
@@ -259,6 +267,11 @@ export class OpenClawCliClient implements GatewayClient {
   async configuredTools(runtimeAgentId: string): Promise<ConfiguredToolsCatalog> {
     if (!this.sessionsRoots.has(runtimeAgentId)) throw new Error("RUNTIME_NOT_CONFIGURED");
     return parseConfiguredToolsCatalog(await this.call<unknown>("tools.catalog", { agentId: runtimeAgentId, includePlugins: true }));
+  }
+  async effectiveTools(runtimeAgentId: string, sessionKey: string): Promise<EffectiveToolsInventory> {
+    if (!this.sessionsRoots.has(runtimeAgentId) || sessionKey.split(":")[1] !== runtimeAgentId) throw new Error("RUNTIME_NOT_CONFIGURED");
+    const result = parseEffectiveToolsInventory(await this.call<unknown>("tools.effective", { agentId: runtimeAgentId, sessionKey }));
+    if (result.agentId !== runtimeAgentId) throw new Error("OPENCLAW_TOOLS_EFFECTIVE_AGENT_MISMATCH"); return result;
   }
   async send(sessionKey: string, message: string, idempotencyKey: string, attachments?: readonly GatewayAttachment[]): Promise<{ runId: string }> {
     return await this.call("sessions.send", { key: sessionKey, agentId: sessionKey.split(":")[1], message,
