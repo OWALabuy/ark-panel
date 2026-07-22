@@ -25,6 +25,23 @@ export interface ConversationStatus {
   contextBudget: { estimatedTokens: number; budgetTokens: number; percentage: number; method: "utf8-bytes-upper-bound-v2" };
   lastActiveAt: string;
 }
+export interface MemoryConversationSource {
+  record: ConversationRecord; document: TranscriptDocument;
+  overrides: { modelOverride?: string; thinkingLevel?: string; reasoningLevel?: "on" | "off" | "stream" };
+}
+
+function nativeOverrides(document: TranscriptDocument): MemoryConversationSource["overrides"] {
+  const overrides: MemoryConversationSource["overrides"] = {};
+  for (const entry of document.entries) {
+    if (entry.type === "model_change" && typeof entry.provider === "string" && typeof entry.modelId === "string") overrides.modelOverride = `${entry.provider}/${entry.modelId}`;
+    if (entry.type === "thinking_level_change") {
+      const level = typeof entry.thinkingLevel === "string" ? entry.thinkingLevel : typeof entry.level === "string" ? entry.level : undefined;
+      if (level) overrides.thinkingLevel = level;
+    }
+    if (entry.type === "reasoning_level_change" && ["on", "off", "stream"].includes(String(entry.reasoningLevel))) overrides.reasoningLevel = entry.reasoningLevel as "on" | "off" | "stream";
+  }
+  return overrides;
+}
 
 const ACTIVE = /^([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.jsonl$/i;
 const RESET = /^([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.jsonl\.reset\.(.+)$/i;
@@ -183,6 +200,18 @@ export class SessionReadData {
         percentage: Math.round(estimate.estimatedTokens / estimate.budgetTokens * 100), method: estimate.method },
       lastActiveAt: loaded.record.updatedAt };
     return { ...loaded.record, status, document: { header: safeHeader, entries: safeEntries } };
+  }
+
+  async memorySource(recordId: string): Promise<MemoryConversationSource | undefined> {
+    const loaded = await this.load(recordId); if (!loaded) return undefined;
+    const document = currentBranch(loaded.document), overrides: MemoryConversationSource["overrides"] = loaded.record.sourceKind === "panel" ? {} : nativeOverrides(document);
+    if (loaded.record.sourceKind === "panel") {
+      const metadata = (await loadPanelSession(this.dataRoot, loaded.record.agentId, loaded.record.recordId)).metadata;
+      if (metadata.modelOverride) overrides.modelOverride = metadata.modelOverride;
+      if (metadata.thinkingLevel) overrides.thinkingLevel = metadata.thinkingLevel;
+      if (metadata.reasoningLevel) overrides.reasoningLevel = metadata.reasoningLevel;
+    }
+    return { record: loaded.record, document, overrides };
   }
 
   async exportMarkdown(recordId: string): Promise<{ filename: string; markdown: string } | null> {

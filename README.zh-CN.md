@@ -75,9 +75,9 @@ $$
 | 命令 | `/model`、`/think`、`/reasoning`、`/new` | ✅ | 面板原生的结构化操作;命令文本绝不作为普通提示词转发 |
 | 命令 | `/commands`、`/help`、`/status`、`/models`、`/tools`、`/usage` | ✅ | 只读的结构化命令接口，采用默认拒绝的允许列表;tools 为配置的运行时目录，usage 为当前对话分支的模型上报数据 |
 | 命令 | `/reset`、`/bash`、配置/重启，以及任意透传 | ⛔ | 因生命周期、主机和网关安全风险而有意排除 |
-| 记忆 | 存储每会话的 `scratch` / `eligible` 处置状态 | ✅ | 默认为 `scratch`;两种状态都读取目标 agent 的既有记忆，只有 eligible 可进入面板沉淀流程;控件尚未开放 |
+| 记忆 | 存储每会话的 `scratch` / `eligible` 处置状态 | ✅ | 默认为 `scratch`;两种状态都读取目标 agent 的既有记忆，只有 eligible 可进入面板沉淀流程 |
 | 记忆 | 处置界面与只读记忆中心 | ✅ | 跨终端切换「不整理/允许整理」，安全查看 `MEMORY.md`、`DREAMS.md` 与每日记忆，不开放任意路径或在线编辑 |
-| 记忆 | eligible 会话的增量整理 | 🚧 | 同一有效模型在独立无副作用 session 中提炼未整理消息，内部轨迹不污染聊天上下文；整份预览确认后写独立短期记忆文件 |
+| 记忆 | eligible 会话的增量整理 | 🚧 | 候选预览/确认流程已实现并受配置门控；部署前仍需完成隔离实机验收 |
 | 外观 | 可切换主题与命名强调色 | ✅ | 系统/浅色/深色，外加 Gruvbox hard/medium/soft 的浅色和深色变体;账号级、跨设备;所有内置强调色组合均满足 WCAG AA |
 | 外观 | 设置抽屉 | ✅ | 齿轮图标直接打开外观/阅读设置;登出留在底部;账号偏好在服务器端持久化 |
 | 外观 | 每个智能体的自定义头像 | ✅ | 1:1 裁剪预览、限制大小的位图上传、服务器端校验/重新编码、恢复默认，以及账号级共享 |
@@ -91,7 +91,7 @@ $$
 | 访问 | 界面内修改密码 | ⛔ | 保持仅限命令行(`npm run password-hash`);登出仍位于设置抽屉底部 |
 | 运维 | 备份、完整性校验、恢复、健康检查和 systemd 示例 | ✅ | 包含部署冒烟测试和基于固定用例的浏览器验收覆盖 |
 
-外观、侧栏、头像、标题、对话状态、后台完成、双语界面、记忆处置 UI 和只读记忆中心这几批工作已经完成。近期顺序是 eligible 会话的可审阅增量整理，随后再处理带 `/compact` 的持久长上下文策略。`scratch` 仍完整读取既有记忆，只是不进入面板沉淀流程；详细边界见[记忆模块决定](docs/decisions/panel-memory.md)。OpenClaw 兼容性属于持续的日常维护。体验功能的取舍理由见[体验功能决策记录](docs/decisions/ux-features.md);详细的约束和验收标准见[实现规格说明](docs/implementation-spec.md)。
+外观、侧栏、头像、标题、对话状态、后台完成、双语界面、记忆处置 UI 和只读记忆中心这几批工作已经完成。可审阅的增量整理已在专用记忆 runtime 配置门控后实现，仍待隔离实机验收；之后再处理带 `/compact` 的持久长上下文策略。`scratch` 仍完整读取既有记忆，只是不进入面板沉淀流程；详细边界见[记忆模块决定](docs/decisions/panel-memory.md)。OpenClaw 兼容性属于持续的日常维护。体验功能的取舍理由见[体验功能决策记录](docs/decisions/ux-features.md);详细的约束和验收标准见[实现规格说明](docs/implementation-spec.md)。
 
 ## 安装与测试
 
@@ -131,9 +131,14 @@ export PANEL_AGENT_RUNTIMES='{
   "claude":{"runtimeAgentId":"panel-runtime-claude","sessionsRoot":"/home/USER/.openclaw/agents/panel-runtime-claude/sessions","workspaceRoot":"/home/USER/claude"},
   "main":{"runtimeAgentId":"panel-runtime-main","sessionsRoot":"/home/USER/.openclaw/agents/panel-runtime-main/sessions","workspaceRoot":"/home/USER/clawd"}
 }'
+export PANEL_MEMORY_RUNTIMES='{
+  "claude":{"runtimeAgentId":"panel-memory-claude","sessionsRoot":"/home/USER/.openclaw/agents/panel-memory-claude/sessions"}
+}'
 ```
 
-`PANEL_READ_AGENTS` 是允许浏览的真实智能体的允许列表。`PANEL_AGENT_RUNTIMES` 把每个可浏览的智能体映射到一个没有渠道绑定的专用运行时;绝不要把真实的、绑定了渠道的智能体用作面板运行时。为每个受信任的 `workspaceRoot` 设置路径，即可开启模型输出下载。浏览器无法选择这个路径。
+`PANEL_READ_AGENTS` 是允许浏览的真实智能体的允许列表。`PANEL_AGENT_RUNTIMES` 把每个可浏览的智能体映射到一个没有渠道绑定的专用运行时;绝不要把真实的、绑定了渠道的智能体用作面板运行时。为每个受信任的 `workspaceRoot` 设置路径，即可开启模型输出下载与只读记忆中心。浏览器无法选择这个路径。
+
+`PANEL_MEMORY_RUNTIMES` 是可选配置，用于开启经用户审阅的记忆整理。每项必须指向独立、无渠道绑定的 `panel-memory-*` OpenClaw agent，并让它与对应 `workspaceRoot` 使用同一 workspace。该 agent 应不配置工具，或只保留 `memory_search` 与 `memory_get`；ark-panel 每次提炼前都会检查实际工具目录，发现其它工具就拒绝运行。不能复用普通聊天 runtime。
 
 上传的文件存放在 `PANEL_DATA_DIR/files` 下，采用内容寻址的私有存储，并纳入常规备份。Office 文件有意不做转换:OpenClaw 收到原始文件，模型可以用自己的 Python/技能工具去检视。模型输出只接受来自 OpenClaw 运行产物，或配置的工作区下 `.openclaw/tmp/ark-panel/<run-id>/outputs` 目录的文件，随后复制进面板存储，再删除那个临时目录。符号链接、硬链接、特殊文件、路径逃逸、过多的文件数量和过大的体积都会被拒绝。
 

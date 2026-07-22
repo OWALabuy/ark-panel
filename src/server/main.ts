@@ -12,12 +12,15 @@ import { ExperienceStore } from "./experience-store.js";
 import { loadGatewayStreamAuth, OpenClawStreamObserver } from "../gateway/stream-client.js";
 import { PanelAttachmentApi } from "./attachment-api.js";
 import { PanelMemoryApi } from "./memory-api.js";
+import { PanelMemoryConsolidationApi } from "./memory-consolidation-api.js";
+import { MemoryConsolidationStore } from "../storage/memory-consolidation.js";
 
 const config = parsePanelConfig(process.env, import.meta.url); await validateAndInitializeConfig(config);
 const contextBudget = new ConservativeContextBudget(config.contextHistoryBudgetTokens);
 const readApi = config.dataRoot && config.readAgents.length ? new SessionReadData(config.readAgents, config.dataRoot, contextBudget) : undefined;
 const roots = new Map<string, string>();
 for (const value of config.runtimes.values()) roots.set(value.runtimeAgentId, value.sessionsRoot);
+for (const value of config.memoryRuntimes.values()) roots.set(value.runtimeAgentId, value.sessionsRoot);
 const operations = new SessionOperationCoordinator();
 const experienceAgentIds = new Set([...config.readAgents.map(agent => agent.agentId), ...config.runtimes.keys()]);
 const experience = config.dataRoot ? new ExperienceStore(config.dataRoot, [...experienceAgentIds]) : undefined;
@@ -58,10 +61,15 @@ const allowedHosts = [`127.0.0.1:${config.port}`, `localhost:${config.port}`];
 const attachments = config.dataRoot && config.runtimes.size ? new PanelAttachmentApi(config.dataRoot, [...config.runtimes.keys()]) : undefined;
 const memoryWorkspaces = new Map<string, string>();
 for (const [agentId, runtime] of config.runtimes) if (runtime.workspaceRoot) memoryWorkspaces.set(agentId, runtime.workspaceRoot);
-const memory = memoryWorkspaces.size ? new PanelMemoryApi(memoryWorkspaces) : undefined;
+const memoryStore = config.dataRoot ? new MemoryConsolidationStore(config.dataRoot) : undefined;
+const memory = memoryWorkspaces.size ? new PanelMemoryApi(memoryWorkspaces, memoryStore) : undefined;
+const memoryRuntimeByAgent = new Map<string, { runtimeAgentId: string; workspaceRoot: string }>();
+for (const [agentId, runtime] of config.memoryRuntimes) { const workspaceRoot = config.runtimes.get(agentId)?.workspaceRoot; if (workspaceRoot) memoryRuntimeByAgent.set(agentId, { runtimeAgentId: runtime.runtimeAgentId, workspaceRoot }); }
+const memoryConsolidation = memoryStore && readApi && memoryRuntimeByAgent.size ? new PanelMemoryConsolidationApi(
+  memoryStore, readApi, memoryRuntimeByAgent, bridge, gateway) : undefined;
 const server = createPanelServer({ auth: { username: config.username, passwordHash: config.passwordHash, sessionSecret: config.sessionSecret, secureCookie: config.secureCookie },
   publicDir: config.publicDir, mock: config.mock, allowedHosts, publicOrigins: allowedHosts.map(value => `http://${value}`),
-  ...(generationApi ? { generation: generationApi } : {}), ...(commandApi ? { commands: commandApi } : {}), ...(readApi ? { reads: readApi } : {}), ...(experience ? { experience } : {}), ...(attachments ? { attachments } : {}), ...(memory ? { memory } : {}) });
+  ...(generationApi ? { generation: generationApi } : {}), ...(commandApi ? { commands: commandApi } : {}), ...(readApi ? { reads: readApi } : {}), ...(experience ? { experience } : {}), ...(attachments ? { attachments } : {}), ...(memory ? { memory } : {}), ...(memoryConsolidation ? { memoryConsolidation } : {}) });
 server.listen(config.port, config.host, () => process.stdout.write(`会话面板监听 http://${config.host}:${config.port}\n`));
 
 let stopping = false;

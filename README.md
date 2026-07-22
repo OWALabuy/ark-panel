@@ -75,9 +75,9 @@ Legend: ✅ available · 🚧 scheduled · 💡 candidate (not scheduled) · ⛔
 | Commands | `/model`, `/think`, `/reasoning`, `/new` | ✅ | Panel-native structured operations; command text is never forwarded as a normal prompt |
 | Commands | `/commands`, `/help`, `/status`, `/models`, `/tools`, `/usage` | ✅ | Read-only structured command API with a default-deny allowlist; tools are the configured runtime catalog, while usage is model-reported data for the current transcript branch |
 | Commands | `/reset`, `/bash`, config/restart, and arbitrary passthrough | ⛔ | Deliberately excluded because of lifecycle, host, and gateway safety risks |
-| Memory | Store per-session `scratch` / `eligible` disposition | ✅ | Defaults to `scratch`; both states read the target agent's existing memory, while only eligible conversations may enter panel-managed consolidation; the control is not exposed yet |
+| Memory | Store per-session `scratch` / `eligible` disposition | ✅ | Defaults to `scratch`; both states read the target agent's existing memory, while only eligible conversations may enter panel-managed consolidation |
 | Memory | Disposition UI and read-only memory center | ✅ | Cross-device “do not consolidate / allow consolidation” control plus safe viewing of `MEMORY.md`, `DREAMS.md`, and daily notes; no arbitrary paths or inline editing |
-| Memory | Incremental consolidation for eligible conversations | 🚧 | Uses the same effective model in a separate side-effect-free session whose internal trace never enters chat context; after whole-draft review, writes a separate short-term note |
+| Memory | Incremental consolidation for eligible conversations | 🚧 | The reviewed candidate/confirm workflow is implemented and configuration-gated; isolated live acceptance is still required before deployment |
 | Appearance | Switchable themes with named accent colors | ✅ | System/light/dark plus Gruvbox hard/medium/soft in light and dark variants; account-level and cross-device; all shipped accent pairs meet WCAG AA |
 | Appearance | Settings drawer | ✅ | Gear opens Appearance / Reading directly; logout stays in the footer; account preferences persist server-side |
 | Appearance | Custom per-agent avatars | ✅ | Previewed 1:1 crop, capped raster upload, server validation/re-encoding, reset-to-default, and account-level sharing |
@@ -91,7 +91,7 @@ Legend: ✅ available · 🚧 scheduled · 💡 candidate (not scheduled) · ⛔
 | Access | In-UI password change | ⛔ | Kept CLI-only (`npm run password-hash`); logout remains at the bottom of the settings drawer |
 | Operations | Backup, integrity verification, restore, health check, and systemd example | ✅ | Includes deployment smoke and fixture-based browser acceptance coverage |
 
-The appearance, sidebar, avatar, title, conversation-status, background-completion, bilingual UI, memory-disposition control, and read-only memory center are complete. The near-term order is reviewed incremental consolidation for eligible conversations, followed by the durable long-context strategy with `/compact`. Scratch conversations still read existing memory; they simply do not enter the panel-managed consolidation path. The detailed boundary lives in [the memory-module decision](docs/decisions/panel-memory.md). OpenClaw compatibility remains ongoing maintenance. The experience-feature rationale lives in [the UX features decision](docs/decisions/ux-features.md); detailed constraints and acceptance criteria live in the [implementation specification](docs/implementation-spec.md).
+The appearance, sidebar, avatar, title, conversation-status, background-completion, bilingual UI, memory-disposition control, and read-only memory center are complete. Reviewed incremental consolidation is implemented behind dedicated-memory-runtime configuration and awaits isolated live acceptance; the durable long-context strategy with `/compact` follows after that. Scratch conversations still read existing memory; they simply do not enter the panel-managed consolidation path. The detailed boundary lives in [the memory-module decision](docs/decisions/panel-memory.md). OpenClaw compatibility remains ongoing maintenance. The experience-feature rationale lives in [the UX features decision](docs/decisions/ux-features.md); detailed constraints and acceptance criteria live in the [implementation specification](docs/implementation-spec.md).
 
 ## Install and test
 
@@ -131,9 +131,14 @@ export PANEL_AGENT_RUNTIMES='{
   "claude":{"runtimeAgentId":"panel-runtime-claude","sessionsRoot":"/home/USER/.openclaw/agents/panel-runtime-claude/sessions","workspaceRoot":"/home/USER/claude"},
   "main":{"runtimeAgentId":"panel-runtime-main","sessionsRoot":"/home/USER/.openclaw/agents/panel-runtime-main/sessions","workspaceRoot":"/home/USER/clawd"}
 }'
+export PANEL_MEMORY_RUNTIMES='{
+  "claude":{"runtimeAgentId":"panel-memory-claude","sessionsRoot":"/home/USER/.openclaw/agents/panel-memory-claude/sessions"}
+}'
 ```
 
-`PANEL_READ_AGENTS` is the allowlist of real agents that may be browsed. `PANEL_AGENT_RUNTIMES` maps each browsable agent to a dedicated runtime with no channel bindings; never use a real, channel-bound agent as the panel runtime. Set each trusted `workspaceRoot` to enable downloadable model outputs. The browser cannot choose this path.
+`PANEL_READ_AGENTS` is the allowlist of real agents that may be browsed. `PANEL_AGENT_RUNTIMES` maps each browsable agent to a dedicated runtime with no channel bindings; never use a real, channel-bound agent as the panel runtime. Set each trusted `workspaceRoot` to enable downloadable model outputs and the read-only memory center. The browser cannot choose this path.
+
+`PANEL_MEMORY_RUNTIMES` is optional and enables reviewed memory consolidation. Each entry must name a separate, channel-free `panel-memory-*` OpenClaw agent whose workspace is the corresponding `workspaceRoot`. Configure that agent with no tools, or only `memory_search` and `memory_get`; ark-panel checks the configured tool catalog before every extraction and refuses any runtime that exposes another tool. Do not reuse the ordinary chat runtime.
 
 Uploaded files live under `PANEL_DATA_DIR/files` in content-addressed private storage and are included in normal backups. Office files are deliberately not converted: OpenClaw receives the original file and the model may inspect it with its own Python/skill tooling. Model outputs are accepted only from OpenClaw's run artifacts or `.openclaw/tmp/ark-panel/<run-id>/outputs` below the configured workspace, then copied into panel storage before that temporary directory is removed. Symlinks, hardlinks, special files, path escapes, excessive file counts, and excessive sizes are rejected.
 

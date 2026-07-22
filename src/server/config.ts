@@ -4,10 +4,12 @@ import { relative, resolve, sep } from "node:path";
 import type { ReadAgentConfig } from "./read-data.js";
 
 export interface RuntimeConfig { runtimeAgentId: string; sessionsRoot: string; workspaceRoot?: string }
+export interface MemoryRuntimeConfig { runtimeAgentId: string; sessionsRoot: string }
 export interface PanelConfig {
   username: string; passwordHash: string; sessionSecret: string; secureCookie: boolean;
   host: "127.0.0.1"; port: number; publicDir: string; dataRoot?: string; mock: boolean;
   readAgents: ReadAgentConfig[]; runtimes: Map<string, RuntimeConfig>;
+  memoryRuntimes: Map<string, MemoryRuntimeConfig>;
   contextHistoryBudgetTokens: number;
   gatewayRunTimeoutMs: number; runWatcherGraceMs: number;
 }
@@ -38,7 +40,7 @@ export function parsePanelConfig(env: NodeJS.ProcessEnv, moduleUrl: string): Pan
   if (!Number.isInteger(contextHistoryBudgetTokens) || contextHistoryBudgetTokens < 1024) throw new Error("PANEL_CONTEXT_HISTORY_BUDGET_TOKENS 必须是至少 1024 的整数");
   const gatewayRunTimeoutMs = boundedInteger(env.PANEL_GATEWAY_RUN_TIMEOUT_MS, 30 * 60_000, "PANEL_GATEWAY_RUN_TIMEOUT_MS", 1_000, 24 * 60 * 60_000);
   const runWatcherGraceMs = boundedInteger(env.PANEL_RUN_WATCHER_GRACE_MS, 30_000, "PANEL_RUN_WATCHER_GRACE_MS", 100, 10 * 60_000);
-  const read = jsonObject(env.PANEL_READ_AGENTS, "PANEL_READ_AGENTS"), runtime = jsonObject(env.PANEL_AGENT_RUNTIMES, "PANEL_AGENT_RUNTIMES");
+  const read = jsonObject(env.PANEL_READ_AGENTS, "PANEL_READ_AGENTS"), runtime = jsonObject(env.PANEL_AGENT_RUNTIMES, "PANEL_AGENT_RUNTIMES"), memoryRuntime = jsonObject(env.PANEL_MEMORY_RUNTIMES, "PANEL_MEMORY_RUNTIMES");
   const readAgents = Object.entries(read).map(([agentId, value]) => {
     if (typeof value.sessionsRoot !== "string" || (value.label !== undefined && typeof value.label !== "string")) throw new Error("PANEL_READ_AGENTS 格式错误");
     return { agentId, sessionsRoot: resolve(value.sessionsRoot), ...(typeof value.label === "string" ? { label: value.label } : {}) };
@@ -53,11 +55,18 @@ export function parsePanelConfig(env: NodeJS.ProcessEnv, moduleUrl: string): Pan
     runtimes.set(agentId, { runtimeAgentId: value.runtimeAgentId, sessionsRoot: resolve(value.sessionsRoot),
       ...(typeof value.workspaceRoot === "string" ? { workspaceRoot: resolve(value.workspaceRoot) } : {}) });
   }
+  const memoryRuntimes = new Map<string, MemoryRuntimeConfig>();
+  for (const [agentId, value] of Object.entries(memoryRuntime)) {
+    if (typeof value.runtimeAgentId !== "string" || typeof value.sessionsRoot !== "string" || !value.runtimeAgentId.startsWith("panel-memory-")) throw new Error("PANEL_MEMORY_RUNTIMES 格式错误");
+    if (!runtimes.get(agentId)?.workspaceRoot) throw new Error("记忆 runtime 需要对应 Agent 的 workspaceRoot");
+    if (runtimeIds.has(value.runtimeAgentId)) throw new Error("runtimeAgentId 重复"); runtimeIds.add(value.runtimeAgentId);
+    memoryRuntimes.set(agentId, { runtimeAgentId: value.runtimeAgentId, sessionsRoot: resolve(value.sessionsRoot) });
+  }
   if ((readAgents.length || runtimes.size) && !env.PANEL_DATA_DIR) throw new Error("配置会话数据源时必须设置 PANEL_DATA_DIR");
   return { username: env.PANEL_USERNAME!, passwordHash: env.PANEL_PASSWORD_HASH!, sessionSecret: env.PANEL_SESSION_SECRET!, secureCookie: env.PANEL_SECURE_COOKIE === "1",
     host: "127.0.0.1", port, publicDir: env.PANEL_PUBLIC_DIR ? resolve(env.PANEL_PUBLIC_DIR) : fileURLToPath(new URL("../../../src/frontend/", moduleUrl)),
     ...(env.PANEL_DATA_DIR ? { dataRoot: resolve(env.PANEL_DATA_DIR) } : {}), mock: env.PANEL_MOCK_DATA === "1", readAgents, runtimes, contextHistoryBudgetTokens,
-    gatewayRunTimeoutMs, runWatcherGraceMs };
+    gatewayRunTimeoutMs, runWatcherGraceMs, memoryRuntimes };
 }
 
 async function safeDirectory(path: string, label: string): Promise<string> {
@@ -79,6 +88,12 @@ export async function validateAndInitializeConfig(config: PanelConfig): Promise<
       if ([...readRoots, ...runtimeRoots, ...workspaceRoots].some(other => pathsOverlap(other, workspace))) throw new Error("runtime workspace 与会话根或其它 workspace 重叠");
       workspaceRoots.push(workspace);
     }
+  }
+  for (const value of config.memoryRuntimes.values()) {
+    const root = await safeDirectory(value.sessionsRoot, "memory runtime sessions ");
+    if (!root.endsWith(`${sep}agents${sep}${value.runtimeAgentId}${sep}sessions`)) throw new Error("memory runtime sessions 根目录与 runtime agent 不匹配");
+    if ([...readRoots, ...runtimeRoots, ...workspaceRoots].some(other => pathsOverlap(other, root))) throw new Error("memory runtime sessions 根目录与其它会话根或 workspace 重叠");
+    runtimeRoots.push(root);
   }
   if (config.dataRoot) {
     await mkdir(config.dataRoot, { recursive: true, mode: 0o700 }); await chmod(config.dataRoot, 0o700);

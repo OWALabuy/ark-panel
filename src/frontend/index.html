@@ -62,6 +62,9 @@
       <footer><button id="logout" class="danger-button" type="button" data-i18n="settings.logout">退出登录</button></footer>
     </aside>
   </div>
+  <dialog id="memory-candidate-dialog" class="editor-dialog memory-candidate-dialog" aria-labelledby="memory-candidate-title">
+    <form method="dialog"><h2 id="memory-candidate-title" data-i18n="memory.previewTitle">记忆候选预览</h2><p id="memory-candidate-range"></p><div id="memory-candidate-content" class="memory-candidate-content"></div><output id="memory-candidate-status" class="field-error" aria-live="polite"></output><div class="dialog-actions"><button class="secondary" type="button" id="cancel-memory-candidate" data-i18n="common.cancel">取消</button><button type="button" id="confirm-memory-candidate" data-i18n="memory.confirm">确认写入记忆</button></div></form>
+  </dialog>
   <dialog id="editor-dialog" class="editor-dialog" aria-labelledby="editor-title" aria-describedby="editor-help editor-error">
     <form id="editor-form" novalidate>
       <h2 id="editor-title"></h2><p id="editor-help"></p>
