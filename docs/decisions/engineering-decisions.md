@@ -56,7 +56,7 @@ API 统一位于 `/api/v1`。成功响应是 `{ "data": ... }`；失败响应是
 3. **推理桥接 RPC 与流程**：`sessions.create` → 覆盖 transcript → `sessions.send` → 读新增 entry → `sessions.delete` + 受限清理。RPC 名称、参数、一次性 session 行为都可能随版本变。
 4. **握手与鉴权**：operator 角色 + `gateway.auth.token`、跳过设备签名的分支（`roleCanSkipDeviceIdentity`）。
 5. **清理 artifact 类型**：`.jsonl.deleted.*`、`.trajectory.jsonl`、`.trajectory-path.json`。版本若新增/改名 artifact 类型，清理 allowlist 要同步扩充，否则残留累积。
-6. **记忆机制假设**：共享 workspace 的记忆文件与 bootstrap 注入、内置 engine 对 `MEMORY.md` / `memory/**/*.md` 的索引、带 slug 每日文件、文件 watcher、dreaming/promote 和压缩前 flush 的行为（见 `panel-memory.md`）。`scratch` 与 `eligible` 都读取既有记忆；面板只为 eligible 写独立短期文件。普通 session 缺少按路径只读和动态工具 deny 的限制，以及临时 runtime transcript 是否可能被 dreaming 摄取，升级或启用 dreaming 前都须重验。
+6. **记忆机制假设**：共享 workspace 的记忆文件与 bootstrap 注入、内置 engine 对 `MEMORY.md` / `memory/**/*.md` 的索引、文件 watcher、dreaming/promote 和压缩前 flush 的行为（见 `panel-memory.md`）。`scratch` 与 `eligible` 都读取既有记忆；面板只为 eligible 维护每会话一份独立的滚动短期文件。普通 session 缺少按路径只读和动态工具 deny 的限制，以及临时 runtime transcript 是否可能被 dreaming 摄取，升级或启用 dreaming 前都须重验。
 7. **打包源码路径**：`~/.nvm/.../node_modules/openclaw/dist/*.js` 的文件名带内容哈希后缀，升级必变；任何靠读 dist 得出的结论都要重查，不能假设文件名不变。
 
 ### 升级流程（不在真实 agent 上首验）

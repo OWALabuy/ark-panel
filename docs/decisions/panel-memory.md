@@ -1,7 +1,7 @@
 # 面板记忆模块决定
 
 日期：2026-07-12
-修订：2026-07-21
+修订：2026-07-23
 
 ## 结论
 
@@ -9,7 +9,7 @@
 
 1. **所有面板会话都读取既有记忆。** `scratch` 与 `eligible` 均使用目标 agent 的真实 workspace、bootstrap 记忆和 `memory_search` / `memory_get`，不得因为会话不沉淀而让 agent 失去连续性。
 2. **`memoryDisposition` 只控制当前会话能否进入面板管理的记忆沉淀流程。** `scratch` 不会被面板提炼、写入或定时整理；只有 `eligible` 才能产生候选记忆。
-3. **新内容通过可审阅的短期记忆文件进入 OpenClaw。** 首版先由用户手动发起整理、预览并确认，面板再写入唯一的 `memory/YYYY-MM-DD-ark-panel-<batch>.md`；不直接编辑 `MEMORY.md` 或 `DREAMS.md`。
+3. **每条会话维护一份可审阅、滚动修订的短期记忆。** 首次整理使用该会话的完整当前分支；后续整理使用「上一版已确认记忆 + checkpoint 后新增原文」生成更新后的整份文档。用户确认后，面板原子创建或替换该会话唯一的 `memory/ark-panel/<record-key>.md`；不直接编辑 `MEMORY.md` 或 `DREAMS.md`。
 4. **先提供只读记忆中心，再考虑自动整理。** 用户可以查看 OpenClaw 识别的记忆文件和面板贡献的来源；在线编辑、定时自动确认与长期记忆回滚不属于首个实现批次。
 
 这次修订推翻旧版「`scratch` 不装配记忆工具或改用无记忆 workspace」的决定。该做法会让草稿会话中的 agent 不认识用户，而且 OpenClaw `2026.6.11` 的普通 session 也不支持按单次请求设置工具 deny。
@@ -74,23 +74,31 @@
 
 1. 用户把会话标为 `eligible`，点击「整理到记忆」。
 2. 服务端读取当前权威分支及该会话的上次成功 checkpoint，只选取尚未整理的消息；首次从 `scratch` 改为 `eligible` 时，从当前分支起点开始整理全部历史。不信任浏览器提交 transcript 或 entry 范围。
-3. 在**独立的一次性内部 session** 中生成候选 Markdown，沿用来源会话的有效模型、thinking 和 reasoning 设置。该 session 只把固定范围历史作为提炼输入，并使用经版本验收的无写入工具策略；不得向模型开放 shell、文件写入或其它有副作用的工具。可以保留只读的 `memory_search` / `memory_get` 用于去重。
+3. 在**独立的一次性内部 session** 中生成候选 Markdown，沿用来源会话的有效模型、thinking 和 reasoning 设置。首次整理把固定范围历史作为输入；后续整理把该会话上一版已确认记忆明确放入输入，再附上固定范围内的新增原文，要求模型输出更新后的完整会话记忆，而不是仅输出追加片段。该 session 使用经版本验收的无写入工具策略；不得向模型开放 shell、文件写入或其它有副作用的工具。可以保留只读的 `memory_search` / `memory_get`，但正确性不能依赖 OpenClaw 隐式注入旧记忆。
 4. 内部 session 的 user/assistant/tool/reasoning entries 都不追加进原会话；面板只取最终候选 Markdown，暂存在面板数据目录并整份展示给用户预览。此时不改 workspace，也不推进 checkpoint。
-5. 用户确认后，服务端在可信 workspace 下以唯一文件名创建 `memory/YYYY-MM-DD-ark-panel-<batch>.md`。文件名符合 OpenClaw 已支持的带 slug 每日记忆格式，与 OpenClaw 自己的日期文件不共写。
+5. 用户确认后，服务端在可信 workspace 下原子创建或替换 `memory/ark-panel/<record-key>.md`。`record-key` 由服务端对稳定 recordId 做单向摘要得到；浏览器不能指定路径。该文件只归属于一条面板会话，不与 OpenClaw 自己的日期文件或其他会话共写。
 6. 文件落盘并完成 durability 边界后，原子记录 ledger 与「已整理到哪个 entry」的 checkpoint。任一步失败都不能出现 checkpoint 超前。
 7. OpenClaw 文件 watcher 负责后续索引；是否最终 promote 到 `MEMORY.md` 仍由 OpenClaw 决定，面板不复刻 promote 算法。
 
-候选文件只保存确认后的记忆内容。来源 record、entry 范围、内容 hash、目标相对路径、创建时间和状态保存在面板自己的 ledger 中，避免把内部追踪元数据混进模型可召回正文。
+候选文件保存本次确认后应成为当前版本的**完整会话记忆**。来源 record、entry 范围、基线版本 hash、候选内容 hash、目标相对路径、创建/确认时间和状态保存在面板自己的 ledger 中，避免把内部追踪元数据混进模型可召回正文。
 
 整理不是原会话中的一次隐藏聊天回复。它有独立的 job/run 身份、临时 session 和清理生命周期；成功、失败或重试都不能改变原会话 transcript revision。确认写入由面板存储层完成，不让模型通过一串 shell / 文件工具调用自行写记忆，因此不会把“写记忆”的工具轨迹污染聊天上下文。
 
 ### 并发、幂等与纠错
 
 - 同一会话的提炼和确认使用 keyed mutex；确认请求带 batch id 和候选 hash，重复确认只能得到同一结果。
-- 目标文件使用唯一 batch id 且禁止覆盖现有文件；不与 OpenClaw 追加写同一个日期文件。
+- 目标路径按 recordId 稳定派生；同一会话只维护一个当前文件，不与 OpenClaw 或其他会话共写。替换前必须复核 checkpoint 与上一版内容 hash，使用临时文件、`fsync` 和原子 rename，禁止多行 append 或原地截断写。
 - checkpoint 以权威分支 entry id 表示，不能只用消息数；fork 后是新的会话和新的 checkpoint。
 - 用户在确认前继续聊天时，当前候选仍只覆盖生成候选时的固定范围；后续消息留给下一批，不能偷偷扩大确认内容。
+- 同一 checkpoint 产生多个候选时，只允许首个成功确认；旧候选不能覆盖已经推进的会话记忆。
 - 删除尚未 promote 的面板短期文件可以阻止它继续作为源记忆，但不能自动撤销已经进入 `MEMORY.md` 的独立副本。因此 UI 不得把删除短期文件描述成「完整撤回长期记忆」。
+
+### 旧 batch 文件迁移与回滚
+
+- 旧版 ledger 中每次确认对应一个 `memory/YYYY-MM-DD-ark-panel-<batch>.md`。升级后第一次再次整理时，服务端按 ledger 顺序安全读取仍存在且 hash 匹配的旧文件，把它们作为上一版已确认记忆基线；缺失、越界、链接或 hash 不匹配时拒绝整理，不静默丢弃。
+- 新滚动文件与新版 state 完成 durability 后，旧 batch 文件才可清理。清理必须逐个复核它仍是 ledger 登记的普通单链接文件且内容 hash 未变；失败可留下重复索引文件，但不能删除不确定的用户文件，也不能回滚已经确认的新 checkpoint。
+- 升级前尚未确认的旧版候选没有改变 workspace 或 checkpoint，可以丢弃并重新生成；服务端不得把旧版增量候选误当作新版整份替换候选确认。
+- 回滚到旧版本前，应保留旧 batch 文件；若它们已经被安全清理，则从面板候选/ledger 中导出最新确认正文为旧版支持的新 batch 文件。面板不得把新版 state 静默解释成旧版 state。
 
 ## 后续自动整理
 
@@ -107,6 +115,7 @@
 - 不为面板新建一套与 OpenClaw 竞争的长期向量记忆数据库。
 - 不把原始 transcript 当记忆文件写入 workspace。
 - 不直接追加或重写 `MEMORY.md` / `DREAMS.md`。
+- 不把每次增量候选机械追加到会话记忆；旧状态、重复事实和已完成待办必须允许在整份修订中被更新或删除。
 - 不让浏览器选择、读取或写入任意服务器路径。
 - 不把「删除面板短期文件」伪装成已经从长期记忆完全撤销。
 

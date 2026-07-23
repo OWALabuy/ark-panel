@@ -184,7 +184,7 @@ gateway 的会话索引属于其内部状态：它仅使用进程内锁，也没
 - **读取既有记忆仍然有效。** runtime 与目标 agent 共用 workspace，并保留完整 bootstrap 与 `memory_search` / `memory_get`。`scratch` 也必须走这条路径，不能切换到无记忆 workspace。
 - **面板新内容不会可靠地自动进入记忆。** 权威 transcript 在面板数据目录，OpenClaw 不会稳定扫描；一次性 runtime session 又会被清理，不能依赖 transcript sweep 的竞态。
 - **压缩前的 memory flush 基本不会触发。** 该机制要求活跃 session 累积到压缩阈值，而本方案每轮使用新的临时 session。
-- **显式沉淀走独立内部 run 和短期文件。** eligible 会话的增量提炼沿用来源会话的有效模型/思考设置，但内部 session 及其工具轨迹绝不写回聊天 transcript；用户整份预览确认后，面板写入唯一的 `memory/YYYY-MM-DD-ark-panel-<batch>.md`。OpenClaw 继续负责索引、dreaming 与 promote，面板不直接编辑 `MEMORY.md` / `DREAMS.md`。
+- **显式沉淀走独立内部 run 和会话级滚动短期文件。** eligible 会话的增量提炼沿用来源会话的有效模型/思考设置，但内部 session 及其工具轨迹绝不写回聊天 transcript；首次使用完整当前分支，后续使用上一版已确认记忆与 checkpoint 后新增原文生成整份修订稿。用户预览确认后，面板原子创建或替换该会话唯一的 `memory/ark-panel/<record-key>.md`。OpenClaw 继续负责索引、dreaming 与 promote，面板不直接编辑 `MEMORY.md` / `DREAMS.md`。
 
 **⚠️ 必须遵守的约束：** 为保证所有会话都能读取同一份既有记忆，面板发起的普通推理必须：（1）使用目标 agent 的固定共享 `workspaceDir`；（2）保留完整 prompt 和工具配置，**不得根据 `scratch` 状态使用 `promptMode:none/minimal` 或移除 `memory_search` / `memory_get`**。`memoryDisposition` 只在面板自己的沉淀 API 与任务选择器中生效。
 

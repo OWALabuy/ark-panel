@@ -67,16 +67,23 @@ export class PanelMemoryConsolidationApi {
       const source = await this.sources.memorySource(recordId); if (!source) throw new Error("SESSION_NOT_FOUND");
       if (source.record.memoryDisposition !== "eligible") throw new Error("MEMORY_SOURCE_NOT_ELIGIBLE");
       const runtime = this.runtime(source.record.agentId);
-      const previousCheckpointEntryId = await this.store.checkpoint(recordId), range = fixedRange(source.document, previousCheckpointEntryId), before = await workspaceSnapshot(runtime.workspaceRoot);
+      const context = await this.store.context(recordId, runtime.workspaceRoot), range = fixedRange(source.document, context.checkpointEntryId), before = await workspaceSnapshot(runtime.workspaceRoot);
+      const instruction = context.baseContent
+        ? `整理上面的 checkpoint 后固定会话范围，并基于下面的上一版已确认会话记忆，生成一份供用户整份审阅的更新版短期记忆 Markdown。输出必须是合并后的完整会话记忆，不是增量片段；保留仍有效的信息，合并重复项，更新已变化的项目状态和决定，删除已失效的待办。只保留未来对话真正有帮助的稳定事实、偏好、决定、项目状态和待办；不写推理过程，不声称已保存，不调用任何工具。仅输出 Markdown 正文。\n\n<previous_confirmed_memory>\n${context.baseContent}\n</previous_confirmed_memory>`
+        : "整理上面的固定会话范围，生成一份供用户整份审阅的完整短期记忆 Markdown。只保留未来对话真正有帮助的稳定事实、偏好、决定、项目状态和待办；去重，不写推理过程，不声称已保存，不调用任何工具。仅输出 Markdown 正文。";
       const result = await this.bridge.generate({ runtimeAgentId: runtime.runtimeAgentId, historyThroughPreviousRun: range.document,
-        latestUserMessage: "整理上面的固定会话范围，生成一份供用户整份审阅的短期记忆 Markdown。只保留未来对话真正有帮助的稳定事实、偏好、决定、项目状态和待办；去重，不写推理过程，不声称已保存，不调用任何工具。仅输出 Markdown 正文。",
+        latestUserMessage: instruction,
         latestUserEntryId: randomUUID(), idempotencyKey: randomUUID(), overrides: source.overrides,
         lifecycle: async event => { if (event.type === "temporary_session_created") await this.assertRestricted(runtime.runtimeAgentId, event.sessionKey); } });
       const after = await workspaceSnapshot(runtime.workspaceRoot); if (before.hash !== after.hash) throw new Error("MEMORY_WORKSPACE_CHANGED_DURING_PREVIEW");
       const latest = await this.sources.memorySource(recordId); if (!latest || latest.record.memoryDisposition !== "eligible") throw new Error("MEMORY_SOURCE_NOT_ELIGIBLE");
-      if (latest.record.agentId !== source.record.agentId || !rangeIsCurrent(latest.document, previousCheckpointEntryId, range.fromEntryId, range.throughEntryId)) throw new Error("MEMORY_SOURCE_CHANGED_DURING_PREVIEW");
+      if (latest.record.agentId !== source.record.agentId || !rangeIsCurrent(latest.document, context.checkpointEntryId, range.fromEntryId, range.throughEntryId)) throw new Error("MEMORY_SOURCE_CHANGED_DURING_PREVIEW");
+      const current = await this.store.context(recordId, runtime.workspaceRoot);
+      if (current.checkpointEntryId !== context.checkpointEntryId || current.baseContentHash !== context.baseContentHash || current.targetPath !== context.targetPath) throw new Error("MEMORY_SOURCE_CHANGED_DURING_PREVIEW");
       return await this.store.createCandidate({ agentId: source.record.agentId, recordId, sourceKind: source.record.sourceKind,
-        sourceRevision: source.record.revision, fromEntryId: range.fromEntryId, throughEntryId: range.throughEntryId, content: assistantCandidate(result.entries) });
+        sourceRevision: source.record.revision, ...(context.checkpointEntryId ? { previousCheckpointEntryId: context.checkpointEntryId } : {}),
+        ...(context.baseContentHash ? { baseContentHash: context.baseContentHash } : {}),
+        fromEntryId: range.fromEntryId, throughEntryId: range.throughEntryId, content: assistantCandidate(result.entries) });
     });
   }
   async getCandidate(batchId: string): Promise<MemoryCandidate> { return await this.store.loadCandidate(batchId); }

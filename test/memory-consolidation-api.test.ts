@@ -24,6 +24,27 @@ test("eligible 会话在独立受限 bridge 生成整份候选并确认，来源
   const ledger = await api.confirm(candidate.batchId, candidate.contentHash); assert.match(await readFile(join(workspace, ledger.targetPath), "utf8"), /Stable preference/);
 });
 
+test("再次整理只发送 checkpoint 后原文，并显式合并上一版已确认会话记忆", async () => {
+  const root = await mkdtemp(join(tmpdir(), "panel-memory-rolling-")), data = join(root, "data"), workspace = join(root, "workspace"); await mkdir(data); await mkdir(workspace);
+  let current = structuredClone(document), revision = "rev-1"; const calls: Array<{ historyThroughPreviousRun: typeof document; latestUserMessage: string; lifecycle?: (event: unknown) => Promise<void> }> = [];
+  const sources = { async memorySource() { return { record: { recordId: "record", agentId: "agent", sourceKind: "panel" as const, sourceKey: "record", revision, updatedAt: "now", messageCount: current.entries.length, title: "title", archived: false, hidden: false, pinned: false, memoryDisposition: "eligible" as const }, document: current, overrides: {} }; } };
+  const bridge = { async generate(request: typeof calls[number]) { calls.push(request); await request.lifecycle?.({ type: "temporary_session_created", runtimeAgentId: "panel-memory-agent", sessionId: "temporary", sessionKey: "agent:panel-memory-agent:temporary", transcriptPath: "/fixture" });
+    const content = calls.length === 1 ? "# Memory\n\n- Existing preference" : "# Memory\n\n- Existing preference\n- New decision";
+    return { runId: "run", sessionId: "temporary", entries: [{ type: "message", id: "answer", parentId: null, message: { role: "assistant", content } }] }; } } as unknown as BridgeService;
+  const api = new PanelMemoryConsolidationApi(new MemoryConsolidationStore(data), sources, new Map([["agent", { runtimeAgentId: "panel-memory-agent", workspaceRoot: workspace }]]), bridge,
+    { async effectiveTools() { return { agentId: "panel-memory-agent", scope: "effective-session-tools" as const, toolIds: ["memory_get", "memory_search"] }; } });
+  const first = await api.candidate("record"), firstLedger = await api.confirm(first.batchId, first.contentHash);
+  current = { ...current, entries: [...current.entries,
+    { type: "message", id: "u2", parentId: "a1", message: { role: "user", content: "New decision" } },
+    { type: "message", id: "a2", parentId: "u2", message: { role: "assistant", content: "Recorded" } }] }; revision = "rev-2";
+  const second = await api.candidate("record");
+  assert.deepEqual(calls[1]!.historyThroughPreviousRun.entries.map(entry => entry.id), ["u2", "a2"]);
+  assert.match(calls[1]!.latestUserMessage, /上一版已确认会话记忆/); assert.match(calls[1]!.latestUserMessage, /Existing preference/);
+  const secondLedger = await api.confirm(second.batchId, second.contentHash);
+  assert.equal(secondLedger.targetPath, firstLedger.targetPath);
+  assert.equal(await readFile(join(workspace, secondLedger.targetPath), "utf8"), "# Memory\n\n- Existing preference\n- New decision\n");
+});
+
 test("scratch 来源与含副作用工具的 runtime 在调用模型前被拒绝", async () => {
   const root = await mkdtemp(join(tmpdir(), "panel-memory-deny-")); await mkdir(join(root, "data")); await mkdir(join(root, "workspace")); let bridgeCalls = 0;
   const source = (disposition: "eligible" | "scratch") => ({ record: { recordId: "record", agentId: "agent", sourceKind: "panel" as const, sourceKey: "record", revision: "rev", updatedAt: "now", messageCount: 2, title: "title", archived: false, hidden: false, pinned: false, memoryDisposition: disposition }, document, overrides: {} });

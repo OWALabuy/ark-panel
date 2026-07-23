@@ -77,7 +77,7 @@ Legend: ✅ available · 🚧 scheduled · 💡 candidate (not scheduled) · ⛔
 | Commands | `/reset`, `/bash`, config/restart, and arbitrary passthrough | ⛔ | Deliberately excluded because of lifecycle, host, and gateway safety risks |
 | Memory | Store per-session `scratch` / `eligible` disposition | ✅ | Defaults to `scratch`; both states read the target agent's existing memory, while only eligible conversations may enter panel-managed consolidation |
 | Memory | Disposition UI and read-only memory center | ✅ | Cross-device “do not consolidate / allow consolidation” control plus safe viewing of `MEMORY.md`, `DREAMS.md`, and daily notes; no arbitrary paths or inline editing |
-| Memory | Incremental consolidation for eligible conversations | ✅ | Configuration-gated reviewed candidate/confirm workflow; validated with isolated effective-tool checks, durable write/checkpoint, cleanup, and both configured memory runtimes |
+| Memory | Incremental consolidation for eligible conversations | ✅ | One rolling memory file per conversation; later reviews merge the last confirmed document with post-checkpoint messages before atomic replacement |
 | Appearance | Switchable themes with named accent colors | ✅ | System/light/dark plus Gruvbox hard/medium/soft in light and dark variants; account-level and cross-device; all shipped accent pairs meet WCAG AA |
 | Appearance | Settings drawer | ✅ | Gear opens Appearance / Reading directly; logout stays in the footer; account preferences persist server-side |
 | Appearance | Custom per-agent avatars | ✅ | Previewed 1:1 crop, capped raster upload, server validation/re-encoding, reset-to-default, and account-level sharing |
