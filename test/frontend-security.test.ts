@@ -246,6 +246,9 @@ test("memory center is a dedicated agent-aware tree beside the global settings e
   assert.match(styles,/\.shell\.show-memory>\.sessions,\.shell\.show-memory>\.conversation\{display:none\}/);
   assert.match(styles,/@media\(max-width:760px\)\{\.memory-page\{position:absolute;inset:0;display:block\}/);
   assert.match(styles,/\.memory-page\.show-document \.memory-document\{display:flex\}/);
+  assert.match(styles,/\.memory-document>header>#back-memory-tree\{display:none;width:auto;height:auto\}/);
+  assert.match(styles,/\.memory-document>header>#open-memory-source\{display:block;width:auto;height:auto;white-space:nowrap\}/);
+  assert.match(styles,/@media\(max-width:760px\)\{\.memory-document>header>#back-memory-tree\{display:block/);
 });
 
 test("memory tree preserves each agent's collapsed categories when a file opens", async () => {
