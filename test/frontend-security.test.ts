@@ -221,6 +221,13 @@ test("appearance preferences are constrained, cached early, and locally scale re
   assert.match(styles,/font-size:var\(--reading-size\)/);
 });
 
+test("confirmed memory candidate exposes an unambiguous close action", async () => {
+  const source=await readFile("src/frontend/app.js","utf8");
+  assert.match(source,/status\.textContent=t\("memory\.confirmed"/);
+  assert.match(source,/button\.hidden=true;close\.textContent=t\("common\.close"\);close\.focus\(\)/);
+  assert.match(source,/addEventListener\("close",\(\)=>\{pendingMemoryCandidate=null/);
+});
+
 test("conversation status is server-controlled, separate from run status, and labels conservative context estimates", async () => {
   const source=await readFile("src/frontend/app.js","utf8");
   const statusHelper=await readFile("src/frontend/conversation-status.js","utf8");
