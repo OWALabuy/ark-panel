@@ -248,6 +248,15 @@ test("memory center is a dedicated agent-aware tree beside the global settings e
   assert.match(styles,/\.memory-page\.show-document \.memory-document\{display:flex\}/);
 });
 
+test("memory tree preserves each agent's collapsed categories when a file opens", async () => {
+  const source=await readFile("src/frontend/app.js","utf8");
+  assert.match(source,/memoryCollapsedByAgent=new Map\(\)/);
+  assert.match(source,/collapsed=memoryCollapsedByAgent\.get\(agentId\)\|\|new Set\(\)/);
+  assert.match(source,/details\.open=!collapsed\.has\(category\)/);
+  assert.match(source,/if\(details\.open\)collapsed\.delete\(category\);else collapsed\.add\(category\)/);
+  assert.doesNotMatch(source,/details\.open=true;details\.className="memory-tree-group"/);
+});
+
 test("conversation status is server-controlled, separate from run status, and labels conservative context estimates", async () => {
   const source=await readFile("src/frontend/app.js","utf8");
   const statusHelper=await readFile("src/frontend/conversation-status.js","utf8");
