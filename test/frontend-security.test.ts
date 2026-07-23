@@ -228,6 +228,26 @@ test("confirmed memory candidate exposes an unambiguous close action", async () 
   assert.match(source,/addEventListener\("close",\(\)=>\{pendingMemoryCandidate=null/);
 });
 
+test("memory center is a dedicated agent-aware tree beside the global settings entry", async () => {
+  const source=await readFile("src/frontend/app.js","utf8");
+  const html=await readFile("src/frontend/index.html","utf8");
+  const styles=await readFile("src/frontend/styles.css","utf8");
+  assert.ok(html.indexOf('id="open-memory"')<html.indexOf('id="open-settings"'));
+  assert.ok(html.indexOf('id="rail-memory"')<html.indexOf('id="rail-settings"'));
+  assert.match(html,/id="memory-page"[\s\S]*id="memory-tree"[^>]*role="tree"[\s\S]*id="memory-page-file-content"/);
+  assert.doesNotMatch(html,/class="memory-settings"/);
+  assert.match(source,/function shellView\(\)[\s\S]*show-memory/);
+  assert.match(source,/memory=shellView\(\)==="show-memory"[\s\S]*if\(memory\)\{setShellView\("show-memory"/);
+  assert.match(source,/Promise\.all\(\[api\(`\/memory\?agentId=[\s\S]*archived=false[\s\S]*archived=true/);
+  assert.match(source,/memoryTitles\.get\(String\(file\.source\.recordId\)\)/);
+  assert.match(source,/source\.onclick=recordId\?async\(\)=>[\s\S]*openSession\(recordId\)/);
+  assert.match(source,/renderMarkdown\(String\(file\.content\|\|""\)\)/);
+  assert.match(styles,/\.memory-page\{grid-column:2\/4/);
+  assert.match(styles,/\.shell\.show-memory>\.sessions,\.shell\.show-memory>\.conversation\{display:none\}/);
+  assert.match(styles,/@media\(max-width:760px\)\{\.memory-page\{position:absolute;inset:0;display:block\}/);
+  assert.match(styles,/\.memory-page\.show-document \.memory-document\{display:flex\}/);
+});
+
 test("conversation status is server-controlled, separate from run status, and labels conservative context estimates", async () => {
   const source=await readFile("src/frontend/app.js","utf8");
   const statusHelper=await readFile("src/frontend/conversation-status.js","utf8");

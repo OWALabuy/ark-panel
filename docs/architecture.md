@@ -34,7 +34,7 @@
 15. **面板记忆系统**：所有面板会话（包括 `scratch`）都读取目标 agent 的既有记忆，保证人格与上下文连续；`memoryDisposition` 只决定当前会话能否进入面板管理的候选提炼和写入流程。只有 `eligible` 会话可在用户预览确认后写入独立的 OpenClaw 短期记忆文件，后续索引与 promote 仍交给 OpenClaw。详见 [`decisions/panel-memory.md`](decisions/panel-memory.md)。
 
 ### 范围补充（部分后续已实现）
-- **面板内看记忆**：已进入记忆模块排期；首版只读列出和查看 `MEMORY.md`、`DREAMS.md` 与 `memory/**/*.md`，不开放任意 workspace 浏览或在线编辑。
+- **面板内看记忆**：已实现独立只读工作区；从 Agent 栏齿轮上方进入，按 Agent 和类别树状列出 `MEMORY.md`、`DREAMS.md` 与 `memory/**/*.md`，右侧安全渲染正文并可跳回面板贡献的来源会话；不开放任意 workspace 浏览或在线编辑。
 - **会话置顶（pin）**：已实现，状态只存面板 metadata；会话列表提供快捷操作。
 - **导出会话为 Markdown**：已实现当前权威分支下载，包含时间、思考与工具调用结果，不包含内部路径和隐藏 metadata。
 - **草稿与输入状态**：已实现为按 agent + session 隔离的浏览器本地草稿，不同步服务端；发送失败保留，成功后清除。浏览器也按 session 保存正在生成的 run，只有该 run 所属会话的输入框会锁定；切换到其他会话后仍可编辑其草稿。
