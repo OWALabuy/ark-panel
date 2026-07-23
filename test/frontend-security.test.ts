@@ -234,7 +234,7 @@ test("memory center is a dedicated agent-aware tree beside the global settings e
   const styles=await readFile("src/frontend/styles.css","utf8");
   assert.ok(html.indexOf('id="open-memory"')<html.indexOf('id="open-settings"'));
   assert.ok(html.indexOf('id="rail-memory"')<html.indexOf('id="rail-settings"'));
-  assert.match(html,/id="memory-page"[\s\S]*id="memory-tree"[^>]*role="tree"[\s\S]*id="memory-page-file-content"/);
+  assert.match(html,/id="memory-page"[\s\S]*id="memory-tree" class="memory-tree"[^>]*role="tree"[\s\S]*id="memory-page-file-content"/);
   assert.doesNotMatch(html,/class="memory-settings"/);
   assert.match(source,/function shellView\(\)[\s\S]*show-memory/);
   assert.match(source,/memory=shellView\(\)==="show-memory"[\s\S]*if\(memory\)\{setShellView\("show-memory"/);
