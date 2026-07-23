@@ -248,6 +248,7 @@ test("memory center is a dedicated agent-aware tree beside the global settings e
   assert.match(styles,/\.memory-page\.show-document \.memory-document\{display:flex\}/);
   assert.match(styles,/\.memory-document>header>#back-memory-tree\{display:none;width:auto;height:auto\}/);
   assert.match(styles,/\.memory-document>header>#open-memory-source\{display:block;width:auto;height:auto;white-space:nowrap\}/);
+  assert.match(styles,/\.shell\.show-memory\{grid-template-rows:minmax\(0,1fr\)\}/);
   assert.match(styles,/\.memory-navigation\{overflow:hidden\}/);
   assert.match(styles,/\.memory-navigation>header,\.memory-document>header,\.memory-navigation>output\{flex:none\}/);
   assert.match(styles,/\.memory-tree\{flex:1 1 0;overscroll-behavior:contain\}/);
