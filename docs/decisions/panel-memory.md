@@ -80,7 +80,7 @@
 4. 内部 session 的 user/assistant/tool/reasoning entries 都不追加进原会话；面板只取最终候选 Markdown，暂存在面板数据目录并整份展示给用户预览。此时不改 workspace，也不推进 checkpoint。
 5. 用户确认后，服务端在可信 workspace 下原子创建或替换 `memory/ark-panel/<record-key>.md`。`record-key` 由服务端对稳定 recordId 做单向摘要得到；浏览器不能指定路径。该文件只归属于一条面板会话，不与 OpenClaw 自己的日期文件或其他会话共写。
 6. 文件落盘并完成 durability 边界后，原子记录 ledger 与「已整理到哪个 entry」的 checkpoint。任一步失败都不能出现 checkpoint 超前。
-7. OpenClaw 文件 watcher 负责后续索引；是否最终 promote 到 `MEMORY.md` 仍由 OpenClaw 决定，面板不复刻 promote 算法。
+7. 文件完成持久化后，面板通过版本门禁内的结构化 CLI，依次刷新真实 agent、普通聊天 runtime 与记忆整理 runtime 各自独立的 OpenClaw 索引。不能只依赖文件 watcher：对应记忆管理器未驻留时，OpenClaw `2026.6.11` 可能漏掉文件事件，且之后仍报告 `dirty: false`。全部刷新成功后确认接口才报告“已建立索引”；索引失败不回滚已持久化的记忆或 checkpoint，重复确认同一 batch 会幂等地再次尝试刷新。是否最终 promote 到 `MEMORY.md` 仍由 OpenClaw 决定，面板不复刻 promote 算法。
 
 候选文件保存本次确认后应成为当前版本的**完整会话记忆**。来源 record、entry 范围、基线版本 hash、候选内容 hash、目标相对路径、创建/确认时间和状态保存在面板自己的 ledger 中，避免把内部追踪元数据混进模型可召回正文。
 
@@ -89,6 +89,7 @@
 ### 并发、幂等与纠错
 
 - 同一会话的提炼和确认使用 keyed mutex；确认请求带 batch id 和候选 hash，重复确认只能得到同一结果。
+- 同一逻辑 agent 的索引刷新串行执行，避免不同会话同时确认时并发更新同一组 agent 数据库。CLI 参数来自服务端配置的 agent allowlist，并使用 `spawn(..., { shell: false })` 等价的既有结构化执行边界；浏览器不能提交 agent id 或命令文本。
 - 目标路径按 recordId 稳定派生；同一会话只维护一个当前文件，不与 OpenClaw 或其他会话共写。替换前必须复核 checkpoint 与上一版内容 hash，使用临时文件、`fsync` 和原子 rename，禁止多行 append 或原地截断写。
 - checkpoint 以权威分支 entry id 表示，不能只用消息数；fork 后是新的会话和新的 checkpoint。
 - 用户在确认前继续聊天时，当前候选仍只覆盖生成候选时的固定范围；后续消息留给下一批，不能偷偷扩大确认内容。

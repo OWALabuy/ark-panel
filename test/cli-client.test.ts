@@ -107,6 +107,22 @@ test("effectiveTools 读取临时 session 经 policy 过滤后的实际工具", 
   await assert.rejects(client.effectiveTools("other", "agent:other:temporary"), /RUNTIME_NOT_CONFIGURED/);
 });
 
+test("记忆索引刷新仅接受 allowlist agent，并以结构化 CLI 参数顺序执行", async () => {
+  const calls: Array<{ args: string[]; timeoutMs: number }> = [];
+  const client = new OpenClawCliClient({ sessionsRoots: new Map(), memoryIndexAgentIds: new Set(["agent", "panel-agent-runtime"]),
+    memoryIndexTimeoutMs: 1_234, commandRunner: async (_executable, args, timeoutMs) => {
+      calls.push({ args, timeoutMs }); return args[0] === "--version" ? "OpenClaw 2026.6.11" : "";
+    } });
+  await client.refreshMemoryIndex(["agent", "panel-agent-runtime", "agent"]);
+  assert.deepEqual(calls, [
+    { args: ["--version"], timeoutMs: 15_000 },
+    { args: ["memory", "index", "--agent", "agent"], timeoutMs: 1_234 },
+    { args: ["memory", "index", "--agent", "panel-agent-runtime"], timeoutMs: 1_234 }
+  ]);
+  await assert.rejects(client.refreshMemoryIndex(["other"]), /MEMORY_INDEX_AGENT_NOT_ALLOWED/);
+  assert.equal(calls.length, 3);
+});
+
 test("按本轮 runId 采集 OpenClaw 明确登记的内联 artifact", async t => {
   const root = await mkdtemp(join(tmpdir(), "panel-cli-artifact-")); t.after(() => import("node:fs/promises").then(fs => fs.rm(root, { recursive: true, force: true })));
   const calls: Array<{ method: string; params: Record<string, unknown> }> = [];

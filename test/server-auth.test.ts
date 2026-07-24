@@ -57,7 +57,7 @@ test("记忆中心要求登录并只委托 agentId 与相对标识", async t => 
   assert.deepEqual(calls, ["list:safe", "read:safe:memory/2026-07-22.md"]);
 });
 test("记忆候选生成与确认要求登录、CSRF 和服务端 hash 校验", async t => {
-  const calls: string[] = [], consolidation: MemoryConsolidationApi = { agents() { return ["safe"]; }, async candidate(recordId) { calls.push(`candidate:${recordId}`); return { batchId: "batch", contentHash: "a".repeat(64) }; }, async getCandidate(batchId) { calls.push(`get:${batchId}`); return { batchId }; }, async confirm(batchId, hash) { calls.push(`confirm:${batchId}:${hash}`); return { status: "confirmed" }; } };
+  const calls: string[] = [], consolidation: MemoryConsolidationApi = { agents() { return ["safe"]; }, async candidate(recordId) { calls.push(`candidate:${recordId}`); return { batchId: "batch", contentHash: "a".repeat(64) }; }, async getCandidate(batchId) { calls.push(`get:${batchId}`); return { batchId }; }, async confirm(batchId, hash) { if (batchId === "index-failed") throw new Error("MEMORY_INDEX_REFRESH_FAILED"); calls.push(`confirm:${batchId}:${hash}`); return { status: "confirmed" }; } };
   const x = await fixture(undefined, undefined, undefined, undefined, undefined, consolidation); t.after(() => x.server.close());
   assert.equal((await fetch(`${x.base}/api/v1/sessions/record/memory/candidates`, { method: "POST", headers: { origin: x.base }, body: "{}" })).status, 401);
   const login = await fetch(`${x.base}/api/v1/auth/login`, { method: "POST", headers: { origin: x.base, "content-type": "application/json" }, body: JSON.stringify({ username: "owl", password: "correct" }) });
@@ -67,6 +67,8 @@ test("记忆候选生成与确认要求登录、CSRF 和服务端 hash 校验", 
   assert.equal((await fetch(`${x.base}/api/v1/memory/candidates/batch`, { headers: { cookie: cookies } })).status, 200);
   assert.equal((await fetch(`${x.base}/api/v1/memory/candidates/batch/confirm`, { method: "POST", headers: auth, body: JSON.stringify({ contentHash: "bad" }) })).status, 400);
   assert.equal((await fetch(`${x.base}/api/v1/memory/candidates/batch/confirm`, { method: "POST", headers: auth, body: JSON.stringify({ contentHash: "a".repeat(64) }) })).status, 200);
+  const failed = await fetch(`${x.base}/api/v1/memory/candidates/index-failed/confirm`, { method: "POST", headers: auth, body: JSON.stringify({ contentHash: "a".repeat(64) }) });
+  assert.equal(failed.status, 502); assert.deepEqual((await failed.json()).error.code, "MEMORY_INDEX_REFRESH_FAILED");
   assert.deepEqual(calls, ["candidate:record", "get:batch", `confirm:batch:${"a".repeat(64)}`]);
 });
 test("non-mock reads are delegated without connecting a real agent", async t => {

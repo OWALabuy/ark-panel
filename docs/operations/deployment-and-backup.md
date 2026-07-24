@@ -109,7 +109,7 @@ gateway 单轮执行默认最多等待 30 分钟，随后再给轨迹观察器 3
 
 1. 复制示例到 `~/.config/systemd/user/ark-panel.service`，替换其中的 `USER`、仓库路径和专用 runtime 目录。
 2. 建立 `~/.config/ark-panel/panel.env`，权限设为 `0600`；该文件包含账号、密码哈希和 session secret，不能提交到 git。
-3. 确保数据目录为 `0700`，runtime sessions 目录只属于当前用户；不要把真实 agent sessions 放进 `ReadWritePaths`。
+3. 确保数据目录为 `0700`，runtime sessions 目录只属于当前用户；不要把真实 agent sessions 放进 `ReadWritePaths`。启用记忆整理时，OpenClaw 配置中的真实 agent、普通 runtime 和记忆 runtime 都必须已经建立各自的 `agent/` 数据库目录，并把这些目录加入 `ReadWritePaths`，以便确认后刷新派生记忆索引；这不允许写真实 agent 的 `sessions/`。
 4. Node 若不在 systemd 默认 `PATH` 中，在 EnvironmentFile 设置受控的 `PATH`，或把 `ExecStart` 改成 Node 22 的绝对路径。
 5. 启动并检查：
 
@@ -120,7 +120,7 @@ systemctl --user status ark-panel.service
 curl --fail http://127.0.0.1:8790/api/v1/health
 ```
 
-服务示例启用了 `UMask=0077`、`NoNewPrivileges`、只读 home/system 防护和显式可写目录。若实际 agent 名或数据路径不同，必须同步调整 `ReadOnlyPaths` / `ReadWritePaths`，否则服务应当启动失败，而不是放宽整个 home 的写权限。
+服务示例启用了 `UMask=0077`、`NoNewPrivileges`、只读 home/system 防护和显式可写目录。记忆确认会写 workspace 下的短期文件，并调用 OpenClaw 更新各消费者自己的派生 `openclaw-agent.sqlite`，因此示例只放行对应的 `memory/`、panel runtime sessions 和 `agent/` 数据库目录。若实际 agent 名或数据路径不同，必须同步调整 `ReadOnlyPaths` / `ReadWritePaths`，否则服务应当启动失败，而不是放宽整个 home 的写权限。
 
 建议给 unit 增加启动后的健康检查，并让失败状态可被 systemd 观察：
 

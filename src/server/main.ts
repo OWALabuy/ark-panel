@@ -21,6 +21,9 @@ const readApi = config.dataRoot && config.readAgents.length ? new SessionReadDat
 const roots = new Map<string, string>();
 for (const value of config.runtimes.values()) roots.set(value.runtimeAgentId, value.sessionsRoot);
 for (const value of config.memoryRuntimes.values()) roots.set(value.runtimeAgentId, value.sessionsRoot);
+const memoryIndexAgentIds = new Set(config.readAgents.map(agent => agent.agentId));
+for (const value of config.runtimes.values()) memoryIndexAgentIds.add(value.runtimeAgentId);
+for (const [agentId, value] of config.memoryRuntimes) { memoryIndexAgentIds.add(agentId); memoryIndexAgentIds.add(value.runtimeAgentId); }
 const operations = new SessionOperationCoordinator();
 const experienceAgentIds = new Set([...config.readAgents.map(agent => agent.agentId), ...config.runtimes.keys()]);
 const experience = config.dataRoot ? new ExperienceStore(config.dataRoot, [...experienceAgentIds]) : undefined;
@@ -31,7 +34,7 @@ const gatewayConnection = gatewayAuth ? new OpenClawStreamObserver({ ...gatewayA
   onDiagnostic: message => process.stderr.write(`[ark-panel] gateway stream: ${message}\n`) }) : undefined;
 gatewayConnection?.start();
 const gateway = new OpenClawCliClient({ sessionsRoots: roots, gatewayRunTimeoutMs: config.gatewayRunTimeoutMs,
-  watcherGraceMs: config.runWatcherGraceMs, ...(gatewayConnection ? { rpc: gatewayConnection } : {}) });
+  watcherGraceMs: config.runWatcherGraceMs, memoryIndexAgentIds, ...(gatewayConnection ? { rpc: gatewayConnection } : {}) });
 const streamObserver = process.env.PANEL_OPENCLAW_STREAMING === "0" ? undefined : gatewayConnection;
 const bridge = new BridgeService(gateway, new FileBridgeMaterializer(), roots, streamObserver, gatewayConnection);
 if (config.dataRoot && config.runtimes.size) {
@@ -63,8 +66,12 @@ const memoryWorkspaces = new Map<string, string>();
 for (const [agentId, runtime] of config.runtimes) if (runtime.workspaceRoot) memoryWorkspaces.set(agentId, runtime.workspaceRoot);
 const memoryStore = config.dataRoot ? new MemoryConsolidationStore(config.dataRoot) : undefined;
 const memory = memoryWorkspaces.size ? new PanelMemoryApi(memoryWorkspaces, memoryStore) : undefined;
-const memoryRuntimeByAgent = new Map<string, { runtimeAgentId: string; workspaceRoot: string }>();
-for (const [agentId, runtime] of config.memoryRuntimes) { const workspaceRoot = config.runtimes.get(agentId)?.workspaceRoot; if (workspaceRoot) memoryRuntimeByAgent.set(agentId, { runtimeAgentId: runtime.runtimeAgentId, workspaceRoot }); }
+const memoryRuntimeByAgent = new Map<string, { runtimeAgentId: string; workspaceRoot: string; indexAgentIds: readonly string[] }>();
+for (const [agentId, runtime] of config.memoryRuntimes) {
+  const chatRuntime = config.runtimes.get(agentId), workspaceRoot = chatRuntime?.workspaceRoot;
+  if (workspaceRoot) memoryRuntimeByAgent.set(agentId, { runtimeAgentId: runtime.runtimeAgentId, workspaceRoot,
+    indexAgentIds: [...new Set([agentId, chatRuntime.runtimeAgentId, runtime.runtimeAgentId])] });
+}
 const memoryConsolidation = memoryStore && readApi && memoryRuntimeByAgent.size ? new PanelMemoryConsolidationApi(
   memoryStore, readApi, memoryRuntimeByAgent, bridge, gateway) : undefined;
 const server = createPanelServer({ auth: { username: config.username, passwordHash: config.passwordHash, sessionSecret: config.sessionSecret, secureCookie: config.secureCookie },

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { createServer } from "node:net";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -17,4 +17,14 @@ test("main 从不同 cwd 启动时仍能提供静态资源和健康检查", asyn
   const health=await fetch(`http://127.0.0.1:${port}/api/v1/health`);assert.equal(health.status,200);
   const page=await fetch(`http://127.0.0.1:${port}/`);assert.equal(page.status,200);assert.match(await page.text(),/ark-panel/);
   child.kill("SIGTERM");await once(child,"exit");
+});
+
+test("systemd 沙箱保持真实 sessions 只读并放行记忆文件与派生索引", async () => {
+  const unit = await readFile(join(process.cwd(), "deploy", "ark-panel.service"), "utf8");
+  assert.match(unit, /ReadOnlyPaths=.*\/agents\/claude\/sessions .*\/agents\/main\/sessions/);
+  assert.match(unit, /ReadWritePaths=.*\/claude\/memory .*\/clawd\/memory/);
+  for (const agent of ["claude", "main", "panel-runtime-claude", "panel-runtime-main", "panel-memory-claude", "panel-memory-main"]) {
+    assert.match(unit, new RegExp(`/agents/${agent}/agent(?: |\\n)`));
+  }
+  assert.doesNotMatch(unit, /ReadWritePaths=.*\/agents\/(?:claude|main)\/sessions/);
 });

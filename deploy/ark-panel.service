@@ -20,7 +20,10 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
 ReadOnlyPaths=/home/USER/.openclaw/agents/claude/sessions /home/USER/.openclaw/agents/main/sessions
-ReadWritePaths=/home/USER/.local/share/ark-panel /home/USER/.openclaw/agents/panel-runtime-claude/sessions /home/USER/.openclaw/agents/panel-runtime-main/sessions
+ReadWritePaths=/home/USER/.local/share/ark-panel /home/USER/.openclaw/agents/panel-runtime-claude/sessions /home/USER/.openclaw/agents/panel-runtime-main/sessions /home/USER/.openclaw/agents/panel-memory-claude/sessions /home/USER/.openclaw/agents/panel-memory-main/sessions /home/USER/claude/memory /home/USER/clawd/memory
+# Confirmation refreshes OpenClaw's derived per-agent memory indexes. Keep real
+# sessions read-only; only their separate agent database directories need writes.
+ReadWritePaths=/home/USER/.openclaw/agents/claude/agent /home/USER/.openclaw/agents/main/agent /home/USER/.openclaw/agents/panel-runtime-claude/agent /home/USER/.openclaw/agents/panel-runtime-main/agent /home/USER/.openclaw/agents/panel-memory-claude/agent /home/USER/.openclaw/agents/panel-memory-main/agent
 RestrictSUIDSGID=true
 LockPersonality=true
 

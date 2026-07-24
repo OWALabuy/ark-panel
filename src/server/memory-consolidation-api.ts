@@ -8,8 +8,11 @@ import type { MemoryConversationSource } from "./read-data.js";
 
 const READ_ONLY_TOOLS = new Set(["memory_search", "memory_get"]);
 export interface MemorySourceProvider { memorySource(recordId: string): Promise<MemoryConversationSource | undefined> }
-export interface MemoryRuntime { runtimeAgentId: string; workspaceRoot: string }
-export interface MemoryToolProvider { effectiveTools(runtimeAgentId: string, sessionKey: string): Promise<EffectiveToolsInventory> }
+export interface MemoryRuntime { runtimeAgentId: string; workspaceRoot: string; indexAgentIds: readonly string[] }
+export interface MemoryToolProvider {
+  effectiveTools(runtimeAgentId: string, sessionKey: string): Promise<EffectiveToolsInventory>;
+  refreshMemoryIndex(agentIds: readonly string[]): Promise<void>;
+}
 
 function messageText(entry: JsonObject): string {
   const message = entry.message; if (!message || typeof message !== "object" || Array.isArray(message)) return "";
@@ -44,6 +47,7 @@ function rangeIsCurrent(document: TranscriptDocument, previousCheckpointEntryId:
 
 export class PanelMemoryConsolidationApi {
   private readonly queues = new Map<string, Promise<void>>();
+  private readonly indexQueues = new Map<string, Promise<void>>();
   constructor(private readonly store: MemoryConsolidationStore, private readonly sources: MemorySourceProvider,
     private readonly runtimes: ReadonlyMap<string, MemoryRuntime>, private readonly bridge: BridgeService,
     private readonly tools: MemoryToolProvider) {}
@@ -61,6 +65,18 @@ export class PanelMemoryConsolidationApi {
     const previous = this.queues.get(recordId) ?? Promise.resolve(); let release!: () => void;
     const current = new Promise<void>(resolve => { release = resolve; }), queued = previous.then(() => current); this.queues.set(recordId, queued); await previous;
     try { return await operation(); } finally { release(); if (this.queues.get(recordId) === queued) this.queues.delete(recordId); }
+  }
+  private async refreshIndex(agentId: string, targets: readonly string[]): Promise<void> {
+    const previous = this.indexQueues.get(agentId) ?? Promise.resolve(); let release!: () => void;
+    const current = new Promise<void>(resolve => { release = resolve; }), queued = previous.then(() => current);
+    this.indexQueues.set(agentId, queued); await previous;
+    try {
+      await this.tools.refreshMemoryIndex(targets);
+    } catch {
+      throw new Error("MEMORY_INDEX_REFRESH_FAILED");
+    } finally {
+      release(); if (this.indexQueues.get(agentId) === queued) this.indexQueues.delete(agentId);
+    }
   }
   async candidate(recordId: string): Promise<MemoryCandidate> {
     return await this.serialized(recordId, async () => {
@@ -94,7 +110,10 @@ export class PanelMemoryConsolidationApi {
       if (!source) throw new Error("SESSION_NOT_FOUND"); if (source.record.memoryDisposition !== "eligible") throw new Error("MEMORY_SOURCE_NOT_ELIGIBLE");
       if (source.record.agentId !== candidate.agentId) throw new Error("MEMORY_CANDIDATE_CORRUPT");
       if (!rangeIsCurrent(source.document, candidate.previousCheckpointEntryId, candidate.fromEntryId, candidate.throughEntryId)) throw new Error("MEMORY_CANDIDATE_STALE");
-      return await this.store.confirm(batchId, contentHash, this.runtime(candidate.agentId).workspaceRoot);
+      const runtime = this.runtime(candidate.agentId);
+      const ledger = await this.store.confirm(batchId, contentHash, runtime.workspaceRoot);
+      await this.refreshIndex(candidate.agentId, runtime.indexAgentIds);
+      return ledger;
     });
   }
 }

@@ -78,6 +78,8 @@ export interface OutputCaptureRequest {
 
 export interface GatewayClient {
   version(): Promise<string>;
+  /** Refreshes the file-backed memory index for trusted, server-configured OpenClaw agents. */
+  refreshMemoryIndex?(agentIds: readonly string[]): Promise<void>;
   createSession(runtimeAgentId: string): Promise<CreatedSession>;
   send(sessionKey: string, message: string, idempotencyKey: string, attachments?: readonly GatewayAttachment[]): Promise<{ runId: string }>;
   waitForCompletion(sessionId: string, runId: string, signal?: AbortSignal): Promise<void>;

@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { open, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
-import type { CollectedOutput, CommandArgument, CommandsCatalog, ConfiguredToolsCatalog, CreatedSession, EffectiveToolsInventory, GatewayAttachment, GatewayClient, GatewayCommand, GatewayStatus, ModelsCatalog, OpenClawModel, SessionOverrides, ToolCatalogEntry, ToolCatalogGroup } from "./adapter.js";
+import { assertSupportedVersion, type CollectedOutput, type CommandArgument, type CommandsCatalog, type ConfiguredToolsCatalog, type CreatedSession, type EffectiveToolsInventory, type GatewayAttachment, type GatewayClient, type GatewayCommand, type GatewayStatus, type ModelsCatalog, type OpenClawModel, type SessionOverrides, type ToolCatalogEntry, type ToolCatalogGroup } from "./adapter.js";
 
 interface CliOptions {
   executable?: string;
@@ -16,6 +16,10 @@ interface CliOptions {
   /** Kept for integration tools compiled against the old option name. */
   runTimeoutMs?: number;
   pollIntervalMs?: number;
+  /** Maximum time for each local OpenClaw memory-index refresh. */
+  memoryIndexTimeoutMs?: number;
+  /** Trusted agent ids accepted by refreshMemoryIndex; defaults to sessionsRoots keys. */
+  memoryIndexAgentIds?: ReadonlySet<string>;
   commandRunner?: (executable: string, args: string[], timeoutMs: number) => Promise<string>;
   /** Persistent gateway transport; CLI remains available for local-only commands. */
   rpc?: { request(method: string, params: unknown): Promise<unknown> };
@@ -215,8 +219,10 @@ export function trajectoryRunState(jsonl: string, runId: string): TrajectoryRunS
 export class OpenClawCliClient implements GatewayClient {
   readonly executable: string; readonly sessionsRoots: ReadonlyMap<string, string>; readonly requestTimeoutMs: number;
   readonly gatewayRunTimeoutMs: number; readonly watcherGraceMs: number; readonly pollIntervalMs: number;
+  readonly memoryIndexTimeoutMs: number;
   private readonly keysBySessionId = new Map<string, string>();
   private readonly sessionIdsByKey = new Map<string, string>();
+  private readonly memoryIndexAgentIds: ReadonlySet<string>;
   private readonly commandRunner: (executable: string, args: string[], timeoutMs: number) => Promise<string>;
   private readonly rpc: { request(method: string, params: unknown): Promise<unknown> } | undefined;
   constructor(options: CliOptions) {
@@ -226,9 +232,12 @@ export class OpenClawCliClient implements GatewayClient {
     this.rpc = options.rpc;
     this.gatewayRunTimeoutMs = options.gatewayRunTimeoutMs ?? options.runTimeoutMs ?? 30 * 60_000;
     this.watcherGraceMs = options.watcherGraceMs ?? 30_000; this.pollIntervalMs = options.pollIntervalMs ?? 500;
+    this.memoryIndexTimeoutMs = options.memoryIndexTimeoutMs ?? 5 * 60_000;
+    this.memoryIndexAgentIds = options.memoryIndexAgentIds ?? new Set(options.sessionsRoots.keys());
     for (const [name, value] of [["gatewayRunTimeoutMs", this.gatewayRunTimeoutMs], ["watcherGraceMs", this.watcherGraceMs], ["pollIntervalMs", this.pollIntervalMs]] as const) {
       if (!Number.isInteger(value) || value < 1) throw new Error(`${name} 必须是正整数`);
     }
+    if (!Number.isInteger(this.memoryIndexTimeoutMs) || this.memoryIndexTimeoutMs < 1) throw new Error("memoryIndexTimeoutMs 必须是正整数");
   }
   private async call<T>(method: string, params: unknown, timeout = this.requestTimeoutMs): Promise<T> {
     if (this.rpc) return await this.rpc.request(method, params) as T;
@@ -239,6 +248,14 @@ export class OpenClawCliClient implements GatewayClient {
     const output = await this.commandRunner(this.executable, ["--version"], this.requestTimeoutMs);
     const match = /OpenClaw\s+(\d+\.\d+\.\d+)/.exec(output);
     if (!match) throw new Error("无法识别 OpenClaw 版本"); return match[1]!;
+  }
+  async refreshMemoryIndex(agentIds: readonly string[]): Promise<void> {
+    const targets = [...new Set(agentIds)];
+    if (!targets.length || targets.some(agentId => !this.memoryIndexAgentIds.has(agentId))) throw new Error("MEMORY_INDEX_AGENT_NOT_ALLOWED");
+    assertSupportedVersion(await this.version());
+    for (const agentId of targets) {
+      await this.commandRunner(this.executable, ["memory", "index", "--agent", agentId], this.memoryIndexTimeoutMs);
+    }
   }
   async createSession(runtimeAgentId: string): Promise<CreatedSession> {
     const root = this.sessionsRoots.get(runtimeAgentId); if (!root) throw new Error("runtime agent 不在 allowlist");
