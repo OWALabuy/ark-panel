@@ -195,17 +195,17 @@ export class OpenClawStreamObserver {
     await this.request("sessions.messages.subscribe", { key: sessionKey }); this.subscribed.add(sessionKey);
   }
 
-  request(method: string, params: unknown): Promise<unknown> {
+  request(method: string, params: unknown, timeoutMs?: number): Promise<unknown> {
     this.start();
-    return this.requestConnected(method, params);
+    return this.requestConnected(method, params, timeoutMs);
   }
 
-  private async requestConnected(method: string, params: unknown): Promise<unknown> {
+  private async requestConnected(method: string, params: unknown, timeoutMs?: number): Promise<unknown> {
     await this.waitUntilConnected();
-    return await this.rawRequest(method, params);
+    return await this.rawRequest(method, params, timeoutMs);
   }
 
-  private rawRequest(method: string, params: unknown): Promise<unknown> {
+  private rawRequest(method: string, params: unknown, timeoutMs = this.requestTimeoutMs): Promise<unknown> {
     const socket = this.socket; if (!socket || socket.readyState !== 1) return Promise.reject(new Error("gateway stream is not connected"));
     const id = randomUUID();
     return new Promise((resolve, reject) => {
@@ -214,7 +214,7 @@ export class OpenClawStreamObserver {
         const error = new Error(`gateway request timeout for ${method}`);
         this.diagnostic(error.message);
         this.invalidateSocket(socket, error, 1011, "request timeout");
-      }, this.requestTimeoutMs); timer.unref();
+      }, timeoutMs); timer.unref();
       this.pending.set(id, { resolve, reject, timer });
       try { socket.send(JSON.stringify({ type: "req", id, method, params })); }
       catch (error) { clearTimeout(timer); this.pending.delete(id); reject(error instanceof Error ? error : new Error(String(error))); }

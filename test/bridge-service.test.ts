@@ -297,9 +297,12 @@ test("compact 使用 typed RPC 并从原 transcript 采纳 rotation 前的已验
   const root = await mkdtemp(join(tmpdir(), "bridge-compact-")); t.after(() => rm(root, { recursive: true, force: true }));
   await writeFile(join(root, "sessions.json"), "{}"); const order: string[] = [];
   const created = { sessionId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", sessionKey: "agent:runtime:key", transcriptPath: join(root, "a.jsonl") };
+  const successor = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  await writeFile(join(root, `${created.sessionId}.jsonl`), "original");
+  await writeFile(join(root, `${successor}.jsonl.deleted.fixture`), "successor");
   const entry = { type: "compaction", id: "c1", parentId: "a1", summary: "summary", firstKeptEntryId: "a1", tokensBefore: 20 };
   const client: GatewayClient = { async version() { return "2026.6.11"; }, async createSession() { order.push("create"); return created; },
-    async compactSession() { order.push("compact"); return { compacted: true, sessionId: "successor", sessionFile: join(root, "successor.jsonl") }; },
+    async compactSession() { order.push("compact"); return { compacted: true, sessionId: successor, sessionFile: join(root, "successor.jsonl") }; },
     async send() { throw new Error("command text must not be sent"); }, async waitForCompletion() {}, async abort() {},
     async deleteSession() { order.push("delete"); } };
   const materializer: BridgeMaterializer = { async replaceCreatedTranscript() { order.push("materialize"); return 1; },
@@ -311,4 +314,21 @@ test("compact 使用 typed RPC 并从原 transcript 采纳 rotation 前的已验
   });
   assert.deepEqual(result, { compacted: true, entry });
   assert.deepEqual(order, ["create", "materialize", "compact", "verify-original", "delete"]);
+  assert.deepEqual(await readdir(root), ["sessions.json"]);
+});
+
+test("compact RPC outcome unknown 时先确认 abort；无法确认则保留 runtime artifacts", async t => {
+  const root = await mkdtemp(join(tmpdir(), "bridge-compact-unknown-")); t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(join(root, "sessions.json"), "{}"); const id = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+  await writeFile(join(root, `${id}.jsonl`), "retained"); let deleted = false;
+  const client: GatewayClient = { async version() { return "2026.6.11"; },
+    async createSession() { return { sessionId: id, sessionKey: "agent:runtime:key", transcriptPath: join(root, `${id}.jsonl`) }; },
+    async compactSession() { throw new Error("rpc timeout"); }, async abort() { throw new Error("release unknown"); },
+    async send() { throw new Error("unused"); }, async waitForCompletion() {}, async deleteSession() { deleted = true; } };
+  const materializer: BridgeMaterializer = { async replaceCreatedTranscript() { return 1; }, async readNewEntries() { return []; },
+    verifyAndStripSubmittedUser(value) { return value; }, async readAndVerifyCompaction() { throw new Error("unused"); } };
+  await assert.rejects(new BridgeService(client, materializer, new Map([["runtime", root]])).compact({
+    runtimeAgentId: "runtime", history: { header: { type: "session" }, entries: [{ type: "message", id: "a" }] }
+  }), /rpc timeout/);
+  assert.equal(deleted, false); assert.equal((await readdir(root)).includes(`${id}.jsonl`), true);
 });

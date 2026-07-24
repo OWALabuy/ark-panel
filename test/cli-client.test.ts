@@ -82,14 +82,16 @@ test("生成控制 RPC 复用持久 transport，create 直接采用返回的 ses
 
 test("compact 仅调用 sessions.compact typed RPC 并拒绝异步 pending", async () => {
   const root = await mkdtemp(join(tmpdir(), "panel-cli-compact-")), calls: string[] = [];
-  let pending = false;
-  const client = new OpenClawCliClient({ sessionsRoots: new Map([["runtime", root]]), rpc: { async request(method) {
-    calls.push(method);
+  let pending = false, timeout: number | undefined;
+  const successor = "33333333-3333-4333-8333-333333333333", successorPath = join(root, `${successor}.jsonl`);
+  const client = new OpenClawCliClient({ sessionsRoots: new Map([["runtime", root]]), gatewayRunTimeoutMs: 54_321, rpc: { async request(method, _params, timeoutMs) {
+    calls.push(method); timeout = timeoutMs;
     if (method !== "sessions.compact") throw new Error("unexpected");
     return pending ? { ok: true, compacted: false, result: { details: { pending: true } } } :
-      { ok: true, compacted: true, result: { sessionId: "successor", sessionFile: "/fixture/successor.jsonl" } };
+      { ok: true, compacted: true, result: { sessionId: successor, sessionFile: successorPath } };
   } } });
-  assert.deepEqual(await client.compactSession("agent:runtime:key"), { compacted: true, sessionId: "successor", sessionFile: "/fixture/successor.jsonl" });
+  assert.deepEqual(await client.compactSession("agent:runtime:key"), { compacted: true, sessionId: successor, sessionFile: successorPath });
+  assert.equal(timeout, 54_321);
   pending = true; await assert.rejects(client.compactSession("agent:runtime:key"), /ASYNC_UNSUPPORTED/);
   assert.deepEqual(calls, ["sessions.compact", "sessions.compact"]);
 });

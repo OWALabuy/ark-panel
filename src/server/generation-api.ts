@@ -12,6 +12,7 @@ import { PanelRunStore, publicRun, terminalRunStatuses, type PanelRunRecord, typ
 import { GatewayRunError } from "../gateway/cli-client.js";
 import { assignSessionAttachments, garbageCollectAttachments, getSessionAttachment, pruneSessionAttachments,
   readSessionAttachmentBytes, removeSessionAttachments, storeSessionAttachment } from "../storage/attachments.js";
+import { currentTranscriptBranch } from "../domain/branch.js";
 
 interface BridgeRunner { generate(request: BridgeRequest): Promise<BridgeResult>; cleanupOrphanedSession?(request: BridgeOrphanCleanupRequest): Promise<string[]> }
 export interface GenerationConfig { dataRoot: string; runtimeByAgent: ReadonlyMap<string, string>; workspaceByAgent?: ReadonlyMap<string, string>; completedCacheLimit?: number; contextBudget?: ContextBudgetEstimator; operations?: SessionOperationCoordinator }
@@ -19,8 +20,7 @@ interface InternalRunStream { public: PublicRunStream; lastAssistantSeq: number;
 const MAX_GATEWAY_ATTACHMENT_BYTES = 15 * 1024 * 1024;
 
 function latestEntryId(document: TranscriptDocument): string | null {
-  for (let index = document.entries.length - 1; index >= 0; index--) if (typeof document.entries[index]!.id === "string") return document.entries[index]!.id as string;
-  return null;
+  const id = currentTranscriptBranch(document).entries.at(-1)?.id; return typeof id === "string" ? id : null;
 }
 
 function outputMimeType(fileName: string, supplied?: string): string {

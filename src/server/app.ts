@@ -291,6 +291,8 @@ export function createPanelServer(options: AppOptions) {
       Object.assign(known, { COMPACTION_NOT_NEEDED: [409, "当前会话暂不需要压缩"], GATEWAY_COMPACTION_UNSUPPORTED: [501, "当前 OpenClaw 适配器不支持压缩"],
         OPENCLAW_COMPACTION_FAILED: [502, "OpenClaw 未能完成压缩"], OPENCLAW_COMPACTION_ASYNC_UNSUPPORTED: [502, "OpenClaw 返回了无法安全采纳的异步压缩结果"],
         OPENCLAW_COMPACTION_ROTATION_UNSUPPORTED: [502, "OpenClaw 压缩后未保留可验证的原始 transcript"],
+        OPENCLAW_COMPACTION_ROTATION_INVALID: [502, "OpenClaw 返回了不受信任的压缩后继路径"],
+        OPENCLAW_COMPACTION_OUTCOME_UNKNOWN: [502, "与 OpenClaw 的压缩连接中断，结果暂时无法确认；请稍后重试"],
         OPENCLAW_COMPACTION_REWRITE_UNSUPPORTED: [502, "OpenClaw 改写了历史，面板已拒绝采纳压缩结果"],
         OPENCLAW_COMPACTION_ENTRY_INVALID: [502, "OpenClaw 返回的压缩记录无效"], OPENCLAW_COMPACTION_PARENT_INVALID: [502, "OpenClaw 返回的压缩父链无效"],
         OPENCLAW_COMPACTION_BOUNDARY_INVALID: [502, "OpenClaw 返回的压缩边界无效"], REVISION_CONFLICT: [409, "会话已更新，请刷新后重试。"],

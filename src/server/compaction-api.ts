@@ -27,7 +27,7 @@ export class PanelCompactionApi {
   }
 
   async compact(recordId: string, expectedRevision?: string): Promise<{
-    compacted: boolean; revision: string; reason?: string; entry?: JsonObject;
+    compacted: boolean; revision: string; reason?: string;
   }> {
     return await this.operations.runExclusive(recordId, async () => {
       let agentId: string | undefined;
@@ -57,7 +57,7 @@ export class PanelCompactionApi {
       };
       const committed: TranscriptDocument = { header: document.header, entries: [...document.entries, result.entry] };
       await commitPanelTranscript(this.config.dataRoot, metadata, committed);
-      return { compacted: true, revision: revision(await lstat(transcriptPath)), entry: result.entry };
+      return { compacted: true, revision: revision(await lstat(transcriptPath)) };
     });
   }
 }

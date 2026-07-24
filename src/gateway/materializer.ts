@@ -44,13 +44,13 @@ export class FileBridgeMaterializer implements BridgeMaterializer {
     const entry = document.entries.at(-1)!;
     if (entry.type !== "compaction" || typeof entry.id !== "string" || !entry.id ||
       typeof entry.summary !== "string" || !entry.summary.trim() ||
+      typeof entry.timestamp !== "string" || !Number.isFinite(Date.parse(entry.timestamp)) ||
       typeof entry.tokensBefore !== "number" || !Number.isFinite(entry.tokensBefore) || entry.tokensBefore < 0) {
       throw new Error("OPENCLAW_COMPACTION_ENTRY_INVALID");
     }
     const priorIds = new Set(history.entries.flatMap(value => typeof value.id === "string" ? [value.id] : []));
     if (priorIds.has(entry.id)) throw new Error("OPENCLAW_COMPACTION_ENTRY_INVALID");
-    const expectedParent = [...history.entries].reverse().find(value =>
-      value.type === "message" || value.type === "compaction")?.id ?? null;
+    const expectedParent = history.entries.at(-1)?.id ?? null;
     if (entry.parentId !== expectedParent) throw new Error("OPENCLAW_COMPACTION_PARENT_INVALID");
     if (entry.firstKeptEntryId !== entry.id &&
       (typeof entry.firstKeptEntryId !== "string" || !priorIds.has(entry.firstKeptEntryId))) {

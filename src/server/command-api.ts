@@ -18,14 +18,13 @@ export interface CommandProviders {
   thinkingLevels?: readonly string[];
   supportsThinkingLevel?(modelKey: string | undefined, level: string): Promise<boolean>;
   validateOverrides?(agentId: string, overrides: { modelOverride?: string; thinkingLevel?: string }): Promise<void>;
-  compact?(recordId: string, expectedRevision?: string): Promise<{ compacted: boolean; revision: string; reason?: string; entry?: JsonObject }>;
+  compact?(recordId: string, expectedRevision?: string): Promise<{ compacted: boolean; revision: string; reason?: string }>;
 }
 export interface CommandRequest { command: string; args: string[]; revision?: string }
 export interface CommandResult { command: PanelCommandName; allowlistVersion: number; effect: "read" | "updated" | "created"; data: unknown }
 
 function latestEntryId(document: TranscriptDocument): string | null {
-  for (let index = document.entries.length - 1; index >= 0; index--) if (typeof document.entries[index]!.id === "string") return document.entries[index]!.id as string;
-  return null;
+  const id = currentTranscriptBranch(document).entries.at(-1)?.id; return typeof id === "string" ? id : null;
 }
 function event(command: PanelCommandName, value: string | undefined, document: TranscriptDocument): JsonObject {
   const now = new Date(); return { type: command === "model" ? "model_change" : "custom", id: randomUUID(), parentId: latestEntryId(document), timestamp: now.toISOString(),

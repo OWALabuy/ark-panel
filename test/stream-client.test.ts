@@ -109,3 +109,18 @@ test("observer replaces a socket after an RPC timeout", async () => {
   assert.deepEqual(await observer.request("sessions.create", {}), { key: "agent:a:new" });
   observer.stop();
 });
+
+test("observer honors a longer per-request timeout for model-backed RPCs", async () => {
+  const sockets: FakeSocket[] = [];
+  const observer = new OpenClawStreamObserver({ url: "ws://fixture", requestTimeoutMs: 10,
+    webSocketFactory: () => {
+      const socket = new FakeSocket((current, frame) => {
+        const delay = frame.method === "sessions.compact" ? 30 : 0;
+        setTimeout(() => current.message({ type: "res", id: frame.id, ok: true,
+          payload: frame.method === "connect" ? { server: { version: "2026.6.11" } } : { ok: true } }), delay);
+      });
+      sockets.push(socket); queueMicrotask(() => socket.challenge()); return socket;
+    } });
+  assert.deepEqual(await observer.request("sessions.compact", {}, 60), { ok: true });
+  observer.stop();
+});

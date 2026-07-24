@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { open, readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { assertSupportedVersion, type CollectedOutput, type CommandArgument, type CommandsCatalog, type ConfiguredToolsCatalog, type CreatedSession, type EffectiveToolsInventory, type GatewayAttachment, type GatewayClient, type GatewayCommand, type GatewayCompactionResult, type GatewayStatus, type ModelsCatalog, type OpenClawModel, type SessionOverrides, type ToolCatalogEntry, type ToolCatalogGroup } from "./adapter.js";
 
@@ -22,7 +22,7 @@ interface CliOptions {
   memoryIndexAgentIds?: ReadonlySet<string>;
   commandRunner?: (executable: string, args: string[], timeoutMs: number) => Promise<string>;
   /** Persistent gateway transport; CLI remains available for local-only commands. */
-  rpc?: { request(method: string, params: unknown): Promise<unknown> };
+  rpc?: { request(method: string, params: unknown, timeoutMs?: number): Promise<unknown> };
 }
 
 export type GatewayRunErrorCode = "GATEWAY_RUN_TIMEOUT" | "GATEWAY_RUN_ABORTED" | "GATEWAY_RUN_FAILED" |
@@ -224,7 +224,7 @@ export class OpenClawCliClient implements GatewayClient {
   private readonly sessionIdsByKey = new Map<string, string>();
   private readonly memoryIndexAgentIds: ReadonlySet<string>;
   private readonly commandRunner: (executable: string, args: string[], timeoutMs: number) => Promise<string>;
-  private readonly rpc: { request(method: string, params: unknown): Promise<unknown> } | undefined;
+  private readonly rpc: { request(method: string, params: unknown, timeoutMs?: number): Promise<unknown> } | undefined;
   constructor(options: CliOptions) {
     this.executable = options.executable ?? "openclaw"; this.sessionsRoots = options.sessionsRoots;
     this.requestTimeoutMs = options.requestTimeoutMs ?? 15_000;
@@ -240,7 +240,7 @@ export class OpenClawCliClient implements GatewayClient {
     if (!Number.isInteger(this.memoryIndexTimeoutMs) || this.memoryIndexTimeoutMs < 1) throw new Error("memoryIndexTimeoutMs 必须是正整数");
   }
   private async call<T>(method: string, params: unknown, timeout = this.requestTimeoutMs): Promise<T> {
-    if (this.rpc) return await this.rpc.request(method, params) as T;
+    if (this.rpc) return await this.rpc.request(method, params, timeout) as T;
     const output = await this.commandRunner(this.executable, ["gateway", "call", method, "--json", "--timeout", String(timeout), "--params", payload(params)], timeout + 2_000);
     return JSON.parse(output) as T;
   }
@@ -271,7 +271,10 @@ export class OpenClawCliClient implements GatewayClient {
   async compactSession(sessionKey: string): Promise<GatewayCompactionResult> {
     const agentId = sessionKey.split(":")[1];
     if (!agentId || !this.sessionsRoots.has(agentId)) throw new Error("RUNTIME_NOT_CONFIGURED");
-    const response = object(await this.call<unknown>("sessions.compact", { key: sessionKey, agentId }, this.gatewayRunTimeoutMs), "COMPACTION_RESPONSE");
+    let raw: unknown;
+    try { raw = await this.call<unknown>("sessions.compact", { key: sessionKey, agentId }, this.gatewayRunTimeoutMs); }
+    catch { throw new Error("OPENCLAW_COMPACTION_OUTCOME_UNKNOWN"); }
+    const response = object(raw, "COMPACTION_RESPONSE");
     if (response.ok !== true) throw new Error("OPENCLAW_COMPACTION_FAILED");
     if (response.compacted !== true) {
       const result = response.result === undefined ? undefined : object(response.result, "COMPACTION_RESULT");
@@ -280,9 +283,16 @@ export class OpenClawCliClient implements GatewayClient {
       return { compacted: false, ...(typeof response.reason === "string" ? { reason: response.reason } : {}) };
     }
     const result = object(response.result, "COMPACTION_RESULT");
-    return { compacted: true,
-      ...(typeof result?.sessionId === "string" ? { sessionId: result.sessionId } : {}),
-      ...(typeof result?.sessionFile === "string" ? { sessionFile: result.sessionFile } : {}) };
+    const sessionId = typeof result.sessionId === "string" ? result.sessionId : undefined;
+    const sessionFile = typeof result.sessionFile === "string" ? result.sessionFile : undefined;
+    if (sessionId && sessionId !== this.sessionIdsByKey.get(sessionKey)) {
+      const root = this.sessionsRoots.get(agentId);
+      if (!root || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(sessionId) ||
+        !sessionFile || resolve(dirname(sessionFile)) !== resolve(root) || basename(sessionFile) !== `${sessionId}.jsonl`) {
+        throw new Error("OPENCLAW_COMPACTION_ROTATION_INVALID");
+      }
+    }
+    return { compacted: true, ...(sessionId ? { sessionId } : {}), ...(sessionFile ? { sessionFile } : {}) };
   }
   async applySessionOverrides(sessionKey: string, overrides: SessionOverrides): Promise<void> {
     await this.call("sessions.patch", sessionPatchParams(sessionKey, overrides));

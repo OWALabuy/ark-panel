@@ -3,7 +3,7 @@ import test from "node:test";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createPanelSession, loadPanelSession } from "../src/storage/panel-sessions.js";
+import { commitPanelTranscript, createPanelSession, loadPanelSession } from "../src/storage/panel-sessions.js";
 import { PANEL_COMMAND_ALLOWLIST_VERSION, PanelCommandApi, transcriptUsage } from "../src/server/command-api.js";
 
 async function fixture() {
@@ -86,11 +86,21 @@ test("compact 走独立结构化 provider 并透传 revision，不进入普通�
   const x = await fixture(); const seen: unknown[] = [];
   const api = new PanelCommandApi(x.root, [x.agentId], {
     async models() { return []; }, async commands() { return []; }, async status() { return {}; }, async createPanel() { return {}; },
-    async compact(recordId, revision) { seen.push({ recordId, revision }); return { compacted: true, revision: "next",
-      entry: { type: "compaction", id: "c1" } }; }
+    async compact(recordId, revision) { seen.push({ recordId, revision }); return { compacted: true, revision: "next" }; }
   });
   const result = await api.dispatch(x.recordId, { command: "/compact", args: [], revision: "base" });
   assert.equal(result.command, "compact"); assert.equal(result.effect, "updated");
   assert.deepEqual(seen, [{ recordId: x.recordId, revision: "base" }]);
   await assert.rejects(api.dispatch(x.recordId, { command: "compact", args: ["unsafe"] }), /COMMAND_ARGS_INVALID/);
+});
+
+test("设置事件从 compaction active leaf 续接而不是文件末尾 side entry", async () => {
+  const x = await fixture(), loaded = await loadPanelSession(x.root, x.agentId, x.recordId);
+  await commitPanelTranscript(x.root, loaded.metadata, { header: loaded.document.header, entries: [
+    { type: "message", id: "u1", parentId: null, message: { role: "user" } },
+    { type: "compaction", id: "c1", parentId: "u1", summary: "summary", firstKeptEntryId: "u1", tokensBefore: 10 },
+    { type: "custom", id: "side", parentId: "c1", appendMode: "side" }
+  ] });
+  await x.api.dispatch(x.recordId, { command: "reasoning", args: ["on"] });
+  assert.equal((await loadPanelSession(x.root, x.agentId, x.recordId)).document.entries.at(-1)?.parentId, "c1");
 });

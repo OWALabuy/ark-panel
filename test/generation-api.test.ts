@@ -83,6 +83,22 @@ test("GenerationApi 只在完整 bridge 成功后原子提交 user 和 run，并
   assert.equal(document.entries.length, 3); assert.equal(document.entries[1]?.parentId, "previous"); assert.equal(document.entries[2]?.parentId, document.entries[1]?.id);
 });
 
+test("压缩后生成从规范 active leaf 续接，不接到文件末尾 side entry", async () => {
+  const root = await mkdtemp(join(tmpdir(), "generation-active-leaf-"));
+  const metadata = await createPanelSession(root, "claude", { header: { type: "session" }, entries: [
+    { type: "message", id: "u1", parentId: null, message: { role: "user", content: "old" } },
+    { type: "compaction", id: "c1", parentId: "u1", timestamp: "2026-07-24T12:00:00.000Z", summary: "summary", firstKeptEntryId: "u1", tokensBefore: 10 },
+    { type: "custom", id: "side", parentId: "c1", appendMode: "side" }
+  ] });
+  const api = new PanelGenerationApi({ async generate(request) { return { runId: request.idempotencyKey, sessionId: "temp", entries: [
+    { type: "message", id: "answer", parentId: request.latestUserEntryId, message: { role: "assistant", content: "ok" } }
+  ] }; } }, { dataRoot: root, runtimeByAgent: new Map([["claude", "runtime"]]) });
+  await api.generate(metadata.recordId, "continue", new AbortController().signal);
+  const document = (await loadPanelSession(root, "claude", metadata.recordId)).document;
+  const user = document.entries.find(entry => entry.message && (entry.message as { role?: string }).role === "user" && entry.id !== "u1");
+  assert.equal(user?.parentId, "c1");
+});
+
 test("bridge 失败不写入 user entry", async () => {
   const root = await mkdtemp(join(tmpdir(), "generation-api-")); const metadata = await createPanelSession(root, "claude", { header: { type: "session" }, entries: [] });
   const api = new PanelGenerationApi({ async generate() { throw new Error("failed"); } }, { dataRoot: root, runtimeByAgent: new Map([["claude", "runtime"]]) });

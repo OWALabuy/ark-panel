@@ -42,6 +42,7 @@ export class BridgeService {
   async compact(request: BridgeCompactionRequest): Promise<BridgeCompactionResult> {
     assertSupportedVersion(await this.client.version());
     let created: CreatedSession | undefined; let primaryError: unknown; let entryStaged = false;
+    let compactAttempted = false, rpcCompleted = false, cleanupSafe = true; let successorSessionId: string | undefined;
     try {
       created = await this.client.createSession(request.runtimeAgentId);
       await this.materializer.replaceCreatedTranscript(created, request.history);
@@ -51,20 +52,29 @@ export class BridgeService {
       }
       if (!this.client.compactSession) throw new Error("GATEWAY_COMPACTION_UNSUPPORTED");
       if (!this.materializer.readAndVerifyCompaction) throw new Error("GATEWAY_COMPACTION_UNSUPPORTED");
-      const result = await this.client.compactSession(created.sessionKey);
+      compactAttempted = true; const result = await this.client.compactSession(created.sessionKey); rpcCompleted = true;
+      successorSessionId = result.sessionId && result.sessionId !== created.sessionId ? result.sessionId : undefined;
       if (!result.compacted) return { compacted: false, ...(result.reason ? { reason: result.reason } : {}) };
       // Rotation may report a successor session, but 2026.6.11 first appends
       // the hardened compaction to the original transcript. Only that verified
       // append is authoritative for the panel; successor contents are ignored.
       const entry = await this.materializer.readAndVerifyCompaction(created, request.history);
       entryStaged = true; return { compacted: true, entry };
-    } catch (error) { primaryError = error; throw error; }
+    } catch (error) {
+      primaryError = error;
+      if (created && compactAttempted && !rpcCompleted) {
+        cleanupSafe = false;
+        try { await this.client.abort(created.sessionKey, undefined, created.sessionId); cleanupSafe = true; }
+        catch { process.stderr.write("[ark-panel] compact outcome unknown; temporary session retained\n"); }
+      }
+      throw error;
+    }
     finally {
-      if (created) {
+      if (created && cleanupSafe) {
         try {
           await unregisterAndClean(this.client, { runtimeAgentId: request.runtimeAgentId, sessionId: created.sessionId,
             sessionKey: created.sessionKey, runtimeSessionsRoot: this.allowedRuntimeRoots.get(request.runtimeAgentId) ?? "",
-            allowedRuntimeRoots: this.allowedRuntimeRoots });
+            allowedRuntimeRoots: this.allowedRuntimeRoots }, successorSessionId ? [successorSessionId] : []);
         } catch (cleanupError) {
           if (!primaryError && !entryStaged) throw cleanupError;
           process.stderr.write("[ark-panel] compact workspace cleanup failed after result staging\n");
