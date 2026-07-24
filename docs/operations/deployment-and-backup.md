@@ -97,9 +97,9 @@ gateway 单轮执行默认最多等待 30 分钟，随后再给轨迹观察器 3
 
 面板在创建 gateway 临时 session 之前，对“完整历史 + 本轮用户消息”执行保守预算检查。默认历史预算为 `100000` tokens，可通过 `PANEL_CONTEXT_HISTORY_BUDGET_TOKENS` 调整（至少 1024）。
 
-当前估算器是稳定、可测试的 `utf8-bytes-upper-bound-v2`：以序列化 transcript 的 UTF-8 字节数作为 token 数上界，再为每个 entry 加固定结构开销。它不是模型官方 tokenizer，会明显高估普通文本，但不会像“字节数除以固定比例”那样低估高熵 ASCII；预算只覆盖面板提供的历史，默认值还为 gateway 额外注入的系统提示、记忆、工具定义和模型输出留出空间。
+当前估算器是稳定、可测试的 `utf8-bytes-upper-bound-v3`：先按 OpenClaw 2026.6.11 的有效上下文语义投影 current branch；最新 compaction 之前只保留摘要与 inclusive kept tail，之后保留新消息，再以序列化投影的 UTF-8 字节数作为 token 数上界并增加固定结构开销。它不是模型官方 tokenizer，会明显高估普通文本；预算只覆盖面板提供的历史，默认值还为 gateway 额外注入的系统提示、记忆、工具定义和模型输出留出空间。
 
-若估算超过预算，推理不会触达 gateway，panel transcript 也不会写入本轮 user entry。SSE 返回稳定错误码 `CONTEXT_BUDGET_EXCEEDED`、估算值和中文处理建议。第一版不会自动截断内容，也不会生成未经模型确认的“摘要”；用户需要从较早位置 fork，或等待后续正式压缩功能。
+若估算超过预算，推理不会触达 gateway，panel transcript 也不会写入本轮 user entry。SSE 返回稳定错误码 `CONTEXT_BUDGET_EXCEEDED`、估算值和压缩操作。用户可从会话操作、90% 状态动作或 `/compact` 手动触发同一结构化压缩 API；面板不会自动压缩。eligible 会话若有 checkpoint 后新消息，可先进入现有候选预览确认，再自动继续压缩，也可直接压缩。
 
 调整预算时应同时考虑所用模型上下文窗口、runtime 系统提示和工具集合大小。把值设得接近模型最大窗口并不安全。
 

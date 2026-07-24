@@ -71,7 +71,7 @@ Legend: ✅ available · 🚧 scheduled · 💡 candidate (not scheduled) · ⛔
 | Generation | Durable run lifecycle, reconnect, stop, retry, and idempotent sending | ✅ | Server-owned run state survives browser disconnects; SSE can be re-subscribed and completed message groups commit atomically |
 | Generation | Live assistant text and tool status | ✅ | Relays OpenClaw's coalesced updates (currently about every 150 ms), not one event per token; tool stdout and reasoning are not streamed |
 | Context | Configurable context-budget protection | ✅ | Rejects oversized requests before generation instead of silently truncating history |
-| Context | Durable compaction and `/compact` | 🚧 | The panel-owned backend now persists a verified OpenClaw compaction entry without deleting history; UI markers and effective-budget projection remain scheduled |
+| Context | Durable compaction and `/compact` | ✅ | Manual `/compact` and UI actions persist verified OpenClaw summaries without deleting history; effective-context budgeting, markers, fork/export behavior, and optional memory-first review are complete |
 | Commands | `/model`, `/think`, `/reasoning`, `/new` | ✅ | Panel-native structured operations; command text is never forwarded as a normal prompt |
 | Commands | `/commands`, `/help`, `/status`, `/models`, `/tools`, `/usage` | ✅ | Read-only structured command API with a default-deny allowlist; tools are the configured runtime catalog, while usage is model-reported data for the current transcript branch |
 | Commands | `/reset`, `/bash`, config/restart, and arbitrary passthrough | ⛔ | Deliberately excluded because of lifecycle, host, and gateway safety risks |
@@ -91,7 +91,7 @@ Legend: ✅ available · 🚧 scheduled · 💡 candidate (not scheduled) · ⛔
 | Access | In-UI password change | ⛔ | Kept CLI-only (`npm run password-hash`); logout remains at the bottom of the settings drawer |
 | Operations | Backup, integrity verification, restore, health check, and systemd example | ✅ | Includes deployment smoke and fixture-based browser acceptance coverage |
 
-The appearance, sidebar, avatar, title, conversation-status, background-completion, bilingual UI, and reviewed memory workflow are complete. The durable long-context strategy with `/compact` follows after that. Scratch conversations still read existing memory; they simply do not enter the panel-managed consolidation path. The detailed boundary lives in [the memory-module decision](docs/decisions/panel-memory.md). OpenClaw compatibility remains ongoing maintenance. The experience-feature rationale lives in [the UX features decision](docs/decisions/ux-features.md); detailed constraints and acceptance criteria live in the [implementation specification](docs/implementation-spec.md).
+The appearance, sidebar, avatar, title, conversation-status, background-completion, bilingual UI, reviewed memory workflow, and manual durable long-context strategy are complete. Scratch conversations still read existing memory; they simply do not enter the panel-managed consolidation path. Compaction never deletes the full panel transcript and is not automatic. The detailed boundary lives in [the memory-module decision](docs/decisions/panel-memory.md). OpenClaw compatibility remains ongoing maintenance. The experience-feature rationale lives in [the UX features decision](docs/decisions/ux-features.md); detailed constraints and acceptance criteria live in the [implementation specification](docs/implementation-spec.md).
 
 ## Install and test
 

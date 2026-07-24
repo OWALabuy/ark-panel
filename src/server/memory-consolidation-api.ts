@@ -44,6 +44,17 @@ function rangeIsCurrent(document: TranscriptDocument, previousCheckpointEntryId:
   if (previousCheckpointEntryId && start === 0 || ids[start] !== fromEntryId) return false;
   return ids.indexOf(throughEntryId, start) >= start;
 }
+function meaningfulMessage(entry: JsonObject): boolean {
+  if (entry.type !== "message") return false;
+  const message = entry.message;
+  if (!message || typeof message !== "object" || Array.isArray(message) ||
+    !["user", "assistant"].includes(String((message as JsonObject).role))) return false;
+  const content = (message as JsonObject).content;
+  if (typeof content === "string") return Boolean(content.trim());
+  return Array.isArray(content) && content.some(block => typeof block === "string" ? Boolean(block.trim()) :
+    Boolean(block && typeof block === "object" && !Array.isArray(block) &&
+      (typeof (block as JsonObject).text === "string" ? ((block as JsonObject).text as string).trim() : true)));
+}
 
 export class PanelMemoryConsolidationApi {
   private readonly queues = new Map<string, Promise<void>>();
@@ -53,6 +64,17 @@ export class PanelMemoryConsolidationApi {
     private readonly tools: MemoryToolProvider) {}
 
   agents(): string[] { return [...this.runtimes.keys()].sort(); }
+
+  async status(recordId: string): Promise<{ available: boolean; eligible: boolean; pending: boolean }> {
+    const source = await this.sources.memorySource(recordId); if (!source) throw new Error("SESSION_NOT_FOUND");
+    const available = this.runtimes.has(source.record.agentId), eligible = source.record.memoryDisposition === "eligible";
+    if (!available || !eligible) return { available, eligible, pending: false };
+    const checkpoint = await this.store.checkpoint(recordId), entries = source.document.entries;
+    const checkpointIndex = checkpoint ? entries.findIndex(entry => entry.id === checkpoint) : -1;
+    const start = checkpointIndex >= 0 ? checkpointIndex + 1 : 0;
+    const pending = entries.slice(start).some(meaningfulMessage);
+    return { available, eligible, pending };
+  }
 
   private runtime(agentId: string): MemoryRuntime {
     const runtime = this.runtimes.get(agentId); if (!runtime) throw new Error("MEMORY_CONSOLIDATION_NOT_CONFIGURED"); return runtime;

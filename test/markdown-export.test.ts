@@ -19,3 +19,14 @@ test("导出文件名移除路径和控制字符", () => {
   assert.equal(markdownFilename("../../坏/标题\r\n"), "坏 标题.md");
   assert.equal(markdownFilename("..."), "conversation.md");
 });
+
+test("Markdown 导出按原顺序保留消息并加入可折叠压缩摘要", () => {
+  const markdown=exportTranscriptMarkdown({header:{type:"session"},entries:[
+    {type:"message",id:"u",parentId:null,message:{role:"user",content:"before"}},
+    {type:"compaction",id:"c",parentId:"u",timestamp:"2026-07-24T01:00:00Z",summary:"## Durable summary",firstKeptEntryId:"c",tokensBefore:50},
+    {type:"message",id:"a",parentId:"c",message:{role:"assistant",content:"after"}}
+  ]},"Compacted","agent");
+  assert.ok(markdown.indexOf("before")<markdown.indexOf("Context compacted"));
+  assert.ok(markdown.indexOf("Context compacted")<markdown.indexOf("after"));
+  assert.match(markdown,/<summary>Compaction summary<\/summary>[\s\S]*Durable summary/);
+});

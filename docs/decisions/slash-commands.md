@@ -47,7 +47,7 @@
 | 类 | 命令（举例） | 面板怎么做 | 首版 |
 |---|---|---|---|
 | **A 面板原生** | `/model` `/think` `/reasoning` `/new` | 存进**面板会话 metadata**，每轮推理经 `sessions.create` 参数或 `sessions.patch` 应用到临时 session。`/new` = 新建面板会话（已有）。这顺带实现 §8.6「会话中途换模型」——同一件事。 | ✅ 做 |
-| **B `/compact`（特殊）** | `/compact` | 面板会话无持久 gateway session 可压。已实现的后端会物化当前有效分支，在临时 session 应用会话模型/thinking/reasoning 后调用 **`sessions.compact` typed RPC**（绝不发送命令文本），只采纳原 transcript 上“历史前缀完全不变且唯一新增”的合法 `compaction` entry，再原子提交到面板权威 transcript。OpenClaw rotation 的 successor 不作为来源；原 transcript 无法验证时稳定拒绝。UI 标记和有效预算投影归长上下文后续工作。 | 🚧 后端完成 |
+| **B `/compact`（特殊）** | `/compact` | 面板会话无持久 gateway session 可压。面板物化当前有效分支，在临时 session 应用会话模型/thinking/reasoning 后调用 **`sessions.compact` typed RPC**（绝不发送命令文本），只采纳原 transcript 上“历史前缀完全不变且唯一新增”的合法 `compaction` entry，再原子提交到面板权威 transcript。完整历史继续显示；最新摘要、kept tail 与压缩后消息组成后续有效上下文。 | ✅ |
 | **C 信息类**（只读代理，低风险） | `/help` `/commands` `/status` `/models` `/tools` `/usage` | 调已核实的只读 RPC/CLI，或由面板基于 allowlist / 权威 transcript 生成。数据来源未核实的命令不进入 allowlist。 | ✅ 已实现 |
 | **D gateway 管理 / owner 全局** | `/config` `/restart` `/mcp` `/plugins` `/reset` | 属于 gateway 管理面。面板是会话 UI，不是 gateway 控制台；`/reset` 对面板会话无对应语义。 | 默认不做 |
 

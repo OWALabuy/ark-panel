@@ -149,7 +149,7 @@ test("completed 幂等缓存严格有界并淘汰最旧结果", async () => {
 test("超出上下文预算时在 bridge 前拒绝且不修改 transcript", async () => {
   const root=await mkdtemp(join(tmpdir(),"generation-budget-"));const metadata=await createPanelSession(root,"claude",{header:{type:"session"},entries:[{type:"message",id:"u1",parentId:null,message:{role:"user",content:"x".repeat(500)}}]});let calls=0;
   const api=new PanelGenerationApi({async generate(){calls++;throw new Error("不应调用")}}, {dataRoot:root,runtimeByAgent:new Map([["claude","runtime"]]),contextBudget:new ConservativeContextBudget(40)});
-  await assert.rejects(api.generate(metadata.recordId,"next",new AbortController().signal),/会话历史过长/);assert.equal(calls,0);
+  await assert.rejects(api.generate(metadata.recordId,"next",new AbortController().signal),/会话有效上下文过长/);assert.equal(calls,0);
   assert.equal((await loadPanelSession(root,"claude",metadata.recordId)).document.entries.length,1);
 });
 

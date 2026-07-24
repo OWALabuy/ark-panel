@@ -23,7 +23,7 @@ export interface ConversationRecord {
 
 export interface ConversationStatus {
   modelOverride: string | null; thinkingLevel: string | null; reasoningLevel: string | null;
-  contextBudget: { estimatedTokens: number; budgetTokens: number; percentage: number; method: "utf8-bytes-upper-bound-v2" };
+  contextBudget: { estimatedTokens: number; budgetTokens: number; percentage: number; method: "utf8-bytes-upper-bound-v3" };
   lastActiveAt: string;
 }
 export interface MemoryConversationSource {
@@ -174,11 +174,14 @@ export class SessionReadData {
     const header = loaded.document.header;
     const safeHeader = { type: header.type, version: header.version, id: header.id, timestamp: header.timestamp,
       ...(header.panel && typeof header.panel === "object" && !Array.isArray(header.panel) ? { panel: header.panel } : {}) };
-    const safeEntries = loaded.document.entries.map(entry => ({
+    const safeEntries = currentTranscriptBranch(loaded.document).entries.map(entry => ({
       type: entry.type, ...(typeof entry.id === "string" ? { id: entry.id } : {}),
       ...(entry.parentId === null || typeof entry.parentId === "string" ? { parentId: entry.parentId } : {}),
       ...(typeof entry.timestamp === "string" ? { timestamp: entry.timestamp } : {}),
-      ...(entry.message && typeof entry.message === "object" && !Array.isArray(entry.message) ? { message: entry.message } : {})
+      ...(entry.message && typeof entry.message === "object" && !Array.isArray(entry.message) ? { message: entry.message } : {}),
+      ...(entry.type === "compaction" && typeof entry.summary === "string" && typeof entry.firstKeptEntryId === "string" &&
+        typeof entry.tokensBefore === "number" ? { summary: entry.summary, firstKeptEntryId: entry.firstKeptEntryId,
+          tokensBefore: entry.tokensBefore } : {})
     }));
     const estimate = this.contextBudget.estimate(currentTranscriptBranch(loaded.document), "");
     let modelOverride: string | null = null, thinkingLevel: string | null = null, reasoningLevel: string | null = null;

@@ -76,7 +76,7 @@ test("frontend renders untrusted metadata with DOM text nodes", async () => {
   assert.match(source,/\/revisions\?agentId=/);
   assert.match(source,/block\.input\?\?block\.arguments/);
   assert.match(source,/block\.text\?\?block\.thinking/);
-  assert.match(source,/function activeBranch\(entries\)/);
+  assert.doesNotMatch(source,/function activeBranch\(entries\)/);
   assert.match(source,/role!=="toolResult"/);
   assert.match(source,/calls\.get\(result\.callId\)/);
   assert.match(source,/call\.result=result/);
@@ -107,7 +107,18 @@ test("frontend renders untrusted metadata with DOM text nodes", async () => {
   assert.match(source,/restoreDraft\(id\)/);
   assert.match(source,/if\(ownsDraft\)saveDraft\("",run\.recordId,agentId\)/);
   assert.match(source,/sourceSession=activeSession,sourceRevision=activeRevision/);
-  assert.doesNotMatch(source,/\/compact|\/reset/);
+  assert.doesNotMatch(source,/\/reset/);
+  assert.match(source,/body:JSON\.stringify\(\{command:"compact",args:\[\],revision\}\)/);
+  assert.match(source,/if\(parsed\.command==="compact"\)/);
+  assert.match(source,/role:"compaction"/);
+  assert.match(source,/content\.append\(renderMarkdown\(String\(message\.summary\|\|""\)\)\)/);
+  assert.match(source,/t\("compact\.marker"\)/);
+  assert.match(source,/forkAt\(message\.id\)/);
+  assert.match(source,/activeSource!=="panel"/);
+  assert.match(source,/\/memory\/status/);
+  assert.match(source,/compact-memory-dialog/);
+  assert.match(source,/generateMemoryCandidate\(\{thenCompact:true\}\)/);
+  assert.match(source,/if\(thenCompact\)\{\$\("#memory-candidate-dialog"\)\.close\(\);await executeCompact\(\)\}/);
 });
 
 test("generation state only locks the composer for its own session", async () => {
@@ -115,7 +126,7 @@ test("generation state only locks the composer for its own session", async () =>
 
   assert.match(source,/runsBySession=new Map\(\)/);
   assert.match(source,/function syncActiveRun\(\)\{activeRun=runsBySession\.get\(activeSession\)\|\|null\}/);
-  assert.match(source,/activeSession=id;[\s\S]*?syncActiveRun\(\);[\s\S]*?restoreDraft\(id\);updateComposer\(\)/);
+  assert.match(source,/activeSession=id;[\s\S]*?syncActiveRun\(\);[\s\S]*?restoreDraft\(id\);[\s\S]*?updateComposer\(\)/);
   assert.match(source,/const textarea=\$\("#message"\),running=Boolean\(activeRun\)/);
   assert.match(source,/textarea\.disabled=busy\|\|!writable/);
   assert.match(source,/if\(activeSession!==run\.recordId\)return;syncActiveRun\(\)/);
@@ -224,7 +235,7 @@ test("appearance preferences are constrained, cached early, and locally scale re
 test("confirmed memory candidate exposes an unambiguous close action", async () => {
   const source=await readFile("src/frontend/app.js","utf8");
   assert.match(source,/status\.textContent=t\("memory\.confirmed"/);
-  assert.match(source,/button\.hidden=true;close\.textContent=t\("common\.close"\);close\.focus\(\)/);
+  assert.match(source,/button\.hidden=true;close\.textContent=t\("common\.close"\);if\(thenCompact\)[\s\S]*?else close\.focus\(\)/);
   assert.match(source,/addEventListener\("close",\(\)=>\{pendingMemoryCandidate=null/);
 });
 

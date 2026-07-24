@@ -41,7 +41,7 @@ export interface ReadApi {
   exportMarkdown?(recordId: string): Promise<{ filename: string; markdown: string } | null>;
 }
 export interface MemoryApi { list(agentId: string): Promise<unknown[]>; read(agentId: string, path: string): Promise<unknown> }
-export interface MemoryConsolidationApi { agents(): string[]; candidate(recordId: string): Promise<unknown>; getCandidate(batchId: string): Promise<unknown>; confirm(batchId: string, contentHash: string): Promise<unknown> }
+export interface MemoryConsolidationApi { agents(): string[]; status(recordId: string): Promise<unknown>; candidate(recordId: string): Promise<unknown>; getCandidate(batchId: string): Promise<unknown>; confirm(batchId: string, contentHash: string): Promise<unknown> }
 export interface AppOptions { auth: AuthConfig; publicDir: string; mock?: boolean; now?: () => number; generation?: GenerationApi; commands?: CommandApi; reads?: ReadApi; experience?: ExperienceApi; attachments?: AttachmentApi; memory?: MemoryApi; memoryConsolidation?: MemoryConsolidationApi; allowedHosts?: readonly string[]; publicOrigins?: readonly string[] }
 const jsonHeaders = { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" };
 function send(res: ServerResponse, status: number, body: unknown, headers = {}): void { res.writeHead(status, { ...jsonHeaders, ...headers }); res.end(JSON.stringify(body)); }
@@ -157,6 +157,11 @@ export function createPanelServer(options: AppOptions) {
         if (req.method === "GET" && url.pathname === "/api/v1/memory/consolidation") {
           return send(res, 200, { data: { agents: options.memoryConsolidation?.agents() ?? [] } });
         }
+        if (req.method === "GET" && /^\/api\/v1\/sessions\/[^/]+\/memory\/status$/.test(url.pathname)) {
+          if (!options.memoryConsolidation) return send(res, 200, { data: { available: false, eligible: false, pending: false } });
+          const recordId = decodeURIComponent(url.pathname.slice("/api/v1/sessions/".length, -"/memory/status".length));
+          return send(res, 200, { data: await options.memoryConsolidation.status(recordId) });
+        }
         if (req.method === "POST" && /^\/api\/v1\/sessions\/[^/]+\/memory\/candidates$/.test(url.pathname)) {
           if (!options.memoryConsolidation) return fail(res, 501, "MEMORY_CONSOLIDATION_NOT_CONNECTED", "记忆整理尚未接入", requestId);
           const recordId = decodeURIComponent(url.pathname.slice("/api/v1/sessions/".length, -"/memory/candidates".length));
@@ -219,6 +224,11 @@ export function createPanelServer(options: AppOptions) {
           if (typeof value.command !== "string" || !value.command || !Array.isArray(value.args) || value.args.some(item => typeof item !== "string")) return fail(res, 400, "COMMAND_REQUEST_INVALID", "命令请求格式无效", requestId);
           if (value.revision !== undefined && typeof value.revision !== "string") return fail(res, 400, "REVISION_INVALID", "revision 格式错误", requestId);
           const recordId = decodeURIComponent(url.pathname.slice("/api/v1/sessions/".length, -"/command".length));
+          if (value.command.replace(/^\//, "") === "compact" && options.reads) {
+            const target = await options.reads.conversation(recordId) as { sourceKind?: unknown } | null;
+            if (!target) return fail(res, 404, "SESSION_NOT_FOUND", "会话不存在", requestId);
+            if (target.sourceKind !== "panel") return fail(res, 409, "SOURCE_READ_ONLY", "真实活会话和归档只读，请先 fork 为面板会话", requestId);
+          }
           return send(res, 200, { data: await options.commands.dispatch(recordId, { command: value.command, args: value.args as string[],
             ...(typeof value.revision === "string" ? { revision: value.revision } : {}) }) });
         }

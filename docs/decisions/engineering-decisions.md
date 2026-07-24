@@ -74,9 +74,9 @@ API 统一位于 `/api/v1`。成功响应是 `{ "data": ... }`；失败响应是
 
 推理适配层在任何 gateway `sessions.create` / `sessions.send` 之前执行上下文预算检查。接口输入是面板将物化的完整 `TranscriptDocument` 与本轮用户消息，输出包括 `estimatedTokens`、`budgetTokens`、`remainingTokens` 和估算方法版本。
 
-第一版采用 `utf8-bytes-upper-bound-v2`：把序列化历史和本轮消息的 UTF-8 字节数作为 token 数上界，并为 transcript entry 加固定结构开销。它不是精确 tokenizer，会有意高估普通文本；默认历史预算为 100000 tokens，刻意为 gateway 注入的系统提示、记忆、工具 schema 和回复输出保留余量。预算通过 `PANEL_CONTEXT_HISTORY_BUDGET_TOKENS` 配置。
+当前采用 `utf8-bytes-upper-bound-v3`：先按 OpenClaw 2026.6.11 `buildSessionContext` 语义投影当前分支；若存在压缩，只计算最新摘要、`firstKeptEntryId` 起的 inclusive kept tail 与压缩后消息，再把投影和本轮消息的 UTF-8 字节数作为 token 上界并增加固定结构开销。它不是精确 tokenizer，会有意高估普通文本；默认历史预算为 100000 tokens，刻意为 gateway 注入的系统提示、记忆、工具 schema 和回复输出留余量。预算通过 `PANEL_CONTEXT_HISTORY_BUDGET_TOKENS` 配置。
 
-超过预算时返回稳定错误 `CONTEXT_BUDGET_EXCEEDED`，不调用 gateway、不写入本轮 user entry，并向用户建议从较早位置 fork。第一版明确不做静默截断，也不做伪自动摘要。精确的模型 tokenizer、压缩 checkpoint、摘要生成与 fork 穿越摘要边界仍属于后续上下文管理策略。
+超过预算时返回稳定错误 `CONTEXT_BUDGET_EXCEEDED`，不调用 gateway、不写入本轮 user entry，并提供“压缩上下文”操作。70% 起警告、90% 起危险提示和明确操作；首版只手动压缩，不静默自动执行。压缩记录是完整 transcript 中的边界，fork 在边界前不继承摘要、在边界及之后继承摘要。
 
 ## 备份、恢复与迁移
 

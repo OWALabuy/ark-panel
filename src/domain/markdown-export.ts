@@ -23,10 +23,17 @@ function messageMarkdown(entry: JsonObject): string | undefined {
   else if (Array.isArray(message.content)) parts = message.content.map(blockMarkdown).filter(Boolean); else parts = [printable(message.content)].filter(Boolean);
   return `## ${role}${timestamp ? ` · ${timestamp}` : ""}\n\n${parts.join("\n\n") || "_(empty)_"}`;
 }
+function entryMarkdown(entry: JsonObject): string | undefined {
+  if (entry.type === "compaction" && typeof entry.summary === "string") {
+    const timestamp = typeof entry.timestamp === "string" ? ` · ${entry.timestamp}` : "";
+    return `## Context compacted${timestamp}\n\n<details>\n<summary>Compaction summary</summary>\n\n${entry.summary}\n\n</details>`;
+  }
+  return messageMarkdown(entry);
+}
 
 export function exportTranscriptMarkdown(document: TranscriptDocument, title: string, agentId: string, exportedAt = new Date()): string {
   const safeTitle = title.replace(/[\r\n#]+/g, " ").trim() || "Untitled conversation"; const safeAgent = agentId.replace(/[^A-Za-z0-9_-]/g, "");
-  const messages = currentTranscriptBranch(document).entries.map(messageMarkdown).filter((value): value is string => !!value);
+  const messages = currentTranscriptBranch(document).entries.map(entryMarkdown).filter((value): value is string => !!value);
   return `# ${safeTitle}\n\n- Agent: ${safeAgent}\n- Exported: ${exportedAt.toISOString()}\n\n${messages.join("\n\n---\n\n")}\n`;
 }
 

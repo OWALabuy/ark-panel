@@ -24,7 +24,7 @@
 5. **运行状态流**：首版用 SSE 推送 started/completed/failed/aborted 生命周期；gateway 当前只提供整组完成结果，因此不是逐 token 输出。
 6. **fork 与编辑重发**：从任意一条消息 fork，在侧边栏产生一条独立会话；每个消息节点带“从这里 fork”的按钮（与 Claude Code、Cursor 等编码助手一致）。编辑某条消息并重新生成走同一套机制。
 7. **工具调用与思考过程可见**：工具调用（tool_use / tool_result）和扩展思考块在面板中可见、可折叠（与 Claude Code 一致）。
-8. **后续支持 OpenClaw 自带命令**：首版明确不实现 `/compact`、`/reset` 等命令，用户仍在原有 OpenClaw 渠道执行；不能把命令文本当普通消息发送。
+8. **结构化命令边界**：面板已将 `/compact` 实现为自有 typed command API 并借用 OpenClaw `sessions.compact` 引擎；命令文本绝不进入普通消息路径。`/reset` 等其他生命周期命令仍不实现。
 9. **停止生成**、**在侧边栏列出和搜索会话**。
 10. **登录**：账号密码登录，能保持登录状态。
 11. **界面**：采用类似 claude.ai 的暖色调，布局清晰易用，并适配手机、Windows、Linux 多种屏幕。
@@ -192,7 +192,7 @@ gateway 的会话索引属于其内部状态：它仅使用进程内锁，也没
 
 **需要面板处理或上线前验证的能力：**压缩前 memory flush 无法依赖；尚未确认 `AGENTS.md` / `TOOLS.md` 是否会自动注入，如有依赖，应由面板加入 `extraSystemPrompt`；browser、canvas、skills 等非记忆扩展机制预计可以沿用，但需逐项进行上线前测试。
 
-**由此产生的核心责任：**面板每次提供完整历史，gateway 不会持续累积并压缩同一会话，因此**长对话的截断和压缩必须由面板负责**。第一版已实现保守预算保护：在触达 gateway 前估算完整历史与本轮消息，超过可配置安全预算就返回 `CONTEXT_BUDGET_EXCEEDED`，不写 transcript，并提示从较早位置 fork；不会静默截断或伪造摘要。后续仍需设计正式压缩策略。压缩 eligible 会话前可以提示用户运行显式记忆整理，但压缩本身不得绕过确认流程，更不能沉淀 scratch 会话。
+**由此产生的核心责任：**面板每次物化完整权威 transcript，gateway 不会持续积累同一 runtime session，因此**长对话的预算与持久压缩由面板负责**。面板以 OpenClaw 2026.6.11 的 current-branch/compaction 语义投影有效上下文；超预算返回 `CONTEXT_BUDGET_EXCEEDED`，不写本轮消息，并提供手动压缩操作。`/compact`、会话按钮和状态动作都调用同一 typed command API；完整旧消息不删除，最新摘要、inclusive kept tail 与压缩后消息决定下一轮预算。eligible 会话若有未整理消息会先提供“整理记忆后压缩 / 直接压缩 / 取消”，候选仍必须由用户确认；scratch 直接压缩且不会被暗中沉淀。
 
 #### 5.4.1 附件与产出文件边界
 

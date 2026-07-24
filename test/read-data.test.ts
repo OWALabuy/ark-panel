@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { SessionReadData } from "../src/server/read-data.js";
 import { ConservativeContextBudget } from "../src/domain/context-budget.js";
-import { updatePanelMetadata } from "../src/storage/panel-sessions.js";
+import { commitPanelTranscript, loadPanelSession, updatePanelMetadata } from "../src/storage/panel-sessions.js";
 
 const header = { type: "session", version: 3, id: "11111111-1111-4111-8111-111111111111", timestamp: "2026-07-11T00:00:00Z", cwd: "/private/workspace", unknownSecret: "must-not-leak" };
 const user = { type: "message", id: "u1", parentId: null, timestamp: "2026-07-11T00:00:01Z", message: { role: "user", content: "needle private fixture" } };
@@ -97,7 +97,23 @@ test("面板会话状态只暴露 override、预算估算和活跃时间", async
   await updatePanelMetadata(data, "fixture", created.recordId, current => ({ ...current, modelOverride: "provider/model", thinkingLevel: "high", reasoningLevel: "stream" }));
   const conversation = await reads.conversation(created.recordId) as { status: { modelOverride: string | null; thinkingLevel: string | null; reasoningLevel: string | null; contextBudget: { percentage: number; method: string }; lastActiveAt: string } };
   assert.equal(conversation.status.modelOverride, "provider/model"); assert.equal(conversation.status.thinkingLevel, "high"); assert.equal(conversation.status.reasoningLevel, "stream");
-  assert.equal(conversation.status.contextBudget.method, "utf8-bytes-upper-bound-v2"); assert.equal(Number.isInteger(conversation.status.contextBudget.percentage), true); assert.match(conversation.status.lastActiveAt, /^\d{4}-/);
+  assert.equal(conversation.status.contextBudget.method, "utf8-bytes-upper-bound-v3"); assert.equal(Number.isInteger(conversation.status.contextBudget.percentage), true); assert.match(conversation.status.lastActiveAt, /^\d{4}-/);
+});
+
+test("conversation DTO 仅返回规范化 current branch 与 compaction 安全字段", async () => {
+  const root=await mkdtemp(join(tmpdir(),"panel-read-compact-")),sessions=join(root,"source"),data=join(root,"data");
+  await mkdir(sessions);await mkdir(data);const reads=new SessionReadData([{agentId:"fixture",sessionsRoot:sessions}],data);
+  const created=await reads.createPanel("fixture","compact") as {recordId:string},loaded=await loadPanelSession(data,"fixture",created.recordId);
+  const document={...loaded.document,entries:[
+    {type:"message",id:"u",parentId:null,timestamp:"2026-07-24T00:00:00Z",message:{role:"user",content:"visible"}},
+    {type:"message",id:"side",parentId:"u",appendMode:"side",message:{role:"assistant",content:"side secret"}},
+    {type:"compaction",id:"c",parentId:"u",timestamp:"2026-07-24T00:01:00Z",summary:"safe summary",firstKeptEntryId:"c",tokensBefore:42,details:{raw:"must not leak"}},
+  ]};
+  await commitPanelTranscript(data,loaded.metadata,document);
+  const value=await reads.conversation(created.recordId) as {document:{entries:Array<Record<string,unknown>>}};
+  assert.deepEqual(value.document.entries.map(entry=>entry.id),["u","c"]);
+  assert.deepEqual(value.document.entries[1],{type:"compaction",id:"c",parentId:"u",timestamp:"2026-07-24T00:01:00Z",summary:"safe summary",firstKeptEntryId:"c",tokensBefore:42});
+  assert.doesNotMatch(JSON.stringify(value),/side secret|must not leak/);
 });
 
 test("project 目录汇总正常与归档会话、忽略大小写重复和隐藏来源", async () => {

@@ -25,3 +25,14 @@ test("工具调用中间不是合法 fork 边界，最终回复是", () => {
   assert.equal(isLegalForkBoundary(result), false);
   assert.equal(isLegalForkBoundary(final), true);
 });
+
+test("fork 在压缩点前不继承摘要，在压缩点及之后继承摘要", () => {
+  const source:TranscriptDocument={header:{type:"session"},entries:[
+    message("u",null,"user","before"),message("a","u","assistant","answer"),
+    {type:"compaction",id:"c",parentId:"a",summary:"summary",firstKeptEntryId:"c",tokensBefore:10},
+    message("post","c","user","after")
+  ]},metadata=(id:string)=>({recordId:`fork-${id}`,parentRecordId:"parent",forkedFromMessageId:id,createdAt:"2026-07-24T00:00:00Z"});
+  assert.deepEqual(deriveFork(source,"a",metadata("a")).entries.map(entry=>entry.id),["u","a"]);
+  assert.deepEqual(deriveFork(source,"c",metadata("c")).entries.map(entry=>entry.id),["u","a","c"]);
+  assert.deepEqual(deriveFork(source,"post",metadata("post")).entries.map(entry=>entry.id),["u","a","c","post"]);
+});
