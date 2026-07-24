@@ -1,6 +1,6 @@
 import type { TranscriptDocument } from "../domain/transcript.js";
 import { unregisterAndClean } from "./artifact-cleanup.js";
-import { assertSupportedVersion, type BridgeMaterializer, type BridgeOrphanCleanupRequest, type BridgeRequest, type BridgeResult, type CreatedSession, type GatewayClient, type SessionOverrides } from "./adapter.js";
+import { assertSupportedVersion, type BridgeCompactionRequest, type BridgeCompactionResult, type BridgeMaterializer, type BridgeOrphanCleanupRequest, type BridgeRequest, type BridgeResult, type CreatedSession, type GatewayClient, type SessionOverrides } from "./adapter.js";
 import type { GatewayStreamEvent, GatewayStreamListener } from "./stream-client.js";
 import { cleanOutputCapture, collectOutputDirectory, enforceOutputLimits, prepareOutputCapture, type PreparedOutputCapture } from "./output-capture.js";
 
@@ -37,6 +37,40 @@ export class BridgeService {
     return await unregisterAndClean(this.client, { runtimeAgentId: request.runtimeAgentId, sessionId: request.sessionId,
       sessionKey: request.sessionKey, runtimeSessionsRoot: this.allowedRuntimeRoots.get(request.runtimeAgentId) ?? "",
       allowedRuntimeRoots: this.allowedRuntimeRoots });
+  }
+
+  async compact(request: BridgeCompactionRequest): Promise<BridgeCompactionResult> {
+    assertSupportedVersion(await this.client.version());
+    let created: CreatedSession | undefined; let primaryError: unknown; let entryStaged = false;
+    try {
+      created = await this.client.createSession(request.runtimeAgentId);
+      await this.materializer.replaceCreatedTranscript(created, request.history);
+      if (request.overrides && Object.keys(request.overrides).length > 0) {
+        if (!this.client.applySessionOverrides) throw new Error("GATEWAY_SESSION_OVERRIDES_UNSUPPORTED");
+        await this.client.applySessionOverrides(created.sessionKey, request.overrides);
+      }
+      if (!this.client.compactSession) throw new Error("GATEWAY_COMPACTION_UNSUPPORTED");
+      if (!this.materializer.readAndVerifyCompaction) throw new Error("GATEWAY_COMPACTION_UNSUPPORTED");
+      const result = await this.client.compactSession(created.sessionKey);
+      if (!result.compacted) return { compacted: false, ...(result.reason ? { reason: result.reason } : {}) };
+      // Rotation may report a successor session, but 2026.6.11 first appends
+      // the hardened compaction to the original transcript. Only that verified
+      // append is authoritative for the panel; successor contents are ignored.
+      const entry = await this.materializer.readAndVerifyCompaction(created, request.history);
+      entryStaged = true; return { compacted: true, entry };
+    } catch (error) { primaryError = error; throw error; }
+    finally {
+      if (created) {
+        try {
+          await unregisterAndClean(this.client, { runtimeAgentId: request.runtimeAgentId, sessionId: created.sessionId,
+            sessionKey: created.sessionKey, runtimeSessionsRoot: this.allowedRuntimeRoots.get(request.runtimeAgentId) ?? "",
+            allowedRuntimeRoots: this.allowedRuntimeRoots });
+        } catch (cleanupError) {
+          if (!primaryError && !entryStaged) throw cleanupError;
+          process.stderr.write("[ark-panel] compact workspace cleanup failed after result staging\n");
+        }
+      }
+    }
   }
 
   async generate(request: BridgeRequest): Promise<BridgeResult> {

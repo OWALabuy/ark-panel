@@ -80,6 +80,20 @@ test("生成控制 RPC 复用持久 transport，create 直接采用返回的 ses
   assert.match(String(calls[0]?.params.label), /^panel bridge [0-9a-f]{8}$/);
 });
 
+test("compact 仅调用 sessions.compact typed RPC 并拒绝异步 pending", async () => {
+  const root = await mkdtemp(join(tmpdir(), "panel-cli-compact-")), calls: string[] = [];
+  let pending = false;
+  const client = new OpenClawCliClient({ sessionsRoots: new Map([["runtime", root]]), rpc: { async request(method) {
+    calls.push(method);
+    if (method !== "sessions.compact") throw new Error("unexpected");
+    return pending ? { ok: true, compacted: false, result: { details: { pending: true } } } :
+      { ok: true, compacted: true, result: { sessionId: "successor", sessionFile: "/fixture/successor.jsonl" } };
+  } } });
+  assert.deepEqual(await client.compactSession("agent:runtime:key"), { compacted: true, sessionId: "successor", sessionFile: "/fixture/successor.jsonl" });
+  pending = true; await assert.rejects(client.compactSession("agent:runtime:key"), /ASYNC_UNSUPPORTED/);
+  assert.deepEqual(calls, ["sessions.compact", "sessions.compact"]);
+});
+
 test("configuredTools 调用已配置 runtime 的 tools.catalog", async () => {
   const root = await mkdtemp(join(tmpdir(), "panel-cli-tools-"));
   let observed: { method: string; params: Record<string, unknown> } | undefined;

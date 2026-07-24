@@ -7,6 +7,7 @@ import { SessionReadData } from "./read-data.js";
 import { parsePanelConfig, validateAndInitializeConfig } from "./config.js";
 import { ConservativeContextBudget } from "../domain/context-budget.js";
 import { PanelCommandApi } from "./command-api.js";
+import { PanelCompactionApi } from "./compaction-api.js";
 import { SessionOperationCoordinator } from "./session-operation.js";
 import { ExperienceStore } from "./experience-store.js";
 import { loadGatewayStreamAuth, OpenClawStreamObserver } from "../gateway/stream-client.js";
@@ -58,7 +59,11 @@ const commandApi = config.dataRoot && readApi ? new PanelCommandApi(config.dataR
   validateOverrides: async (agentId, overrides) => {
     const runtimeAgentId = config.runtimes.get(agentId)?.runtimeAgentId; if (!runtimeAgentId) throw new Error("RUNTIME_NOT_CONFIGURED");
     await bridge.validateOverrides(runtimeAgentId, overrides);
-  }
+  },
+  ...(config.dataRoot && config.runtimes.size ? { compact: async (recordId: string, expectedRevision?: string) => {
+    const runtimeByAgent = new Map([...config.runtimes].map(([agentId, value]) => [agentId, value.runtimeAgentId]));
+    return await new PanelCompactionApi(bridge, { dataRoot: config.dataRoot!, runtimeByAgent, operations }).compact(recordId, expectedRevision);
+  } } : {})
 }, operations) : undefined;
 const allowedHosts = [`127.0.0.1:${config.port}`, `localhost:${config.port}`];
 const attachments = config.dataRoot && config.runtimes.size ? new PanelAttachmentApi(config.dataRoot, [...config.runtimes.keys()]) : undefined;

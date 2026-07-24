@@ -2,9 +2,10 @@ import { randomUUID } from "node:crypto";
 import type { JsonObject, TranscriptDocument } from "../domain/transcript.js";
 import { commitPanelTranscript, listPanelSessions, loadPanelSession, updatePanelMetadata, type PanelMetadata } from "../storage/panel-sessions.js";
 import { SessionOperationCoordinator } from "./session-operation.js";
+import { currentTranscriptBranch } from "../domain/branch.js";
 
-export const PANEL_COMMAND_ALLOWLIST_VERSION = 2;
-export const PANEL_COMMAND_ALLOWLIST = Object.freeze(["model", "think", "reasoning", "new", "commands", "help", "status", "models", "tools", "usage"] as const);
+export const PANEL_COMMAND_ALLOWLIST_VERSION = 3;
+export const PANEL_COMMAND_ALLOWLIST = Object.freeze(["model", "think", "reasoning", "new", "commands", "help", "status", "models", "tools", "usage", "compact"] as const);
 export type PanelCommandName = typeof PANEL_COMMAND_ALLOWLIST[number];
 
 export interface ModelDescriptor { key: string; name?: string; available: boolean; input?: unknown; contextWindow?: number; tags?: string[]; missing?: unknown }
@@ -17,8 +18,9 @@ export interface CommandProviders {
   thinkingLevels?: readonly string[];
   supportsThinkingLevel?(modelKey: string | undefined, level: string): Promise<boolean>;
   validateOverrides?(agentId: string, overrides: { modelOverride?: string; thinkingLevel?: string }): Promise<void>;
+  compact?(recordId: string, expectedRevision?: string): Promise<{ compacted: boolean; revision: string; reason?: string; entry?: JsonObject }>;
 }
-export interface CommandRequest { command: string; args: string[] }
+export interface CommandRequest { command: string; args: string[]; revision?: string }
 export interface CommandResult { command: PanelCommandName; allowlistVersion: number; effect: "read" | "updated" | "created"; data: unknown }
 
 function latestEntryId(document: TranscriptDocument): string | null {
@@ -32,12 +34,6 @@ function event(command: PanelCommandName, value: string | undefined, document: T
 function commandName(input: string): string { return input.startsWith("/") ? input.slice(1) : input; }
 
 function object(value: unknown): Record<string, unknown> | undefined { return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined; }
-function activeBranch(entries: JsonObject[]): JsonObject[] {
-  const byId = new Map(entries.flatMap(entry => typeof entry.id === "string" ? [[entry.id, entry] as const] : []));
-  let current = [...entries].reverse().find(entry => typeof entry.id === "string" && object(entry.message)); const ids = new Set<string>();
-  while (current && typeof current.id === "string" && !ids.has(current.id)) { ids.add(current.id); current = typeof current.parentId === "string" ? byId.get(current.parentId) : undefined; }
-  return ids.size ? entries.filter(entry => typeof entry.id === "string" && ids.has(entry.id)) : entries;
-}
 function usageNumber(usage: Record<string, unknown>, names: readonly string[]): number | undefined {
   for (const name of names) { const value = usage[name]; if (typeof value === "number" && Number.isFinite(value) && value >= 0) return value; }
   return undefined;
@@ -45,7 +41,7 @@ function usageNumber(usage: Record<string, unknown>, names: readonly string[]): 
 export function transcriptUsage(document: TranscriptDocument): unknown {
   const totals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, reportedTotal: 0 };
   let assistantMessages = 0, messagesWithUsage = 0, messagesWithReportedTotal = 0;
-  for (const entry of activeBranch(document.entries)) {
+  for (const entry of currentTranscriptBranch(document).entries) {
     const message = object(entry.message); if (message?.role !== "assistant") continue; assistantMessages++;
     const usage = object(message.usage) ?? object(entry.usage); if (!usage) continue; messagesWithUsage++;
     totals.input += usageNumber(usage, ["input", "inputTokens", "promptTokens", "input_tokens", "prompt_tokens"]) ?? 0;
@@ -90,13 +86,19 @@ export class PanelCommandApi {
     catch { throw new Error("THINKING_LEVEL_UNSUPPORTED"); }
   }
   async dispatch(recordId: string, request: CommandRequest): Promise<CommandResult> {
+    const name = commandName(request.command);
+    if (name === "compact") {
+      if (request.args.length || !this.providers.compact) throw new Error(request.args.length ? "COMMAND_ARGS_INVALID" : "COMMAND_UNAVAILABLE");
+      const data = await this.providers.compact(recordId, request.revision);
+      return this.result("compact", data.compacted ? "updated" : "read", data);
+    }
     return await this.operations.runCommand(recordId, () => this.dispatchOnce(recordId, request));
   }
   private async dispatchOnce(recordId: string, request: CommandRequest): Promise<CommandResult> {
     const name = commandName(request.command);
     if (!(PANEL_COMMAND_ALLOWLIST as readonly string[]).includes(name)) throw new Error("COMMAND_NOT_ALLOWED");
     const command = name as PanelCommandName; if (!Array.isArray(request.args) || request.args.some(arg => typeof arg !== "string")) throw new Error("COMMAND_ARGS_INVALID");
-    if (["commands", "help", "status", "models", "tools", "usage"].includes(command) && request.args.length) throw new Error("COMMAND_ARGS_INVALID");
+    if (["commands", "help", "status", "models", "tools", "usage", "compact"].includes(command) && request.args.length) throw new Error("COMMAND_ARGS_INVALID");
     const loaded = await this.session(recordId);
     if (command === "commands") return this.result(command, "read", commandCatalog(await this.providers.commands()));
     if (command === "status") return this.result(command, "read", await this.providers.status());

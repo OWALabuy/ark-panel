@@ -292,3 +292,23 @@ test("cleanupOrphanedSession 不吞严格 cleanup 错误", async t => {
   const service = new BridgeService(client, materializer, new Map([["runtime", root]]));
   await assert.rejects(service.cleanupOrphanedSession({ runtimeAgentId: "runtime", sessionId: id, sessionKey: "agent:runtime:orphan" }), /strict cleanup failed/);
 });
+
+test("compact 使用 typed RPC 并从原 transcript 采纳 rotation 前的已验证 entry", async t => {
+  const root = await mkdtemp(join(tmpdir(), "bridge-compact-")); t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(join(root, "sessions.json"), "{}"); const order: string[] = [];
+  const created = { sessionId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", sessionKey: "agent:runtime:key", transcriptPath: join(root, "a.jsonl") };
+  const entry = { type: "compaction", id: "c1", parentId: "a1", summary: "summary", firstKeptEntryId: "a1", tokensBefore: 20 };
+  const client: GatewayClient = { async version() { return "2026.6.11"; }, async createSession() { order.push("create"); return created; },
+    async compactSession() { order.push("compact"); return { compacted: true, sessionId: "successor", sessionFile: join(root, "successor.jsonl") }; },
+    async send() { throw new Error("command text must not be sent"); }, async waitForCompletion() {}, async abort() {},
+    async deleteSession() { order.push("delete"); } };
+  const materializer: BridgeMaterializer = { async replaceCreatedTranscript() { order.push("materialize"); return 1; },
+    async readNewEntries() { return []; }, verifyAndStripSubmittedUser(value) { return value; },
+    async readAndVerifyCompaction(target) { assert.equal(target.transcriptPath, created.transcriptPath); order.push("verify-original"); return entry; } };
+  const result = await new BridgeService(client, materializer, new Map([["runtime", root]])).compact({
+    runtimeAgentId: "runtime", history: { header: { type: "session" }, entries: [{ type: "message", id: "a1" }] },
+    overrides: {}
+  });
+  assert.deepEqual(result, { compacted: true, entry });
+  assert.deepEqual(order, ["create", "materialize", "compact", "verify-original", "delete"]);
+});

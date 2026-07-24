@@ -36,7 +36,7 @@ function outputMimeType(fileName: string, supplied?: string): string {
 
 const OPENCLAW_HISTORY_IMAGE_MIMES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
 
-async function materializeOpenClawHistory(dataRoot: string, agentId: string, recordId: string,
+export async function materializeOpenClawHistory(dataRoot: string, agentId: string, recordId: string,
   document: TranscriptDocument): Promise<TranscriptDocument> {
   const entries = await Promise.all(document.entries.map(async entry => {
     if (entry.type !== "message" || !entry.message || typeof entry.message !== "object" || Array.isArray(entry.message)) return entry;

@@ -20,7 +20,7 @@ export interface AttachmentApi {
   download(attachmentId: string): Promise<{ fileName: string; mimeType: string; bytes: Buffer } | undefined>;
   preview?(attachmentId: string): Promise<{ mimeType: string; bytes: Buffer } | undefined>;
 }
-export interface CommandApi { dispatch(recordId: string, request: { command: string; args: string[] }): Promise<unknown> }
+export interface CommandApi { dispatch(recordId: string, request: { command: string; args: string[]; revision?: string }): Promise<unknown> }
 export interface ExperienceApi {
   assertAgent(agentId: string): void;
   settings(): Promise<PanelSettings>;
@@ -215,10 +215,12 @@ export function createPanelServer(options: AppOptions) {
         }
         if (req.method === "POST" && /^\/api\/v1\/sessions\/[^/]+\/command$/.test(url.pathname)) {
           if (!options.commands) return fail(res, 501, "COMMANDS_NOT_CONNECTED", "命令派发器尚未接入", requestId);
-          const value = await body(req) as { command?: unknown; args?: unknown };
+          const value = await body(req) as { command?: unknown; args?: unknown; revision?: unknown };
           if (typeof value.command !== "string" || !value.command || !Array.isArray(value.args) || value.args.some(item => typeof item !== "string")) return fail(res, 400, "COMMAND_REQUEST_INVALID", "命令请求格式无效", requestId);
+          if (value.revision !== undefined && typeof value.revision !== "string") return fail(res, 400, "REVISION_INVALID", "revision 格式错误", requestId);
           const recordId = decodeURIComponent(url.pathname.slice("/api/v1/sessions/".length, -"/command".length));
-          return send(res, 200, { data: await options.commands.dispatch(recordId, { command: value.command, args: value.args as string[] }) });
+          return send(res, 200, { data: await options.commands.dispatch(recordId, { command: value.command, args: value.args as string[],
+            ...(typeof value.revision === "string" ? { revision: value.revision } : {}) }) });
         }
         if (req.method === "POST" && /^\/api\/v1\/sessions\/[^/]+\/messages\/[^/]+\/resend$/.test(url.pathname)) {
           if (!options.reads?.editAndFork) return fail(res, 501, "DATA_NOT_CONNECTED", "数据层尚未接入", requestId);
@@ -286,6 +288,13 @@ export function createPanelServer(options: AppOptions) {
     } catch (error) {
       const known: Record<string, [number, string]> = { AGENT_NOT_ALLOWED: [403, "Agent 不在允许列表中"], SETTINGS_INVALID: [400, "设置格式无效"], SETTINGS_UPDATE_EMPTY: [400, "没有需要修改的设置"], SETTINGS_CORRUPT: [500, "设置存储已损坏"], PANEL_STORAGE_UNSAFE: [500, "设置存储暂不可用"], AVATAR_STORAGE_INVALID: [500, "头像存储异常，请重新上传头像"], AVATAR_TOO_LARGE: [413, "头像文件不能超过 5 MiB"], AVATAR_INVALID: [400, "头像必须是有效的 PNG、JPEG 或 WebP，且不超过 4096×4096"], ATTACHMENT_PREVIEW_UNSUPPORTED: [415, "该附件不是可安全预览的 PNG、JPEG 或 WebP 图片"], SESSION_NOT_FOUND: [404, "会话不存在"], SESSION_UPDATE_EMPTY: [400, "没有需要修改的字段"], SESSION_TITLE_INVALID: [400, "标题格式无效"], SESSION_DELETE_CONFIRMATION_REQUIRED: [400, "删除需要明确确认"], SESSION_NOT_ARCHIVED: [409, "面板会话必须先归档才能彻底删除"], PANEL_SESSION_DELETE_UNSAFE: [409, "会话目录包含未知内容，已拒绝删除"], PANEL_SESSION_NOT_FOUND: [404, "面板会话不存在"], EDIT_TARGET_NOT_USER: [409, "只能编辑用户消息"], PANEL_SESSION_CREATE_FAILED: [500, "面板会话创建失败"], COMMAND_NOT_ALLOWED: [403, "该命令未获面板允许"], COMMAND_ARGS_INVALID: [400, "命令参数无效"], MODEL_NOT_AVAILABLE: [400, "模型不可用"], THINKING_LEVEL_INVALID: [400, "思考等级无效"], THINKING_LEVEL_UNSUPPORTED: [409, "当前模型不支持该思考等级"], REASONING_LEVEL_INVALID: [400, "推理显示模式无效"], IDEMPOTENCY_KEY_REUSED: [409, "重试标识已用于其他请求"], SESSION_BUSY: [409, "该会话正在生成"], MEMORY_AGENT_NOT_CONFIGURED: [404, "该 Agent 未配置可读取的 workspace"], MEMORY_PATH_NOT_ALLOWED: [403, "记忆文件不在允许范围内"], MEMORY_FILE_NOT_FOUND: [404, "记忆文件不存在"], MEMORY_FILE_TOO_LARGE: [413, "记忆文件超过读取上限"], MEMORY_FILE_LIMIT_EXCEEDED: [413, "记忆文件数量超过读取上限"], MEMORY_FILE_UNSAFE: [409, "记忆文件不安全，已拒绝读取"], MEMORY_WORKSPACE_UNSAFE: [409, "记忆 workspace 不安全，已拒绝读取"] };
       Object.assign(known, { MEMORY_CONSOLIDATION_NOT_CONFIGURED: [501, "该 Agent 未配置独立记忆整理 runtime"], MEMORY_RUNTIME_NOT_RESTRICTED: [409, "记忆整理 runtime 含有非只读工具，已拒绝运行"], MEMORY_SOURCE_NOT_ELIGIBLE: [409, "该会话未允许整理进记忆"], MEMORY_NOTHING_TO_CONSOLIDATE: [409, "没有尚未整理的新内容"], MEMORY_CHECKPOINT_INVALID: [409, "记忆检查点已失效"], MEMORY_CANDIDATE_EMPTY: [502, "模型没有生成可用的记忆候选"], MEMORY_WORKSPACE_CHANGED_DURING_PREVIEW: [409, "候选生成期间 workspace 发生变化，已拒绝保存候选"], MEMORY_SOURCE_CHANGED_DURING_PREVIEW: [409, "候选生成期间会话分支发生变化，请重新整理"], MEMORY_CANDIDATE_NOT_FOUND: [404, "记忆候选不存在"], MEMORY_CANDIDATE_HASH_MISMATCH: [409, "记忆候选校验失败"], MEMORY_CANDIDATE_STALE: [409, "记忆候选已过期，请重新生成"], MEMORY_CANDIDATE_INVALID: [400, "记忆候选为空或超过大小上限"], MEMORY_CANDIDATE_CORRUPT: [500, "记忆候选存储已损坏"], MEMORY_TARGET_CONFLICT: [409, "目标记忆文件已存在且内容不同"], MEMORY_STORAGE_UNSAFE: [500, "记忆整理存储不安全"], MEMORY_INDEX_REFRESH_FAILED: [502, "记忆已安全写入，但 OpenClaw 索引刷新失败；请重试确认"] });
+      Object.assign(known, { COMPACTION_NOT_NEEDED: [409, "当前会话暂不需要压缩"], GATEWAY_COMPACTION_UNSUPPORTED: [501, "当前 OpenClaw 适配器不支持压缩"],
+        OPENCLAW_COMPACTION_FAILED: [502, "OpenClaw 未能完成压缩"], OPENCLAW_COMPACTION_ASYNC_UNSUPPORTED: [502, "OpenClaw 返回了无法安全采纳的异步压缩结果"],
+        OPENCLAW_COMPACTION_ROTATION_UNSUPPORTED: [502, "OpenClaw 压缩后未保留可验证的原始 transcript"],
+        OPENCLAW_COMPACTION_REWRITE_UNSUPPORTED: [502, "OpenClaw 改写了历史，面板已拒绝采纳压缩结果"],
+        OPENCLAW_COMPACTION_ENTRY_INVALID: [502, "OpenClaw 返回的压缩记录无效"], OPENCLAW_COMPACTION_PARENT_INVALID: [502, "OpenClaw 返回的压缩父链无效"],
+        OPENCLAW_COMPACTION_BOUNDARY_INVALID: [502, "OpenClaw 返回的压缩边界无效"], REVISION_CONFLICT: [409, "会话已更新，请刷新后重试。"],
+        RUNTIME_NOT_CONFIGURED: [409, "Agent 推理 runtime 未配置。"], COMMAND_UNAVAILABLE: [501, "该命令当前不可用"] });
       const code = error instanceof ForkError ? error.code : error instanceof Error ? error.message : "INVALID_REQUEST"; const mapped = known[code];
       const status = error instanceof HttpError ? error.status : error instanceof SyntaxError ? 400 : error instanceof ForkError ? 409 : mapped?.[0] ?? 500;
       fail(res, status, error instanceof HttpError ? error.code : error instanceof ForkError ? error.code : mapped ? code : "INVALID_REQUEST", error instanceof ForkError ? error.message : mapped?.[1] ?? "请求无法处理", requestId);

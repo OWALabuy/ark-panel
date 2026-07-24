@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { isDeepStrictEqual } from "node:util";
 import { parseTranscript, serializeTranscript, type JsonObject, type TranscriptDocument } from "../domain/transcript.js";
 import { atomicWrite } from "../storage/atomic.js";
 import type { BridgeMaterializer, CreatedSession } from "./adapter.js";
@@ -28,6 +29,44 @@ export class FileBridgeMaterializer implements BridgeMaterializer {
     const document = parseTranscript(await readFile(created.transcriptPath, "utf8"));
     if (document.entries.length <= previousEntryCount) throw new Error("gateway 没有追加完整 run");
     return document.entries.slice(previousEntryCount);
+  }
+  async readAndVerifyCompaction(created: CreatedSession, history: TranscriptDocument): Promise<JsonObject> {
+    let document: TranscriptDocument;
+    try { document = parseTranscript(await readFile(created.transcriptPath, "utf8")); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") throw new Error("OPENCLAW_COMPACTION_ROTATION_UNSUPPORTED");
+      throw error;
+    }
+    if (document.header.id !== created.sessionId || document.entries.length !== history.entries.length + 1 ||
+      !history.entries.every((entry, index) => isDeepStrictEqual(entry, document.entries[index]))) {
+      throw new Error("OPENCLAW_COMPACTION_REWRITE_UNSUPPORTED");
+    }
+    const entry = document.entries.at(-1)!;
+    if (entry.type !== "compaction" || typeof entry.id !== "string" || !entry.id ||
+      typeof entry.summary !== "string" || !entry.summary.trim() ||
+      typeof entry.tokensBefore !== "number" || !Number.isFinite(entry.tokensBefore) || entry.tokensBefore < 0) {
+      throw new Error("OPENCLAW_COMPACTION_ENTRY_INVALID");
+    }
+    const priorIds = new Set(history.entries.flatMap(value => typeof value.id === "string" ? [value.id] : []));
+    if (priorIds.has(entry.id)) throw new Error("OPENCLAW_COMPACTION_ENTRY_INVALID");
+    const expectedParent = [...history.entries].reverse().find(value =>
+      value.type === "message" || value.type === "compaction")?.id ?? null;
+    if (entry.parentId !== expectedParent) throw new Error("OPENCLAW_COMPACTION_PARENT_INVALID");
+    if (entry.firstKeptEntryId !== entry.id &&
+      (typeof entry.firstKeptEntryId !== "string" || !priorIds.has(entry.firstKeptEntryId))) {
+      throw new Error("OPENCLAW_COMPACTION_BOUNDARY_INVALID");
+    }
+    if (typeof entry.firstKeptEntryId === "string" && entry.firstKeptEntryId !== entry.id) {
+      const byId = new Map(history.entries.flatMap(value => typeof value.id === "string" ? [[value.id, value] as const] : []));
+      let current = typeof entry.parentId === "string" ? byId.get(entry.parentId) : undefined;
+      const ancestors = new Set<string>();
+      while (current && typeof current.id === "string" && !ancestors.has(current.id)) {
+        ancestors.add(current.id);
+        current = typeof current.parentId === "string" ? byId.get(current.parentId) : undefined;
+      }
+      if (!ancestors.has(entry.firstKeptEntryId)) throw new Error("OPENCLAW_COMPACTION_BOUNDARY_INVALID");
+    }
+    return entry;
   }
   verifyAndStripSubmittedUser(entries: JsonObject[], expectedMessage: string, panelUserEntryId: string): JsonObject[] {
     const userIndexes = entries.flatMap((entry, index) => textOfUser(entry) === undefined ? [] : [index]);

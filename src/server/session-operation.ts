@@ -10,6 +10,10 @@ export class SessionOperationCoordinator {
     try { return await operation(); } finally { this.release(recordId, acquired); }
   }
 
+  async runExclusive<T>(recordId: string, operation: () => Promise<T>): Promise<T> {
+    return await this.runGeneration(recordId, operation);
+  }
+
   async runCommand<T>(recordId: string, operation: () => Promise<T>): Promise<T> {
     const state = this.states.get(recordId) ?? { locked: false, queue: [] }; this.states.set(recordId, state);
     if (state.locked) await new Promise<void>(resolve => state.queue.push(resolve));

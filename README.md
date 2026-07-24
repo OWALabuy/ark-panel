@@ -71,7 +71,7 @@ Legend: ✅ available · 🚧 scheduled · 💡 candidate (not scheduled) · ⛔
 | Generation | Durable run lifecycle, reconnect, stop, retry, and idempotent sending | ✅ | Server-owned run state survives browser disconnects; SSE can be re-subscribed and completed message groups commit atomically |
 | Generation | Live assistant text and tool status | ✅ | Relays OpenClaw's coalesced updates (currently about every 150 ms), not one event per token; tool stdout and reasoning are not streamed |
 | Context | Configurable context-budget protection | ✅ | Rejects oversized requests before generation instead of silently truncating history |
-| Context | Durable compaction and `/compact` | 🚧 | Planned together as the long-conversation strategy; summary boundaries and fork behavior still need design closure |
+| Context | Durable compaction and `/compact` | 🚧 | The panel-owned backend now persists a verified OpenClaw compaction entry without deleting history; UI markers and effective-budget projection remain scheduled |
 | Commands | `/model`, `/think`, `/reasoning`, `/new` | ✅ | Panel-native structured operations; command text is never forwarded as a normal prompt |
 | Commands | `/commands`, `/help`, `/status`, `/models`, `/tools`, `/usage` | ✅ | Read-only structured command API with a default-deny allowlist; tools are the configured runtime catalog, while usage is model-reported data for the current transcript branch |
 | Commands | `/reset`, `/bash`, config/restart, and arbitrary passthrough | ⛔ | Deliberately excluded because of lifecycle, host, and gateway safety risks |

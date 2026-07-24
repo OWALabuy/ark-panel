@@ -71,13 +71,26 @@ test("C 类命令只读，new 复用面板会话创建能力", async () => {
 
 test("usage 只汇总当前分支中模型实际上报的 token，并公开覆盖率", () => {
   const document = { header: { type: "session" }, entries: [
-    { id: "u1", parentId: null, message: { role: "user", content: [] } },
-    { id: "a1", parentId: "u1", message: { role: "assistant", content: [], usage: { input: 10, output: 4, cacheRead: 3, total: 17 } } },
-    { id: "u2", parentId: "a1", message: { role: "user", content: [] } },
-    { id: "old-branch", parentId: "u1", message: { role: "assistant", content: [], usage: { input: 999, output: 999, total: 1998 } } },
-    { id: "a2", parentId: "u2", message: { role: "assistant", content: [], usage: { input_tokens: 8, output_tokens: 2, reasoning_tokens: 1 } } }
+    { type: "message", id: "u1", parentId: null, message: { role: "user", content: [] } },
+    { type: "message", id: "a1", parentId: "u1", message: { role: "assistant", content: [], usage: { input: 10, output: 4, cacheRead: 3, total: 17 } } },
+    { type: "message", id: "u2", parentId: "a1", message: { role: "user", content: [] } },
+    { type: "message", id: "old-branch", parentId: "u1", message: { role: "assistant", content: [], usage: { input: 999, output: 999, total: 1998 } } },
+    { type: "message", id: "a2", parentId: "u2", message: { role: "assistant", content: [], usage: { input_tokens: 8, output_tokens: 2, reasoning_tokens: 1 } } }
   ] };
   assert.deepEqual(transcriptUsage(document), { source: "model-reported-transcript-usage", scope: "current-branch", estimated: false,
     coverage: { assistantMessages: 2, messagesWithUsage: 2, messagesWithReportedTotal: 1 },
     tokens: { input: 18, output: 6, cacheRead: 3, cacheWrite: 0, reasoning: 1, reportedTotal: 17 } });
+});
+
+test("compact 走独立结构化 provider 并透传 revision，不进入普通命令队列", async () => {
+  const x = await fixture(); const seen: unknown[] = [];
+  const api = new PanelCommandApi(x.root, [x.agentId], {
+    async models() { return []; }, async commands() { return []; }, async status() { return {}; }, async createPanel() { return {}; },
+    async compact(recordId, revision) { seen.push({ recordId, revision }); return { compacted: true, revision: "next",
+      entry: { type: "compaction", id: "c1" } }; }
+  });
+  const result = await api.dispatch(x.recordId, { command: "/compact", args: [], revision: "base" });
+  assert.equal(result.command, "compact"); assert.equal(result.effect, "updated");
+  assert.deepEqual(seen, [{ recordId: x.recordId, revision: "base" }]);
+  await assert.rejects(api.dispatch(x.recordId, { command: "compact", args: ["unsafe"] }), /COMMAND_ARGS_INVALID/);
 });

@@ -81,6 +81,7 @@ export interface GatewayClient {
   /** Refreshes the file-backed memory index for trusted, server-configured OpenClaw agents. */
   refreshMemoryIndex?(agentIds: readonly string[]): Promise<void>;
   createSession(runtimeAgentId: string): Promise<CreatedSession>;
+  compactSession?(sessionKey: string): Promise<GatewayCompactionResult>;
   send(sessionKey: string, message: string, idempotencyKey: string, attachments?: readonly GatewayAttachment[]): Promise<{ runId: string }>;
   waitForCompletion(sessionId: string, runId: string, signal?: AbortSignal): Promise<void>;
   abort(sessionKey: string, runId?: string, sessionId?: string): Promise<void>;
@@ -92,6 +93,25 @@ export interface GatewayClient {
   configuredTools?(runtimeAgentId: string): Promise<ConfiguredToolsCatalog>;
   effectiveTools?(runtimeAgentId: string, sessionKey: string): Promise<EffectiveToolsInventory>;
   collectRunArtifacts?(sessionKey: string, runId: string): Promise<CollectedOutput[]>;
+}
+
+export interface GatewayCompactionResult {
+  compacted: boolean;
+  reason?: string;
+  sessionId?: string;
+  sessionFile?: string;
+}
+
+export interface BridgeCompactionRequest {
+  runtimeAgentId: string;
+  history: TranscriptDocument;
+  overrides?: SessionOverrides;
+}
+
+export interface BridgeCompactionResult {
+  compacted: boolean;
+  reason?: string;
+  entry?: TranscriptDocument["entries"][number];
 }
 
 export interface BridgeRequest {
@@ -151,6 +171,7 @@ export interface BridgeMaterializer {
   replaceCreatedTranscript(created: CreatedSession, history: TranscriptDocument): Promise<number>;
   readNewEntries(created: CreatedSession, previousEntryCount: number): Promise<TranscriptDocument["entries"]>;
   verifyAndStripSubmittedUser(entries: TranscriptDocument["entries"], expectedMessage: string, panelUserEntryId: string): TranscriptDocument["entries"];
+  readAndVerifyCompaction?(created: CreatedSession, history: TranscriptDocument): Promise<TranscriptDocument["entries"][number]>;
 }
 
 export async function runBridge(client: GatewayClient, materializer: BridgeMaterializer, request: BridgeRequest): Promise<BridgeResult> {

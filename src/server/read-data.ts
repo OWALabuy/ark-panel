@@ -8,6 +8,7 @@ import { assertWithin } from "../storage/atomic.js";
 import { createPanelSession, deletePanelSession, listPanelSessions, loadPanelSession } from "../storage/panel-sessions.js";
 import { loadReadonlyMetadata, updateReadonlyMetadata, type ReadonlySourceIdentity } from "../storage/readonly-metadata.js";
 import { updatePanelMetadata } from "../storage/panel-sessions.js";
+import { currentTranscriptBranch } from "../domain/branch.js";
 import { exportTranscriptMarkdown, markdownFilename } from "../domain/markdown-export.js";
 import { ConservativeContextBudget, type ContextBudgetEstimator } from "../domain/context-budget.js";
 import { forkSessionAttachmentReferences, garbageCollectAttachments } from "../storage/attachments.js";
@@ -74,16 +75,6 @@ function documentTitle(document: TranscriptDocument): string {
   if (panel && typeof panel === "object" && !Array.isArray(panel) && typeof (panel as JsonObject).title === "string") return (panel as JsonObject).title as string;
   const firstUser = document.entries.find(entry => role(entry) === "user"); const value = firstUser ? text(firstUser).trim().replace(/\s+/g, " ") : "";
   return value ? value.slice(0, 48) : "未命名会话";
-}
-
-function currentBranch(document: TranscriptDocument): TranscriptDocument {
-  const byId = new Map(document.entries.flatMap(entry => typeof entry.id === "string" ? [[entry.id, entry] as const] : []));
-  let current = [...document.entries].reverse().find(entry => typeof entry.id === "string" && entry.message);
-  const ids = new Set<string>();
-  while (current && typeof current.id === "string" && !ids.has(current.id)) {
-    ids.add(current.id); current = typeof current.parentId === "string" ? byId.get(current.parentId) : undefined;
-  }
-  return ids.size ? { header: document.header, entries: document.entries.filter(entry => typeof entry.id === "string" && ids.has(entry.id)) } : document;
 }
 
 export class SessionReadData {
@@ -189,7 +180,7 @@ export class SessionReadData {
       ...(typeof entry.timestamp === "string" ? { timestamp: entry.timestamp } : {}),
       ...(entry.message && typeof entry.message === "object" && !Array.isArray(entry.message) ? { message: entry.message } : {})
     }));
-    const estimate = this.contextBudget.estimate(currentBranch(loaded.document), "");
+    const estimate = this.contextBudget.estimate(currentTranscriptBranch(loaded.document), "");
     let modelOverride: string | null = null, thinkingLevel: string | null = null, reasoningLevel: string | null = null;
     if (loaded.record.sourceKind === "panel") {
       const metadata = (await loadPanelSession(this.dataRoot, loaded.record.agentId, loaded.record.recordId)).metadata;
@@ -204,7 +195,7 @@ export class SessionReadData {
 
   async memorySource(recordId: string): Promise<MemoryConversationSource | undefined> {
     const loaded = await this.load(recordId); if (!loaded) return undefined;
-    const document = currentBranch(loaded.document), overrides: MemoryConversationSource["overrides"] = loaded.record.sourceKind === "panel" ? {} : nativeOverrides(document);
+    const document = currentTranscriptBranch(loaded.document), overrides: MemoryConversationSource["overrides"] = loaded.record.sourceKind === "panel" ? {} : nativeOverrides(document);
     if (loaded.record.sourceKind === "panel") {
       const metadata = (await loadPanelSession(this.dataRoot, loaded.record.agentId, loaded.record.recordId)).metadata;
       if (metadata.modelOverride) overrides.modelOverride = metadata.modelOverride;
