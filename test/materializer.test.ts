@@ -53,3 +53,28 @@ test("只采纳保持完整历史前缀和合法 keepRecentTokens 边界的唯�
   await appendFile(created.transcriptPath, `${JSON.stringify({ ...compact, id: "c2", parentId: "c1" })}\n`);
   await assert.rejects(materializer.readAndVerifyCompaction(created, history), /REWRITE_UNSUPPORTED/);
 });
+
+test("拒绝 compaction 改写时只诊断结构，不记录消息正文、摘要、ID 或路径", async t => {
+  const root = await mkdtemp(join(tmpdir(), "panel-compact-diagnostic-")); t.after(() => rm(root, { recursive: true, force: true }));
+  const created = { sessionId: "22222222-2222-4222-8222-222222222222", sessionKey: "agent:runtime:key",
+    transcriptPath: join(root, "22222222-2222-4222-8222-222222222222.jsonl") };
+  const events: unknown[] = [], materializer = new FileBridgeMaterializer(() => new Date("2026-07-25T00:00:00.000Z"), event => events.push(event));
+  const history = { header: { type: "session" }, entries: [
+    { type: "message", id: "private-user-id", parentId: null, message: { role: "user", content: "private prompt fixture" } }
+  ] };
+  await materializer.replaceCreatedTranscript(created, history);
+  await appendFile(created.transcriptPath, `${JSON.stringify({
+    type: "compaction", id: "private-compaction-id", parentId: "private-user-id",
+    timestamp: "2026-07-25T00:01:00.000Z", summary: "private summary fixture",
+    firstKeptEntryId: "private-user-id", tokensBefore: 100
+  })}\n${JSON.stringify({ type: "custom", id: "private-extra-id", parentId: "private-compaction-id", data: "private hook fixture" })}\n`);
+  await assert.rejects(materializer.readAndVerifyCompaction(created, history), /REWRITE_UNSUPPORTED/);
+  assert.equal(events.length, 1);
+  const serialized = JSON.stringify(events[0]);
+  assert.match(serialized, /compaction_rewrite_rejected/);
+  assert.match(serialized, /"expectedHistoricalEntries":1/);
+  assert.match(serialized, /"actualEntries":3/);
+  assert.match(serialized, /"type":"compaction"/);
+  assert.match(serialized, /"type":"custom"/);
+  assert.doesNotMatch(serialized, /private|22222222|panel-compact-diagnostic|agent:runtime/);
+});

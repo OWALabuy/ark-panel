@@ -13,8 +13,62 @@ function textOfUser(entry: JsonObject): string | undefined {
     .filter((text): text is string => typeof text === "string").join("");
 }
 
+function object(value: unknown): JsonObject | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? value as JsonObject : undefined;
+}
+function kind(value: unknown): string {
+  return Array.isArray(value) ? "array" : value === null ? "null" : typeof value;
+}
+function serializedBytes(value: unknown): number {
+  return Buffer.byteLength(JSON.stringify(value), "utf8");
+}
+function structuralFingerprint(entry: JsonObject | undefined): JsonObject | null {
+  if (!entry) return null;
+  const message = object(entry.message), content = message?.content;
+  return {
+    type: typeof entry.type === "string" ? entry.type : kind(entry.type),
+    role: typeof message?.role === "string" ? message.role : null,
+    entryKeys: Object.keys(entry).sort(),
+    messageKeys: message ? Object.keys(message).sort() : [],
+    entryBytes: serializedBytes(entry),
+    contentKind: kind(content),
+    contentBytes: content === undefined ? 0 : serializedBytes(content),
+    blockTypes: Array.isArray(content) ? content.map(block => {
+      const value = object(block); return typeof value?.type === "string" ? value.type : kind(block);
+    }) : [],
+    blockKeySets: Array.isArray(content) ? content.map(block => {
+      const value = object(block); return value ? Object.keys(value).sort() : [];
+    }) : []
+  };
+}
+function changedKeys(expected: JsonObject | undefined, actual: JsonObject | undefined): string[] {
+  const keys = new Set([...Object.keys(expected ?? {}), ...Object.keys(actual ?? {})]);
+  return [...keys].filter(key => !isDeepStrictEqual(expected?.[key], actual?.[key])).sort();
+}
+function compactionRewriteDiagnostic(created: CreatedSession, history: TranscriptDocument, actual: TranscriptDocument): JsonObject {
+  const mismatchIndex = history.entries.findIndex((entry, index) => !isDeepStrictEqual(entry, actual.entries[index]));
+  const expected = mismatchIndex >= 0 ? history.entries[mismatchIndex] : undefined;
+  const observed = mismatchIndex >= 0 ? actual.entries[mismatchIndex] : undefined;
+  return {
+    event: "compaction_rewrite_rejected",
+    headerIdMatches: actual.header.id === created.sessionId,
+    expectedHistoricalEntries: history.entries.length,
+    actualEntries: actual.entries.length,
+    firstHistoricalMismatch: mismatchIndex >= 0 ? {
+      index: mismatchIndex,
+      changedEntryKeys: changedKeys(expected, observed),
+      changedMessageKeys: changedKeys(object(expected?.message), object(observed?.message)),
+      expected: structuralFingerprint(expected),
+      actual: structuralFingerprint(observed)
+    } : null,
+    actualTail: actual.entries.slice(history.entries.length).map(entry => structuralFingerprint(entry))
+  };
+}
+
 export class FileBridgeMaterializer implements BridgeMaterializer {
-  constructor(private readonly now: () => Date = () => new Date()) {}
+  constructor(private readonly now: () => Date = () => new Date(),
+    private readonly diagnose: (event: JsonObject) => void =
+      event => process.stderr.write(`[ark-panel] ${JSON.stringify(event)}\n`)) {}
 
   async replaceCreatedTranscript(created: CreatedSession, history: TranscriptDocument): Promise<number> {
     // OpenClaw derives session freshness from the transcript header when its
@@ -39,6 +93,7 @@ export class FileBridgeMaterializer implements BridgeMaterializer {
     }
     if (document.header.id !== created.sessionId || document.entries.length !== history.entries.length + 1 ||
       !history.entries.every((entry, index) => isDeepStrictEqual(entry, document.entries[index]))) {
+      this.diagnose(compactionRewriteDiagnostic(created, history, document));
       throw new Error("OPENCLAW_COMPACTION_REWRITE_UNSUPPORTED");
     }
     const entry = document.entries.at(-1)!;
