@@ -64,6 +64,37 @@ function compactionRewriteDiagnostic(created: CreatedSession, history: Transcrip
     actualTail: actual.entries.slice(history.entries.length).map(entry => structuralFingerprint(entry))
   };
 }
+function exactKeys(value: JsonObject, expected: readonly string[]): boolean {
+  const actual = Object.keys(value).sort();
+  return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
+}
+function validTimestamp(value: unknown): boolean {
+  return typeof value === "string" && Number.isFinite(Date.parse(value));
+}
+function runtimeCompactionPrelude(entries: readonly JsonObject[], priorIds: ReadonlySet<string>,
+  expectedParent: string | null): { parentId: string | null; ids: Set<string> } | undefined {
+  if (entries.length > 2) return undefined;
+  let parentId = expectedParent; const ids = new Set<string>();
+  for (const [index, entry] of entries.entries()) {
+    const id = typeof entry.id === "string" && entry.id ? entry.id : undefined;
+    if (!id || priorIds.has(id) || ids.has(id) || entry.parentId !== parentId || !validTimestamp(entry.timestamp)) return undefined;
+    if (entry.type === "thinking_level_change") {
+      if (index !== 0 || !exactKeys(entry, ["id", "parentId", "thinkingLevel", "timestamp", "type"]) ||
+        typeof entry.thinkingLevel !== "string" || !entry.thinkingLevel) return undefined;
+    } else if (entry.type === "custom") {
+      const data = object(entry.data);
+      if (!exactKeys(entry, ["customType", "data", "id", "parentId", "timestamp", "type"]) ||
+        entry.customType !== "model-snapshot" || !data ||
+        !exactKeys(data, ["modelApi", "modelId", "provider", "timestamp"]) ||
+        typeof data.provider !== "string" || !data.provider ||
+        typeof data.modelApi !== "string" || !data.modelApi ||
+        typeof data.modelId !== "string" || !data.modelId ||
+        typeof data.timestamp !== "number" || !Number.isFinite(data.timestamp)) return undefined;
+    } else return undefined;
+    ids.add(id); parentId = id;
+  }
+  return { parentId, ids };
+}
 
 export class FileBridgeMaterializer implements BridgeMaterializer {
   constructor(private readonly now: () => Date = () => new Date(),
@@ -91,29 +122,35 @@ export class FileBridgeMaterializer implements BridgeMaterializer {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") throw new Error("OPENCLAW_COMPACTION_ROTATION_UNSUPPORTED");
       throw error;
     }
-    if (document.header.id !== created.sessionId || document.entries.length !== history.entries.length + 1 ||
+    if (document.header.id !== created.sessionId || document.entries.length <= history.entries.length ||
       !history.entries.every((entry, index) => isDeepStrictEqual(entry, document.entries[index]))) {
       this.diagnose(compactionRewriteDiagnostic(created, history, document));
       throw new Error("OPENCLAW_COMPACTION_REWRITE_UNSUPPORTED");
     }
-    const entry = document.entries.at(-1)!;
+    const tail = document.entries.slice(history.entries.length), entry = tail.at(-1)!;
+    const priorIds = new Set(history.entries.flatMap(value => typeof value.id === "string" ? [value.id] : []));
+    const lastHistoryId = history.entries.at(-1)?.id;
+    const expectedParent = typeof lastHistoryId === "string" ? lastHistoryId : null;
+    const prelude = runtimeCompactionPrelude(tail.slice(0, -1), priorIds, expectedParent);
+    if (!prelude) {
+      this.diagnose(compactionRewriteDiagnostic(created, history, document));
+      throw new Error("OPENCLAW_COMPACTION_REWRITE_UNSUPPORTED");
+    }
     if (entry.type !== "compaction" || typeof entry.id !== "string" || !entry.id ||
       typeof entry.summary !== "string" || !entry.summary.trim() ||
-      typeof entry.timestamp !== "string" || !Number.isFinite(Date.parse(entry.timestamp)) ||
+      !validTimestamp(entry.timestamp) ||
       typeof entry.tokensBefore !== "number" || !Number.isFinite(entry.tokensBefore) || entry.tokensBefore < 0) {
       throw new Error("OPENCLAW_COMPACTION_ENTRY_INVALID");
     }
-    const priorIds = new Set(history.entries.flatMap(value => typeof value.id === "string" ? [value.id] : []));
-    if (priorIds.has(entry.id)) throw new Error("OPENCLAW_COMPACTION_ENTRY_INVALID");
-    const expectedParent = history.entries.at(-1)?.id ?? null;
-    if (entry.parentId !== expectedParent) throw new Error("OPENCLAW_COMPACTION_PARENT_INVALID");
+    if (priorIds.has(entry.id) || prelude.ids.has(entry.id)) throw new Error("OPENCLAW_COMPACTION_ENTRY_INVALID");
+    if (entry.parentId !== prelude.parentId) throw new Error("OPENCLAW_COMPACTION_PARENT_INVALID");
     if (entry.firstKeptEntryId !== entry.id &&
       (typeof entry.firstKeptEntryId !== "string" || !priorIds.has(entry.firstKeptEntryId))) {
       throw new Error("OPENCLAW_COMPACTION_BOUNDARY_INVALID");
     }
     if (typeof entry.firstKeptEntryId === "string" && entry.firstKeptEntryId !== entry.id) {
       const byId = new Map(history.entries.flatMap(value => typeof value.id === "string" ? [[value.id, value] as const] : []));
-      let current = typeof entry.parentId === "string" ? byId.get(entry.parentId) : undefined;
+      let current = typeof expectedParent === "string" ? byId.get(expectedParent) : undefined;
       const ancestors = new Set<string>();
       while (current && typeof current.id === "string" && !ancestors.has(current.id)) {
         ancestors.add(current.id);
@@ -121,7 +158,7 @@ export class FileBridgeMaterializer implements BridgeMaterializer {
       }
       if (!ancestors.has(entry.firstKeptEntryId)) throw new Error("OPENCLAW_COMPACTION_BOUNDARY_INVALID");
     }
-    return entry;
+    return entry.parentId === expectedParent ? entry : { ...entry, parentId: expectedParent };
   }
   verifyAndStripSubmittedUser(entries: JsonObject[], expectedMessage: string, panelUserEntryId: string): JsonObject[] {
     const userIndexes = entries.flatMap((entry, index) => textOfUser(entry) === undefined ? [] : [index]);

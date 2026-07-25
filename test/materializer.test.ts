@@ -78,3 +78,48 @@ test("拒绝 compaction 改写时只诊断结构，不记录消息正文、摘�
   assert.match(serialized, /"type":"custom"/);
   assert.doesNotMatch(serialized, /private|22222222|panel-compact-diagnostic|agent:runtime/);
 });
+
+test("只丢弃严格验证的 OpenClaw compaction runtime prelude 并把摘要接回面板叶节点", async t => {
+  const root = await mkdtemp(join(tmpdir(), "panel-compact-prelude-")); t.after(() => rm(root, { recursive: true, force: true }));
+  const created = { sessionId: "22222222-2222-4222-8222-222222222222", sessionKey: "agent:runtime:key",
+    transcriptPath: join(root, "22222222-2222-4222-8222-222222222222.jsonl") };
+  const history = { header: { type: "session" }, entries: [
+    { type: "message", id: "u1", parentId: null, message: { role: "user", content: "old" } },
+    { type: "message", id: "a1", parentId: "u1", message: { role: "assistant", content: "answer" } }
+  ] };
+  const materializer = new FileBridgeMaterializer(); await materializer.replaceCreatedTranscript(created, history);
+  const thinking = { type: "thinking_level_change", id: "thinking", parentId: "a1",
+    timestamp: "2026-07-25T00:00:00.000Z", thinkingLevel: "high" };
+  const snapshot = { type: "custom", id: "snapshot", parentId: "thinking", timestamp: "2026-07-25T00:00:01.000Z",
+    customType: "model-snapshot", data: { timestamp: 1784937601000, provider: "fixture", modelApi: "fixture-api", modelId: "fixture-model" } };
+  const compact = { type: "compaction", id: "compact", parentId: "snapshot", timestamp: "2026-07-25T00:00:02.000Z",
+    summary: "summary", firstKeptEntryId: "compact", tokensBefore: 42, details: { fixture: true }, fromHook: false };
+  await appendFile(created.transcriptPath, `${JSON.stringify(thinking)}\n${JSON.stringify(snapshot)}\n${JSON.stringify(compact)}\n`);
+  assert.deepEqual(await materializer.readAndVerifyCompaction(created, history), { ...compact, parentId: "a1" });
+});
+
+test("拒绝伪造、越权字段、断链或乱序的 compaction runtime prelude", async t => {
+  const root = await mkdtemp(join(tmpdir(), "panel-compact-prelude-deny-")); t.after(() => rm(root, { recursive: true, force: true }));
+  const created = { sessionId: "22222222-2222-4222-8222-222222222222", sessionKey: "agent:runtime:key",
+    transcriptPath: join(root, "22222222-2222-4222-8222-222222222222.jsonl") };
+  const history = { header: { type: "session" }, entries: [
+    { type: "message", id: "u1", parentId: null, message: { role: "user", content: "old" } }
+  ] };
+  const validSnapshot = { type: "custom", id: "snapshot", parentId: "u1", timestamp: "2026-07-25T00:00:01.000Z",
+    customType: "model-snapshot", data: { timestamp: 1784937601000, provider: "fixture", modelApi: "fixture-api", modelId: "fixture-model" } };
+  const compact = { type: "compaction", id: "compact", parentId: "snapshot", timestamp: "2026-07-25T00:00:02.000Z",
+    summary: "summary", firstKeptEntryId: "compact", tokensBefore: 42 };
+  const invalidPreludes = [
+    [{ ...validSnapshot, customType: "unknown" }],
+    [{ ...validSnapshot, secret: "not allowed" }],
+    [{ ...validSnapshot, parentId: "wrong" }],
+    [{ type: "thinking_level_change", id: "thinking", parentId: "u1", timestamp: "2026-07-25T00:00:00.000Z", thinkingLevel: "high" },
+      { type: "thinking_level_change", id: "thinking-2", parentId: "thinking", timestamp: "2026-07-25T00:00:01.000Z", thinkingLevel: "low" }]
+  ];
+  for (const [index, prelude] of invalidPreludes.entries()) {
+    await new FileBridgeMaterializer().replaceCreatedTranscript(created, history);
+    const parentId = prelude.at(-1)?.id ?? "u1";
+    await appendFile(created.transcriptPath, `${prelude.map(entry => JSON.stringify(entry)).join("\n")}\n${JSON.stringify({ ...compact, parentId, id: `compact-${index}`, firstKeptEntryId: `compact-${index}` })}\n`);
+    await assert.rejects(new FileBridgeMaterializer().readAndVerifyCompaction(created, history), /REWRITE_UNSUPPORTED/);
+  }
+});
