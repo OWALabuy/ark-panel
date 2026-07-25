@@ -297,6 +297,14 @@ test("conversation status is server-controlled, separate from run status, and la
   assert.match(styles,/\.conversation-status-item\.context-danger/);
 });
 
+test("clearing the active conversation hides every session-scoped action", async () => {
+  const source=await readFile("src/frontend/app.js","utf8");
+  const clearSelection=source.match(/function clearConversationSelection\(\)\{[\s\S]*?\nasync function switchAgent/)?.[0]??"";
+  for(const id of ["memory-disposition","consolidate-memory","compact-session","export-session","rename-session","archive-session","pin-session","project-session","delete-session"]){
+    assert.match(clearSelection,new RegExp(`"${id}"`));
+  }
+});
+
 test("background run notifications stay unread per session until the conversation is viewed", async () => {
   const source=await readFile("src/frontend/app.js","utf8");
   const styles=await readFile("src/frontend/styles.css","utf8");
