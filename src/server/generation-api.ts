@@ -7,6 +7,7 @@ import type { BridgeLifecycleEvent, BridgeOrphanCleanupRequest, BridgeRequest, B
 import type { GenerationApi } from "./app.js";
 import { ConservativeContextBudget, type ContextBudgetEstimator } from "../domain/context-budget.js";
 import { ContextBudgetExceededError } from "../domain/context-budget.js";
+import { headerWithContextUsage } from "../domain/context-usage.js";
 import { SessionOperationCoordinator } from "./session-operation.js";
 import { PanelRunStore, publicRun, terminalRunStatuses, type PanelRunRecord, type PublicPanelRun, type PublicRunStream, type PublicRunTool } from "./run-store.js";
 import { GatewayRunError } from "../gateway/cli-client.js";
@@ -437,7 +438,10 @@ export class PanelGenerationApi implements GenerationApi {
         } });
       const preCommitState = await this.runStore.get(runId); if (signal.aborted || preCommitState?.status === "aborting") throw new Error("BRIDGE_ABORTED");
       const materializedEntries = (preCommitState?.stagedEntries ?? result.entries) as JsonObject[];
-      const committed: TranscriptDocument = { header: document.header, entries: [...document.entries, userEntry, ...materializedEntries] };
+      const committedEntries = [...document.entries, userEntry, ...materializedEntries];
+      const committedWithoutUsage: TranscriptDocument = { header: document.header, entries: committedEntries };
+      const committed: TranscriptDocument = { header: headerWithContextUsage(document.header, result.contextUsage,
+        latestEntryId(committedWithoutUsage) ?? undefined), entries: committedEntries };
       const beforeCommit = await this.runStore.get(runId); const claim = beforeCommit ? await this.transition(beforeCommit, { status: "committing" }) : undefined;
       if (claim && claim.status !== "committing") throw new Error("BRIDGE_ABORTED");
       await assignSessionAttachments(this.config.dataRoot, agentId, recordId, attachmentIds, userId, "user");

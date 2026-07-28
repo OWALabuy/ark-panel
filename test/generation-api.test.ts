@@ -72,15 +72,19 @@ test("续聊时把历史图片恢复为 OpenClaw image 块，其他附件降级�
 
 test("GenerationApi 只在完整 bridge 成功后原子提交 user 和 run，并保持 parent 链", async () => {
   const root = await mkdtemp(join(tmpdir(), "generation-api-"));
-  const metadata = await createPanelSession(root, "claude", { header: { type: "session", version: 3 }, entries: [
+  const metadata = await createPanelSession(root, "claude", { header: { type: "session", version: 3, panel: { recordId: "record" } }, entries: [
     { type: "message", id: "previous", parentId: null, message: { role: "assistant", content: [{ type: "text", text: "旧回复" }] } }
   ] });
   const api = new PanelGenerationApi({ async generate(request) { return { runId: "run", sessionId: "temp", entries: [
     { type: "message", id: "answer", parentId: request.latestUserEntryId, message: { role: "assistant", content: [{ type: "text", text: "新回复" }] } }
-  ] }; } }, { dataRoot: root, runtimeByAgent: new Map([["claude", "runtime-claude"]]) });
+  ], contextUsage: { source: "openclaw-session", totalTokens: 8_000, contextTokens: 200_000, totalTokensFresh: true } }; } },
+  { dataRoot: root, runtimeByAgent: new Map([["claude", "runtime-claude"]]) });
   await api.generate(metadata.recordId, "新问题", new AbortController().signal);
   const { document } = await loadPanelSession(root, "claude", metadata.recordId);
   assert.equal(document.entries.length, 3); assert.equal(document.entries[1]?.parentId, "previous"); assert.equal(document.entries[2]?.parentId, document.entries[1]?.id);
+  assert.deepEqual((document.header.panel as { contextUsage?: unknown }).contextUsage, {
+    source: "openclaw-session", totalTokens: 8_000, contextTokens: 200_000, totalTokensFresh: true, throughEntryId: "answer"
+  });
 });
 
 test("压缩后生成从规范 active leaf 续接，不接到文件末尾 side entry", async () => {

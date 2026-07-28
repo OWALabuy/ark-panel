@@ -636,9 +636,10 @@ fork 和编辑重发共用底层（见 §5.0）：都是「从目标 entry 回�
 
 ### 8.6.1 会话状态区（2026-07-17 已实现）
 
-- 会话详情返回经过筛选的 `status` DTO：panel metadata 中显式设置的 `modelOverride` / `thinkingLevel` / `reasoningLevel`（未设置为 `null`）、当前权威 transcript 的保守上下文预算估算，以及 transcript 文件的 `lastActiveAt`。DTO 不返回内部路径、完整 metadata 或额外消息正文。
-- 桌面标题区固定为两行：第一行是标题；第二行将 `subtitle` 的生成、断线或来源状态与独立的 `conversation-status` 视觉上连续排列。两个 DOM 区域及 `aria-live` 语义仍然独立，状态更新不得互相覆盖。第二行不换行；模型名允许省略，空间不足先隐藏最近活跃并优先保住上下文信息。移动端仍隐藏 `conversation-status`。
-- 上下文使用现有 `ConservativeContextBudget`，只估算已保存历史，不包含浏览器草稿。界面显示带 `≈` 的紧凑已用量、预算量和整数百分比，例如 `上下文 ≈127k / 1000k（13%）`；精确数值和估算方法保留在 tooltip，并明确说明它不是厂商精确 token 计数。70%/90% 为警告/危险阈值。
+- 会话详情返回经过筛选的 `status` DTO：panel metadata 中显式设置的 `modelOverride` / `thinkingLevel` / `reasoningLevel`（未设置为 `null`）、绑定当前 transcript tip 的 OpenClaw `contextUsage`、内部安全用的保守 `contextBudget`，以及 transcript 文件的 `lastActiveAt`。DTO 不返回内部路径、完整 metadata 或额外消息正文。
+- 桌面标题区固定为两行：第一行是标题；第二行将 `subtitle` 的生成、断线或来源状态与独立的 `conversation-status` 视觉上连续排列。两个 DOM 区域及 `aria-live` 语义仍然独立，状态更新不得互相覆盖。第二行统一字号，副标题使用中等字重；模型项按内容占位且最多 220px。第二行不换行；空间不足先隐藏最近活跃并优先保住上下文信息。移动端仍隐藏 `conversation-status`。
+- 上下文主状态以 OpenClaw 2026.6.11 `sessions.list` 为准。生成或压缩完成后、一次性 runtime session 清理前，读取精确 key 对应行；只有 `totalTokensFresh === true` 且数值合法时显示 `上下文 18k / 200k（9%）`。未上报 fresh 总量时显示“上下文未知”（若仅 window 可用则附 window），不以字符数补造 token。70%/90% 为警告/危险阈值。`ConservativeContextBudget` 继续服务于发送前拒绝和压缩候选有效性比较，不再驱动主状态。
+- 捕获值以可选 `header.panel.contextUsage` 与 `throughEntryId` 一起原子写入 transcript。迁移采用惰性、向后兼容策略：旧 transcript 缺少字段时直接显示未知，下一次成功生成或压缩才写入；无需批量重写。回滚到旧版本时，宽松 transcript header 解析会忽略该附加字段，权威消息不需转换；需要清理时可在备份后删除该可选对象。
 - `settings.json` v1 增加 `conversation.showStatus`，默认 `true`。旧文件允许缺少整个 `conversation` 对象并补默认值，其他未知字段仍按损坏或非法请求拒绝。该开关为账户级服务端偏好，不使用 `localStorage` 作为权威值。
 
 ### 8.7 Markdown 渲染与复制（新增 2026-07-12，公式更新 2026-07-15）

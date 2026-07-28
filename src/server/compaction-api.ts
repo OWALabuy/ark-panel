@@ -2,6 +2,7 @@ import { lstat } from "node:fs/promises";
 import { join } from "node:path";
 import { currentTranscriptBranch } from "../domain/branch.js";
 import { ConservativeContextBudget, type ContextBudgetEstimator } from "../domain/context-budget.js";
+import { headerWithContextUsage } from "../domain/context-usage.js";
 import type { JsonObject, TranscriptDocument } from "../domain/transcript.js";
 import type { BridgeCompactionRequest, BridgeCompactionResult } from "../gateway/adapter.js";
 import { commitPanelTranscript, listPanelSessions, loadPanelSession } from "../storage/panel-sessions.js";
@@ -57,13 +58,17 @@ export class PanelCompactionApi {
       if (!result.compacted || !result.entry) return {
         compacted: false, revision: baseRevision, ...(result.reason ? { reason: result.reason } : {})
       };
-      const candidate: TranscriptDocument = { header: document.header, entries: [...document.entries, result.entry] };
+      const entries = [...document.entries, result.entry];
+      const tip = currentTranscriptBranch({ header: document.header, entries }).entries.at(-1)?.id;
+      const candidateWithoutUsage: TranscriptDocument = { header: document.header, entries };
       const contextBudget = this.config.contextBudget ?? new ConservativeContextBudget();
       const beforeTokens = contextBudget.estimate(document, "").estimatedTokens;
-      const candidateTokens = contextBudget.estimate(candidate, "").estimatedTokens;
+      const candidateTokens = contextBudget.estimate(candidateWithoutUsage, "").estimatedTokens;
       if (candidateTokens >= beforeTokens) return {
         compacted: false, revision: baseRevision, reason: "NO_EFFECTIVE_REDUCTION"
       };
+      const candidate: TranscriptDocument = { header: headerWithContextUsage(document.header, result.contextUsage,
+        typeof tip === "string" ? tip : undefined), entries };
       await commitPanelTranscript(this.config.dataRoot, metadata, candidate);
       return { compacted: true, revision: revision(await lstat(transcriptPath)) };
     });

@@ -3,6 +3,7 @@ import { unregisterAndClean } from "./artifact-cleanup.js";
 import { assertSupportedVersion, type BridgeCompactionRequest, type BridgeCompactionResult, type BridgeMaterializer, type BridgeOrphanCleanupRequest, type BridgeRequest, type BridgeResult, type CreatedSession, type GatewayClient, type SessionOverrides } from "./adapter.js";
 import type { GatewayStreamEvent, GatewayStreamListener } from "./stream-client.js";
 import { cleanOutputCapture, collectOutputDirectory, enforceOutputLimits, prepareOutputCapture, type PreparedOutputCapture } from "./output-capture.js";
+import type { OpenClawContextUsage } from "../domain/context-usage.js";
 
 interface StreamObserver { observe(sessionKey: string, listener: GatewayStreamListener): Promise<() => void> }
 interface AttachmentSender { send(sessionKey: string, message: string, idempotencyKey: string, attachments: readonly NonNullable<BridgeRequest["attachments"]>[number][]): Promise<{ runId: string }> }
@@ -16,6 +17,15 @@ export class BridgeService {
   constructor(private readonly client: GatewayClient, private readonly materializer: BridgeMaterializer,
     private readonly allowedRuntimeRoots: ReadonlyMap<string, string>, private readonly streamObserver?: StreamObserver,
     private readonly attachmentSender?: AttachmentSender) {}
+
+  private async contextUsage(runtimeAgentId: string, sessionKey: string): Promise<OpenClawContextUsage | undefined> {
+    if (!this.client.sessionContextUsage) return undefined;
+    try { return await this.client.sessionContextUsage(runtimeAgentId, sessionKey); }
+    catch {
+      process.stderr.write("[ark-panel] OpenClaw session context usage unavailable\n");
+      return undefined;
+    }
+  }
 
   async validateOverrides(runtimeAgentId: string, overrides: SessionOverrides): Promise<void> {
     assertSupportedVersion(await this.client.version());
@@ -59,7 +69,8 @@ export class BridgeService {
       // the hardened compaction to the original transcript. Only that verified
       // append is authoritative for the panel; successor contents are ignored.
       const entry = await this.materializer.readAndVerifyCompaction(created, request.history);
-      entryStaged = true; return { compacted: true, entry };
+      const contextUsage = await this.contextUsage(request.runtimeAgentId, created.sessionKey);
+      entryStaged = true; return { compacted: true, entry, ...(contextUsage ? { contextUsage } : {}) };
     } catch (error) {
       primaryError = error;
       if (created && compactAttempted && !rpcCompleted) {
@@ -142,13 +153,16 @@ export class BridgeService {
       if (request.signal?.aborted) throw new Error("BRIDGE_ABORTED");
       const added = await this.materializer.readNewEntries(created, before);
       const entries = this.materializer.verifyAndStripSubmittedUser(added, gatewayMessage, request.latestUserEntryId);
+      const contextUsage = await this.contextUsage(request.runtimeAgentId, created.sessionKey);
       const outputs = [...(this.client.collectRunArtifacts ? await this.client.collectRunArtifacts(created.sessionKey, runId) : []),
         ...(outputCapture ? await collectOutputDirectory(outputCapture) : [])];
       enforceOutputLimits(outputs, outputCapture?.maxFiles, outputCapture?.maxTotalBytes);
-      await request.lifecycle?.({ type: "entries_materialized", entries, ...(outputs.length ? { outputs } : {}) });
+      await request.lifecycle?.({ type: "entries_materialized", entries, ...(outputs.length ? { outputs } : {}),
+        ...(contextUsage ? { contextUsage } : {}) });
       mark("read_and_stage");
       entriesStaged = true;
-      return { runId, sessionId: created.sessionId, entries, ...(outputs.length ? { outputs } : {}) };
+      return { runId, sessionId: created.sessionId, entries, ...(outputs.length ? { outputs } : {}),
+        ...(contextUsage ? { contextUsage } : {}) };
     } catch (error) {
       primaryError = error;
       if (created) {

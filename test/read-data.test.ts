@@ -27,6 +27,7 @@ test("只读扫描 active/reset/panel，容忍 active 半行并拒绝符号链�
   assert.equal("cwd" in conversation.document.header, false); assert.equal("unknownSecret" in conversation.document.header, false);
   assert.deepEqual({ modelOverride: conversation.status.modelOverride, thinkingLevel: conversation.status.thinkingLevel, reasoningLevel: conversation.status.reasoningLevel }, { modelOverride: null, thinkingLevel: null, reasoningLevel: null });
   assert.equal((conversation.status.contextBudget as { budgetTokens: number }).budgetTokens, 10_000); assert.equal(typeof (conversation.status.contextBudget as { percentage: unknown }).percentage, "number");
+  assert.equal(conversation.status.contextUsage, null);
   assert.equal("cwd" in conversation.status, false); assert.equal(JSON.stringify(conversation.status).includes("needle private fixture"), false);
   const found = await reads.search("needle", "fixture") as unknown[]; assert.equal(found.length, 2);
 
@@ -90,14 +91,28 @@ test("面板会话要求显式确认并先归档才可永久删除", async () =>
   assert.equal(await reads.conversation(created.recordId), null);
 });
 
-test("面板会话状态只暴露 override、预算估算和活跃时间", async () => {
+test("面板会话状态只把绑定当前 tip 的 OpenClaw fresh 用量作为主上下文", async () => {
   const root = await mkdtemp(join(tmpdir(), "panel-read-status-")), sessions = join(root, "source"), data = join(root, "data");
   await mkdir(sessions); await mkdir(data); const reads = new SessionReadData([{ agentId: "fixture", sessionsRoot: sessions }], data, new ConservativeContextBudget(1_024));
   const created = await reads.createPanel("fixture", "status") as { recordId: string };
   await updatePanelMetadata(data, "fixture", created.recordId, current => ({ ...current, modelOverride: "provider/model", thinkingLevel: "high", reasoningLevel: "stream" }));
-  const conversation = await reads.conversation(created.recordId) as { status: { modelOverride: string | null; thinkingLevel: string | null; reasoningLevel: string | null; contextBudget: { percentage: number; method: string }; lastActiveAt: string } };
+  const loaded = await loadPanelSession(data, "fixture", created.recordId);
+  const panel = loaded.document.header.panel as Record<string, unknown>;
+  await commitPanelTranscript(data, loaded.metadata, { header: { ...loaded.document.header, panel: { ...panel, contextUsage: {
+    source: "openclaw-session", totalTokens: 13_500, contextTokens: 100_000, totalTokensFresh: true, throughEntryId: "a1"
+  } } }, entries: [
+    { type: "message", id: "u1", parentId: null, message: { role: "user", content: "fixture" } },
+    { type: "message", id: "a1", parentId: "u1", message: { role: "assistant", content: "fixture" } }
+  ] });
+  const conversation = await reads.conversation(created.recordId) as { status: { modelOverride: string | null; thinkingLevel: string | null; reasoningLevel: string | null; contextBudget: { percentage: number; method: string }; contextUsage: { totalTokens: number; contextTokens: number; totalTokensFresh: boolean; percentage: number } | null; lastActiveAt: string } };
   assert.equal(conversation.status.modelOverride, "provider/model"); assert.equal(conversation.status.thinkingLevel, "high"); assert.equal(conversation.status.reasoningLevel, "stream");
+  assert.deepEqual(conversation.status.contextUsage, { source: "openclaw-session", totalTokens: 13_500, contextTokens: 100_000, totalTokensFresh: true, percentage: 14 });
   assert.equal(conversation.status.contextBudget.method, "utf8-bytes-upper-bound-v3"); assert.equal(Number.isInteger(conversation.status.contextBudget.percentage), true); assert.match(conversation.status.lastActiveAt, /^\d{4}-/);
+
+  const current = await loadPanelSession(data, "fixture", created.recordId);
+  await commitPanelTranscript(data, current.metadata, { header: current.document.header, entries: [...current.document.entries,
+    { type: "custom", id: "settings", parentId: "a1" }] });
+  assert.equal(((await reads.conversation(created.recordId) as { status: { contextUsage: unknown } }).status.contextUsage), null);
 });
 
 test("conversation DTO 仅返回规范化 current branch 与 compaction 安全字段", async () => {

@@ -1,4 +1,5 @@
 import type { TranscriptDocument } from "../domain/transcript.js";
+import type { OpenClawContextUsage } from "../domain/context-usage.js";
 
 export const SUPPORTED_OPENCLAW_VERSION = "2026.6.11";
 
@@ -92,6 +93,7 @@ export interface GatewayClient {
   listModels?(): Promise<ModelsCatalog>;
   configuredTools?(runtimeAgentId: string): Promise<ConfiguredToolsCatalog>;
   effectiveTools?(runtimeAgentId: string, sessionKey: string): Promise<EffectiveToolsInventory>;
+  sessionContextUsage?(runtimeAgentId: string, sessionKey: string): Promise<OpenClawContextUsage | undefined>;
   collectRunArtifacts?(sessionKey: string, runId: string): Promise<CollectedOutput[]>;
 }
 
@@ -112,6 +114,7 @@ export interface BridgeCompactionResult {
   compacted: boolean;
   reason?: string;
   entry?: TranscriptDocument["entries"][number];
+  contextUsage?: OpenClawContextUsage;
 }
 
 export interface BridgeRequest {
@@ -131,7 +134,10 @@ export interface BridgeRequest {
   deferSuccessfulCleanup?: boolean;
 }
 
-export interface BridgeResult { runId: string; sessionId: string; entries: TranscriptDocument["entries"]; outputs?: CollectedOutput[] }
+export interface BridgeResult {
+  runId: string; sessionId: string; entries: TranscriptDocument["entries"];
+  outputs?: CollectedOutput[]; contextUsage?: OpenClawContextUsage;
+}
 
 // These events are persistence boundaries, not a diagnostic log. In particular,
 // message content is only exposed by entries_materialized, whose payload is the
@@ -140,7 +146,7 @@ export type BridgeLifecycleEvent =
   | { type: "temporary_session_created"; runtimeAgentId: string; sessionId: string; sessionKey: string; transcriptPath: string }
   | { type: "history_materialized"; previousEntryCount: number }
   | { type: "gateway_send_accepted"; gatewayRunId: string }
-  | { type: "entries_materialized"; entries: TranscriptDocument["entries"]; outputs?: CollectedOutput[] };
+  | { type: "entries_materialized"; entries: TranscriptDocument["entries"]; outputs?: CollectedOutput[]; contextUsage?: OpenClawContextUsage };
 
 export type BridgeLifecycleCallback = (event: BridgeLifecycleEvent) => Promise<void>;
 
@@ -198,6 +204,9 @@ export async function runBridge(client: GatewayClient, materializer: BridgeMater
   } finally { request.signal?.removeEventListener("abort", abort); }
   const added = await materializer.readNewEntries(created, previousCount);
   const entries = materializer.verifyAndStripSubmittedUser(added, request.latestUserMessage, request.latestUserEntryId);
-  await request.lifecycle?.({ type: "entries_materialized", entries });
-  return { runId, sessionId: created.sessionId, entries };
+  let contextUsage: OpenClawContextUsage | undefined;
+  try { contextUsage = await client.sessionContextUsage?.(request.runtimeAgentId, created.sessionKey); }
+  catch { contextUsage = undefined; }
+  await request.lifecycle?.({ type: "entries_materialized", entries, ...(contextUsage ? { contextUsage } : {}) });
+  return { runId, sessionId: created.sessionId, entries, ...(contextUsage ? { contextUsage } : {}) };
 }

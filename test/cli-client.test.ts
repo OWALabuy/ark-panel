@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { appendFile, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { completedRunStatus, GatewayRunError, OpenClawCliClient, trajectoryRunState } from "../src/gateway/cli-client.js";
+import { completedRunStatus, GatewayRunError, OpenClawCliClient, parseSessionContextUsage, trajectoryRunState } from "../src/gateway/cli-client.js";
 
 test("从 trajectory 中按 runId 识别 session.ended", () => {
   const lines = [
@@ -78,6 +78,26 @@ test("生成控制 RPC 复用持久 transport，create 直接采用返回的 ses
   assert.equal(created.sessionId, sessionId);
   assert.deepEqual(calls.map(call => call.method), ["sessions.create", "sessions.send", "sessions.delete"]);
   assert.match(String(calls[0]?.params.label), /^panel bridge [0-9a-f]{8}$/);
+});
+
+test("sessions.list 只采用目标会话的 OpenClaw fresh 上下文用量", async () => {
+  const key = "agent:runtime:panel-fixture";
+  assert.deepEqual(parseSessionContextUsage({ sessions: [
+    { key: "agent:runtime:other", totalTokens: 999, totalTokensFresh: true, contextTokens: 1_000 },
+    { key, totalTokens: 12_345, totalTokensFresh: true, contextTokens: 200_000 }
+  ] }, key), { source: "openclaw-session", totalTokens: 12_345, contextTokens: 200_000, totalTokensFresh: true });
+  assert.deepEqual(parseSessionContextUsage({ sessions: [
+    { key, totalTokens: 12_345, totalTokensFresh: false, contextTokens: 200_000 }
+  ] }, key), { source: "openclaw-session", totalTokens: null, contextTokens: 200_000, totalTokensFresh: false });
+
+  const root = await mkdtemp(join(tmpdir(), "panel-session-usage-"));
+  let observed: { method: string; params: unknown } | undefined;
+  const client = new OpenClawCliClient({ sessionsRoots: new Map([["runtime", root]]), rpc: { async request(method, params) {
+    observed = { method, params }; return { sessions: [{ key, totalTokens: 7, totalTokensFresh: true, contextTokens: 100 }] };
+  } } });
+  assert.equal((await client.sessionContextUsage("runtime", key))?.totalTokens, 7);
+  assert.deepEqual(observed, { method: "sessions.list", params: { agentId: "runtime", search: key, limit: 10 } });
+  await assert.rejects(client.sessionContextUsage("other", key), /RUNTIME_NOT_CONFIGURED/);
 });
 
 test("compact 仅调用 sessions.compact typed RPC 并拒绝异步 pending", async () => {

@@ -275,7 +275,7 @@ test("memory tree preserves each agent's collapsed categories when a file opens"
   assert.doesNotMatch(source,/details\.open=true;details\.className="memory-tree-group"/);
 });
 
-test("conversation status is server-controlled, separate from run status, and labels conservative context estimates", async () => {
+test("conversation status is server-controlled and uses fresh OpenClaw context usage", async () => {
   const source=await readFile("src/frontend/app.js","utf8");
   const statusHelper=await readFile("src/frontend/conversation-status.js","utf8");
   const html=await readFile("src/frontend/index.html","utf8");
@@ -288,7 +288,11 @@ test("conversation status is server-controlled, separate from run status, and la
   assert.match(source,/applyConversationStatusSetting\(confirmedShowConversationStatus\)/);
   assert.match(source,/renderConversationStatus\(conversation\.status\)/);
   assert.match(source,/activeSource==="panel"\?"status\.defaultModel":"status\.sourceDefaultModel"/);
+  assert.match(source,/const usage=status\.contextUsage/);
+  assert.match(source,/usage\?\.totalTokensFresh===true/);
   assert.match(source,/t\("status\.contextTitle"/);
+  assert.match(source,/t\("status\.contextUnknown"/);
+  assert.doesNotMatch(source,/const budget=status\.contextBudget/);
   assert.match(source,/contextStatusClass\(percentage\)/);
   assert.match(statusHelper,/value>=90\?"context-danger":value>=70\?"context-warning":""/);
   assert.match(statusHelper,/if\(seconds<60\)return text\("status\.justNow"\)/);

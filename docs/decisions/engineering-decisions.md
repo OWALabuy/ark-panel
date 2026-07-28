@@ -76,9 +76,9 @@ API 统一位于 `/api/v1`。成功响应是 `{ "data": ... }`；失败响应是
 
 当前采用 `utf8-bytes-upper-bound-v3`：先按 OpenClaw 2026.6.11 `buildSessionContext` 语义投影当前分支；若存在压缩，只计算最新摘要、`firstKeptEntryId` 起的 inclusive kept tail 与压缩后消息，再把投影和本轮消息的 UTF-8 字节数作为 token 上界并增加固定结构开销。它不是精确 tokenizer，会有意高估普通文本；默认历史预算为 100000 tokens，刻意为 gateway 注入的系统提示、记忆、工具 schema 和回复输出留余量。预算通过 `PANEL_CONTEXT_HISTORY_BUDGET_TOKENS` 配置。
 
-超过预算时返回稳定错误 `CONTEXT_BUDGET_EXCEEDED`，不调用 gateway、不写入本轮 user entry，并提供“压缩上下文”操作。70% 起警告、90% 起危险提示和明确操作；首版只手动压缩，不静默自动执行。压缩记录是完整 transcript 中的边界，fork 在边界前不继承摘要、在边界及之后继承摘要。
+超过预算时返回稳定错误 `CONTEXT_BUDGET_EXCEEDED`，不调用 gateway、不写入本轮 user entry，并提供“压缩上下文”操作。该保守上界是内部安全判定，不作为界面的当前 token 用量。界面仅采用 OpenClaw `sessions.list` 标记为 fresh 的 `totalTokens/contextTokens`；缺失时显示未知。首版只手动压缩，不静默自动执行。压缩记录是完整 transcript 中的边界，fork 在边界前不继承摘要、在边界及之后继承摘要。
 
-OpenClaw 返回 `compacted: true` 只代表上游执行了压缩流程，不足以证明面板的有效上下文已经减少。面板在采纳候选 compaction 前，必须用生成和状态展示共用的 `ConservativeContextBudget` 分别估算当前权威 document 与候选 document；只有候选 `estimatedTokens` 严格更小时才原子提交。若完整历史仍从 `firstKeptEntryId` 保留、摘要只被额外加入，或任何其他候选未产生有效减少，返回 `compacted: false`、reason `NO_EFFECTIVE_REDUCTION`，不改变 transcript 与 revision。面板不得自行改写上游边界来丢弃未被可靠摘要的消息。
+OpenClaw 返回 `compacted: true` 只代表上游执行了压缩流程，不足以证明面板的有效上下文已经减少。面板在采纳候选 compaction 前，必须用生成保护所用的 `ConservativeContextBudget` 分别估算当前权威 document 与候选 document；只有候选 `estimatedTokens` 严格更小时才原子提交。若完整历史仍从 `firstKeptEntryId` 保留、摘要只被额外加入，或任何其他候选未产生有效减少，返回 `compacted: false`、reason `NO_EFFECTIVE_REDUCTION`，不改变 transcript 与 revision。面板不得自行改写上游边界来丢弃未被可靠摘要的消息。
 
 ## 备份、恢复与迁移
 

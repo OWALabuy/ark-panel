@@ -68,6 +68,28 @@ test("没有 outputCapture 时 gateway 和验证器收到未改写的面板原�
   assert.deepEqual(result.entries, []);
 });
 
+test("bridge 在清理临时会话前捕获 OpenClaw 原生上下文用量", async t => {
+  const root = await mkdtemp(join(tmpdir(), "bridge-context-usage-")); t.after(() => rm(root, { recursive: true, force: true }));
+  const id = "13131313-1313-4313-8313-131313131313";
+  const created: CreatedSession = { sessionId: id, sessionKey: "agent:runtime:usage", transcriptPath: join(root, `${id}.jsonl`) };
+  await writeFile(join(root, `${id}.jsonl.deleted.fixture`), "x"); const order: string[] = [];
+  const usage = { source: "openclaw-session" as const, totalTokens: 12_000, contextTokens: 200_000, totalTokensFresh: true };
+  const client: GatewayClient = { async version() { return "2026.6.11"; }, async createSession() { return created; },
+    async send() { return { runId: "run" }; }, async waitForCompletion() {},
+    async sessionContextUsage(runtimeAgentId, sessionKey) {
+      assert.equal(runtimeAgentId, "runtime"); assert.equal(sessionKey, created.sessionKey); order.push("usage"); return usage;
+    }, async abort() {}, async deleteSession() { order.push("cleanup"); } };
+  const materializer: BridgeMaterializer = { async replaceCreatedTranscript() { return 0; },
+    async readNewEntries() { return [{ type: "message", id: "answer", message: { role: "assistant", content: "ok" } }]; },
+    verifyAndStripSubmittedUser(entries) { return entries; } };
+  const result = await new BridgeService(client, materializer, new Map([["runtime", root]])).generate({
+    runtimeAgentId: "runtime", historyThroughPreviousRun: { header: { type: "session" }, entries: [] },
+    latestUserMessage: "fixture", latestUserEntryId: "u", idempotencyKey: "run"
+  });
+  assert.deepEqual(result.contextUsage, usage);
+  assert.deepEqual(order, ["usage", "cleanup"]);
+});
+
 test("连续 20 轮 fixture 生成后无 transcript/trajectory artifact 累积", async t => {
   const root=await mkdtemp(join(tmpdir(),"bridge-durability-"));t.after(()=>rm(root,{recursive:true,force:true}));await writeFile(join(root,"sessions.json"),"{}");let sequence=0;
   const client:GatewayClient={async version(){return"2026.6.11"},async createSession(){sequence++;const id=`00000000-0000-4000-8000-${String(sequence).padStart(12,"0")}`;const transcriptPath=join(root,`${id}.jsonl`);await writeFile(transcriptPath,"fixture\n");await writeFile(join(root,`${id}.trajectory.jsonl`),"trajectory\n");await writeFile(join(root,`${id}.trajectory-path.json`),"{}\n");return{sessionId:id,sessionKey:`agent:runtime:${id}`,transcriptPath}},async send(){return{runId:`run-${sequence}`}},async waitForCompletion(){},async abort(){},async deleteSession(sessionKey){const id=sessionKey.split(":").at(-1)!;await writeFile(join(root,`${id}.jsonl.deleted.fixture`),await readFile(join(root,`${id}.jsonl`)));await import("node:fs/promises").then(fs=>fs.rm(join(root,`${id}.jsonl`)));await writeFile(join(root,"sessions.json"),"{}")}};

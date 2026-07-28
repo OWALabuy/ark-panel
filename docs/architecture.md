@@ -192,7 +192,7 @@ gateway 的会话索引属于其内部状态：它仅使用进程内锁，也没
 
 **需要面板处理或上线前验证的能力：**压缩前 memory flush 无法依赖；尚未确认 `AGENTS.md` / `TOOLS.md` 是否会自动注入，如有依赖，应由面板加入 `extraSystemPrompt`；browser、canvas、skills 等非记忆扩展机制预计可以沿用，但需逐项进行上线前测试。
 
-**由此产生的核心责任：**面板每次物化完整权威 transcript，gateway 不会持续积累同一 runtime session，因此**长对话的预算与持久压缩由面板负责**。面板以 OpenClaw 2026.6.11 的 current-branch/compaction 语义投影有效上下文；超预算返回 `CONTEXT_BUDGET_EXCEEDED`，不写本轮消息，并提供手动压缩操作。`/compact`、会话按钮和状态动作都调用同一 typed command API；完整旧消息不删除，最新摘要、inclusive kept tail 与压缩后消息决定下一轮预算。eligible 会话若有未整理消息会先提供“整理记忆后压缩 / 直接压缩 / 取消”，候选仍必须由用户确认；scratch 直接压缩且不会被暗中沉淀。
+**由此产生的核心责任：**面板每次物化完整权威 transcript，gateway 不会持续积累同一 runtime session，因此**长对话的预算与持久压缩由面板负责**。面板以 OpenClaw 2026.6.11 的 current-branch/compaction 语义投影有效上下文；超预算返回 `CONTEXT_BUDGET_EXCEEDED`，不写本轮消息，并提供手动压缩操作。该保守投影不冒充界面 token 用量；界面值在一次性 runtime session 删除前从 OpenClaw `sessions.list` 捕获，且仅在 fresh 并绑定当前 transcript tip 时展示，否则明确为未知。`/compact`、会话按钮和状态动作都调用同一 typed command API；完整旧消息不删除，最新摘要、inclusive kept tail 与压缩后消息决定下一轮预算。eligible 会话若有未整理消息会先提供“整理记忆后压缩 / 直接压缩 / 取消”，候选仍必须由用户确认；scratch 直接压缩且不会被暗中沉淀。
 
 #### 5.4.1 附件与产出文件边界
 

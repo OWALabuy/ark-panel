@@ -11,6 +11,7 @@ import { updatePanelMetadata } from "../storage/panel-sessions.js";
 import { currentTranscriptBranch } from "../domain/branch.js";
 import { exportTranscriptMarkdown, markdownFilename } from "../domain/markdown-export.js";
 import { ConservativeContextBudget, type ContextBudgetEstimator } from "../domain/context-budget.js";
+import { contextUsageAtCurrentTip, type OpenClawContextUsage } from "../domain/context-usage.js";
 import { forkSessionAttachmentReferences, garbageCollectAttachments } from "../storage/attachments.js";
 
 export interface ReadAgentConfig { agentId: string; sessionsRoot: string; label?: string }
@@ -24,6 +25,7 @@ export interface ConversationRecord {
 export interface ConversationStatus {
   modelOverride: string | null; thinkingLevel: string | null; reasoningLevel: string | null;
   contextBudget: { estimatedTokens: number; budgetTokens: number; percentage: number; method: "utf8-bytes-upper-bound-v3" };
+  contextUsage: (OpenClawContextUsage & { percentage: number | null }) | null;
   lastActiveAt: string;
 }
 export interface MemoryConversationSource {
@@ -184,6 +186,7 @@ export class SessionReadData {
           tokensBefore: entry.tokensBefore } : {})
     }));
     const estimate = this.contextBudget.estimate(currentTranscriptBranch(loaded.document), "");
+    const nativeUsage = loaded.record.sourceKind === "panel" ? contextUsageAtCurrentTip(loaded.document) : null;
     let modelOverride: string | null = null, thinkingLevel: string | null = null, reasoningLevel: string | null = null;
     if (loaded.record.sourceKind === "panel") {
       const metadata = (await loadPanelSession(this.dataRoot, loaded.record.agentId, loaded.record.recordId)).metadata;
@@ -192,6 +195,9 @@ export class SessionReadData {
     const status: ConversationStatus = { modelOverride, thinkingLevel, reasoningLevel,
       contextBudget: { estimatedTokens: estimate.estimatedTokens, budgetTokens: estimate.budgetTokens,
         percentage: Math.round(estimate.estimatedTokens / estimate.budgetTokens * 100), method: estimate.method },
+      contextUsage: nativeUsage ? { ...nativeUsage,
+        percentage: nativeUsage.totalTokens !== null && nativeUsage.contextTokens !== null ?
+          Math.round(nativeUsage.totalTokens / nativeUsage.contextTokens * 100) : null } : null,
       lastActiveAt: loaded.record.updatedAt };
     return { ...loaded.record, status, document: { header: safeHeader, entries: safeEntries } };
   }

@@ -4,6 +4,7 @@ import { open, readFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { assertSupportedVersion, type CollectedOutput, type CommandArgument, type CommandsCatalog, type ConfiguredToolsCatalog, type CreatedSession, type EffectiveToolsInventory, type GatewayAttachment, type GatewayClient, type GatewayCommand, type GatewayCompactionResult, type GatewayStatus, type ModelsCatalog, type OpenClawModel, type SessionOverrides, type ToolCatalogEntry, type ToolCatalogGroup } from "./adapter.js";
+import type { OpenClawContextUsage } from "../domain/context-usage.js";
 
 interface CliOptions {
   executable?: string;
@@ -104,6 +105,20 @@ export function parseCommandsCatalog(value: unknown): CommandsCatalog {
 
 export function parseGatewayStatus(value: unknown): GatewayStatus {
   return object(value, "STATUS") as GatewayStatus;
+}
+
+export function parseSessionContextUsage(value: unknown, sessionKey: string): OpenClawContextUsage | undefined {
+  const raw = object(value, "SESSIONS_LIST");
+  if (!Array.isArray(raw.sessions)) throw new Error("OPENCLAW_INVALID_SESSIONS_LIST");
+  const matching = raw.sessions.map(item => object(item, "SESSION_ROW")).filter(row => row.key === sessionKey);
+  if (matching.length > 1) throw new Error("OPENCLAW_DUPLICATE_SESSION_ROW");
+  const row = matching[0]; if (!row) return undefined;
+  const rawTotal = row.totalTokens;
+  const totalTokens = typeof rawTotal === "number" && Number.isSafeInteger(rawTotal) && rawTotal >= 0 ? rawTotal : null;
+  const rawContext = row.contextTokens;
+  const contextTokens = typeof rawContext === "number" && Number.isSafeInteger(rawContext) && rawContext > 0 ? rawContext : null;
+  const totalTokensFresh = row.totalTokensFresh === true && totalTokens !== null;
+  return { source: "openclaw-session", totalTokens: totalTokensFresh ? totalTokens : null, contextTokens, totalTokensFresh };
 }
 
 export function parseModelsCatalog(value: unknown): ModelsCatalog {
@@ -315,6 +330,11 @@ export class OpenClawCliClient implements GatewayClient {
     if (!this.sessionsRoots.has(runtimeAgentId) || sessionKey.split(":")[1] !== runtimeAgentId) throw new Error("RUNTIME_NOT_CONFIGURED");
     const result = parseEffectiveToolsInventory(await this.call<unknown>("tools.effective", { agentId: runtimeAgentId, sessionKey }));
     if (result.agentId !== runtimeAgentId) throw new Error("OPENCLAW_TOOLS_EFFECTIVE_AGENT_MISMATCH"); return result;
+  }
+  async sessionContextUsage(runtimeAgentId: string, sessionKey: string): Promise<OpenClawContextUsage | undefined> {
+    if (!this.sessionsRoots.has(runtimeAgentId) || sessionKey.split(":")[1] !== runtimeAgentId) throw new Error("RUNTIME_NOT_CONFIGURED");
+    return parseSessionContextUsage(await this.call<unknown>("sessions.list",
+      { agentId: runtimeAgentId, search: sessionKey, limit: 10 }), sessionKey);
   }
   async send(sessionKey: string, message: string, idempotencyKey: string, attachments?: readonly GatewayAttachment[]): Promise<{ runId: string }> {
     return await this.call("sessions.send", { key: sessionKey, agentId: sessionKey.split(":")[1], message,
