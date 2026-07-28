@@ -281,7 +281,7 @@ test("conversation status is server-controlled, separate from run status, and la
   const html=await readFile("src/frontend/index.html","utf8");
   const styles=await readFile("src/frontend/styles.css","utf8");
 
-  assert.match(html,/id="subtitle"[\s\S]*id="conversation-status"/);
+  assert.match(html,/class="conversation-meta"[\s\S]*id="subtitle"[\s\S]*id="conversation-status"/);
   assert.match(html,/id="show-conversation-status"[^>]*type="checkbox"/);
   assert.match(source,/body:JSON\.stringify\(\{conversation:\{showStatus:target\}\}\)/);
   assert.match(source,/confirmedShowConversationStatus=settings\?\.conversation\?\.showStatus!==false/);
@@ -293,6 +293,11 @@ test("conversation status is server-controlled, separate from run status, and la
   assert.match(statusHelper,/value>=90\?"context-danger":value>=70\?"context-warning":""/);
   assert.match(statusHelper,/if\(seconds<60\)return text\("status\.justNow"\)/);
   assert.match(styles,/\.conversation-status\[hidden\]\{display:none\}/);
+  assert.match(styles,/\.conversation-status\{display:flex;flex:1;min-width:0;overflow:hidden;gap:0 8px;white-space:nowrap\}/);
+  assert.match(styles,/@media\(max-width:760px\)\{[\s\S]*\.conversation>header \.conversation-meta #subtitle\{max-width:100%\}[\s\S]*\.conversation-status\{display:none!important\}/);
+  assert.match(styles,/\.conversation-status-model\{flex:0 1 220px;overflow:hidden;text-overflow:ellipsis\}/);
+  assert.match(styles,/\.conversation-status-context\{flex:none\}/);
+  assert.match(styles,/@media\(max-width:1120px\) and \(min-width:761px\)\{\.conversation-status-activity\{display:none\}\}/);
   assert.match(styles,/\.conversation-status-item\.context-warning/);
   assert.match(styles,/\.conversation-status-item\.context-danger/);
 });

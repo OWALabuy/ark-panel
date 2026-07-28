@@ -4,6 +4,14 @@ export function contextStatusClass(percentage){
   return value>=90?"context-danger":value>=70?"context-warning":"";
 }
 
+export function compactTokenCount(value,locale="zh-CN"){
+  const tokens=Math.max(0,Math.round(Number(value)));
+  if(!Number.isFinite(tokens))return"";
+  if(tokens<1000)return new Intl.NumberFormat(locale,{maximumFractionDigits:0}).format(tokens);
+  const thousands=tokens/1000;
+  return`${new Intl.NumberFormat(locale,{maximumFractionDigits:thousands<10?1:0,useGrouping:false}).format(thousands)}k`;
+}
+
 export function relativeConversationTime(value,now=Date.now(),locale="zh-CN",translate){
   const time=new Date(value).getTime();
   if(!Number.isFinite(time))return"";

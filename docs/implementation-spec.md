@@ -637,8 +637,8 @@ fork 和编辑重发共用底层（见 §5.0）：都是「从目标 entry 回�
 ### 8.6.1 会话状态区（2026-07-17 已实现）
 
 - 会话详情返回经过筛选的 `status` DTO：panel metadata 中显式设置的 `modelOverride` / `thinkingLevel` / `reasoningLevel`（未设置为 `null`）、当前权威 transcript 的保守上下文预算估算，以及 transcript 文件的 `lastActiveAt`。DTO 不返回内部路径、完整 metadata 或额外消息正文。
-- 前端在标题下使用独立的 `conversation-status` 区域；`subtitle` 继续专用于生成、断线和来源状态，两者不得互相覆盖。
-- 上下文使用现有 `ConservativeContextBudget`，只估算已保存历史，不包含浏览器草稿。界面显示整数百分比并明确说明它不是厂商精确 token 计数；70%/90% 为警告/危险阈值。
+- 桌面标题区固定为两行：第一行是标题；第二行将 `subtitle` 的生成、断线或来源状态与独立的 `conversation-status` 视觉上连续排列。两个 DOM 区域及 `aria-live` 语义仍然独立，状态更新不得互相覆盖。第二行不换行；模型名允许省略，空间不足先隐藏最近活跃并优先保住上下文信息。移动端仍隐藏 `conversation-status`。
+- 上下文使用现有 `ConservativeContextBudget`，只估算已保存历史，不包含浏览器草稿。界面显示带 `≈` 的紧凑已用量、预算量和整数百分比，例如 `上下文 ≈127k / 1000k（13%）`；精确数值和估算方法保留在 tooltip，并明确说明它不是厂商精确 token 计数。70%/90% 为警告/危险阈值。
 - `settings.json` v1 增加 `conversation.showStatus`，默认 `true`。旧文件允许缺少整个 `conversation` 对象并补默认值，其他未知字段仍按损坏或非法请求拒绝。该开关为账户级服务端偏好，不使用 `localStorage` 作为权威值。
 
 ### 8.7 Markdown 渲染与复制（新增 2026-07-12，公式更新 2026-07-15）
