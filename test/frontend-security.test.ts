@@ -165,6 +165,17 @@ test("mobile conversation actions collapse and command menu stays inside the sho
   assert.match(styles,/\.commands\{max-height:min\(320px,calc\(100dvh - 190px\)\)\}/);
 });
 
+test("conversation source label is visually stronger and centered with detail status", async () => {
+  const html=await readFile("src/frontend/index.html","utf8");
+  const styles=await readFile("src/frontend/styles.css","utf8");
+
+  assert.match(html,/<span id="subtitle" aria-live="polite"><\/span>/);
+  assert.doesNotMatch(html,/<small id="subtitle"/);
+  assert.match(styles,/\.conversation>header \.conversation-meta\{[^}]*align-items:center;[^}]*font-size:12px;line-height:1\.25\}/);
+  assert.match(styles,/\.conversation-meta #subtitle\{[^}]*font-size:14px;font-weight:600;line-height:1\.25\}/);
+  assert.match(styles,/\.conversation-status\{[^}]*align-items:center/);
+});
+
 test("mobile navigation uses scrollable agent lists and finger-sized action menus", async () => {
   const source=await readFile("src/frontend/app.js","utf8");
   const styles=await readFile("src/frontend/styles.css","utf8");
@@ -297,9 +308,9 @@ test("conversation status is server-controlled and uses fresh OpenClaw context u
   assert.match(statusHelper,/value>=90\?"context-danger":value>=70\?"context-warning":""/);
   assert.match(statusHelper,/if\(seconds<60\)return text\("status\.justNow"\)/);
   assert.match(styles,/\.conversation-status\[hidden\]\{display:none\}/);
-  assert.match(styles,/\.conversation>header \.conversation-meta\{[^}]*font-size:12px\}/);
-  assert.match(styles,/\.conversation-meta #subtitle\{[^}]*font-size:inherit;font-weight:600\}/);
-  assert.match(styles,/\.conversation-status\{display:flex;flex:1;min-width:0;overflow:hidden;gap:0 8px;white-space:nowrap\}/);
+  assert.match(styles,/\.conversation>header \.conversation-meta\{[^}]*font-size:12px;line-height:1\.25\}/);
+  assert.match(styles,/\.conversation-meta #subtitle\{[^}]*font-size:14px;font-weight:600;line-height:1\.25\}/);
+  assert.match(styles,/\.conversation-status\{display:flex;flex:1;min-width:0;align-items:center;overflow:hidden;gap:0 8px;white-space:nowrap\}/);
   assert.match(styles,/@media\(max-width:760px\)\{[\s\S]*\.conversation>header \.conversation-meta #subtitle\{max-width:100%\}[\s\S]*\.conversation-status\{display:none!important\}/);
   assert.match(styles,/\.conversation-status-model\{flex:0 1 auto;max-width:220px;overflow:hidden;text-overflow:ellipsis\}/);
   assert.match(styles,/\.conversation-status-context\{flex:none\}/);
