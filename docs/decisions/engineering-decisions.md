@@ -78,6 +78,8 @@ API 统一位于 `/api/v1`。成功响应是 `{ "data": ... }`；失败响应是
 
 超过预算时返回稳定错误 `CONTEXT_BUDGET_EXCEEDED`，不调用 gateway、不写入本轮 user entry，并提供“压缩上下文”操作。70% 起警告、90% 起危险提示和明确操作；首版只手动压缩，不静默自动执行。压缩记录是完整 transcript 中的边界，fork 在边界前不继承摘要、在边界及之后继承摘要。
 
+OpenClaw 返回 `compacted: true` 只代表上游执行了压缩流程，不足以证明面板的有效上下文已经减少。面板在采纳候选 compaction 前，必须用生成和状态展示共用的 `ConservativeContextBudget` 分别估算当前权威 document 与候选 document；只有候选 `estimatedTokens` 严格更小时才原子提交。若完整历史仍从 `firstKeptEntryId` 保留、摘要只被额外加入，或任何其他候选未产生有效减少，返回 `compacted: false`、reason `NO_EFFECTIVE_REDUCTION`，不改变 transcript 与 revision。面板不得自行改写上游边界来丢弃未被可靠摘要的消息。
+
 ## 备份、恢复与迁移
 
 备份只包含面板权威数据与配置模板，不包含 gateway token 和临时 runtime artifact。清单记录文件大小、SHA-256 与空目录，并设清单大小、条目数、单文件和总字节资源上限；备份与恢复使用目标名协作锁。restore 在 verify 后的实际复制阶段再次逐文件核对哈希，并复核目标父目录身份，目标目录必须不存在；文件权限为 `0600`、目录为 `0700`。远端备份必须使用 git-crypt 或等价加密。恢复验收为：复制数据目录后全量重建索引，所有 recordId、fork 来源和 transcript 内容保持一致。迁移到新机器时允许源绝对路径变化，因此稳定 ID 不依赖绝对路径。

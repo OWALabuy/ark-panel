@@ -1,6 +1,7 @@
 import { lstat } from "node:fs/promises";
 import { join } from "node:path";
 import { currentTranscriptBranch } from "../domain/branch.js";
+import { ConservativeContextBudget, type ContextBudgetEstimator } from "../domain/context-budget.js";
 import type { JsonObject, TranscriptDocument } from "../domain/transcript.js";
 import type { BridgeCompactionRequest, BridgeCompactionResult } from "../gateway/adapter.js";
 import { commitPanelTranscript, listPanelSessions, loadPanelSession } from "../storage/panel-sessions.js";
@@ -13,6 +14,7 @@ interface CompactionBridge {
 export interface CompactionConfig {
   dataRoot: string;
   runtimeByAgent: ReadonlyMap<string, string>;
+  contextBudget?: ContextBudgetEstimator;
   operations?: SessionOperationCoordinator;
 }
 
@@ -55,8 +57,14 @@ export class PanelCompactionApi {
       if (!result.compacted || !result.entry) return {
         compacted: false, revision: baseRevision, ...(result.reason ? { reason: result.reason } : {})
       };
-      const committed: TranscriptDocument = { header: document.header, entries: [...document.entries, result.entry] };
-      await commitPanelTranscript(this.config.dataRoot, metadata, committed);
+      const candidate: TranscriptDocument = { header: document.header, entries: [...document.entries, result.entry] };
+      const contextBudget = this.config.contextBudget ?? new ConservativeContextBudget();
+      const beforeTokens = contextBudget.estimate(document, "").estimatedTokens;
+      const candidateTokens = contextBudget.estimate(candidate, "").estimatedTokens;
+      if (candidateTokens >= beforeTokens) return {
+        compacted: false, revision: baseRevision, reason: "NO_EFFECTIVE_REDUCTION"
+      };
+      await commitPanelTranscript(this.config.dataRoot, metadata, candidate);
       return { compacted: true, revision: revision(await lstat(transcriptPath)) };
     });
   }

@@ -62,7 +62,7 @@ const commandApi = config.dataRoot && readApi ? new PanelCommandApi(config.dataR
   },
   ...(config.dataRoot && config.runtimes.size ? { compact: async (recordId: string, expectedRevision?: string) => {
     const runtimeByAgent = new Map([...config.runtimes].map(([agentId, value]) => [agentId, value.runtimeAgentId]));
-    return await new PanelCompactionApi(bridge, { dataRoot: config.dataRoot!, runtimeByAgent, operations }).compact(recordId, expectedRevision);
+    return await new PanelCompactionApi(bridge, { dataRoot: config.dataRoot!, runtimeByAgent, contextBudget, operations }).compact(recordId, expectedRevision);
   } } : {})
 }, operations) : undefined;
 const allowedHosts = [`127.0.0.1:${config.port}`, `localhost:${config.port}`];
