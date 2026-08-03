@@ -172,7 +172,8 @@ test("conversation source label is visually stronger and centered with detail st
   assert.match(html,/<span id="subtitle" aria-live="polite"><\/span>/);
   assert.doesNotMatch(html,/<small id="subtitle"/);
   assert.match(styles,/\.conversation>header \.conversation-meta\{[^}]*align-items:center;[^}]*font-size:12px;line-height:1\.25\}/);
-  assert.match(styles,/\.conversation-meta #subtitle\{[^}]*font-size:14px;font-weight:600;line-height:1\.25\}/);
+  assert.match(styles,/\.conversation-meta #subtitle\{[^}]*font-size:14px;line-height:1\.25\}/);
+  assert.doesNotMatch(styles,/\.conversation-meta #subtitle\{[^}]*font-weight:/);
   assert.match(styles,/\.conversation-status\{[^}]*align-items:center/);
 });
 
@@ -309,7 +310,8 @@ test("conversation status is server-controlled and uses fresh OpenClaw context u
   assert.match(statusHelper,/if\(seconds<60\)return text\("status\.justNow"\)/);
   assert.match(styles,/\.conversation-status\[hidden\]\{display:none\}/);
   assert.match(styles,/\.conversation>header \.conversation-meta\{[^}]*font-size:12px;line-height:1\.25\}/);
-  assert.match(styles,/\.conversation-meta #subtitle\{[^}]*font-size:14px;font-weight:600;line-height:1\.25\}/);
+  assert.match(styles,/\.conversation-meta #subtitle\{[^}]*font-size:14px;line-height:1\.25\}/);
+  assert.doesNotMatch(styles,/\.conversation-meta #subtitle\{[^}]*font-weight:/);
   assert.match(styles,/\.conversation-status\{display:flex;flex:1;min-width:0;align-items:center;overflow:hidden;gap:0 8px;white-space:nowrap\}/);
   assert.match(styles,/@media\(max-width:760px\)\{[\s\S]*\.conversation>header \.conversation-meta #subtitle\{max-width:100%\}[\s\S]*\.conversation-status\{display:none!important\}/);
   assert.match(styles,/\.conversation-status-model\{flex:0 1 auto;max-width:220px;overflow:hidden;text-overflow:ellipsis\}/);
