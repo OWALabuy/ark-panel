@@ -117,8 +117,8 @@ test("frontend renders untrusted metadata with DOM text nodes", async () => {
   assert.match(source,/activeSource!=="panel"/);
   assert.match(source,/\/memory\/status/);
   assert.match(source,/compact-memory-dialog/);
-  assert.match(source,/generateMemoryCandidate\(\{thenCompact:true\}\)/);
-  assert.match(source,/if\(thenCompact\)\{\$\("#memory-candidate-dialog"\)\.close\(\);await executeCompact\(\)\}/);
+  assert.match(source,/generateMemoryCandidate\(\{thenCompact:true,compactionContext:context\}\)/);
+  assert.match(source,/if\(state\?\.thenCompact\)\{\$\("#memory-candidate-dialog"\)\.close\(\);await executeCompact\(state\.compactionContext\)\}/);
 });
 
 test("generation state only locks the composer for its own session", async () => {
@@ -130,6 +130,17 @@ test("generation state only locks the composer for its own session", async () =>
   assert.match(source,/const textarea=\$\("#message"\),running=Boolean\(activeRun\)/);
   assert.match(source,/textarea\.disabled=busy\|\|!writable/);
   assert.match(source,/if\(activeSession!==run\.recordId\)return;syncActiveRun\(\)/);
+});
+
+test("conversation operations only lock and surface results in their own session", async () => {
+  const source=await readFile("src/frontend/app.js","utf8");
+
+  assert.match(source,/attachmentSubmissions=createScopedActivity\(\),compactions=createScopedActivity\(\),memoryCandidateGenerations=createScopedActivity\(\)/);
+  assert.match(source,/uploading=isAttachmentSubmissionActive\(\),compacting=isCompactionActive\(\),busy=running\|\|uploading\|\|compacting/);
+  assert.match(source,/attachmentSubmissions\.move\(previousKey,createdKey\)/);
+  assert.match(source,/if\(activeSession===recordId\)\{\$\("#subtitle"\)\.textContent=t\("compact\.running"\)/);
+  assert.match(source,/pendingMemoryCandidates\.set\(recordId,\{candidate,thenCompact,compactionContext:context\}\)/);
+  assert.match(source,/if\(!state\|\|activeSession!==recordId\|\|dialog\.open\)return/);
 });
 
 test("mobile conversation keeps a constrained touch-scroll viewport", async () => {
@@ -247,8 +258,8 @@ test("appearance preferences are constrained, cached early, and locally scale re
 test("confirmed memory candidate exposes an unambiguous close action", async () => {
   const source=await readFile("src/frontend/app.js","utf8");
   assert.match(source,/status\.textContent=t\("memory\.confirmed"/);
-  assert.match(source,/button\.hidden=true;close\.textContent=t\("common\.close"\);if\(thenCompact\)[\s\S]*?else close\.focus\(\)/);
-  assert.match(source,/addEventListener\("close",\(\)=>\{pendingMemoryCandidate=null/);
+  assert.match(source,/button\.hidden=true;close\.textContent=t\("common\.close"\);if\(state\?\.thenCompact\)[\s\S]*?else close\.focus\(\)/);
+  assert.match(source,/addEventListener\("close",\(\)=>\{if\(pendingMemoryCandidate&&memoryCandidateDialogRecordId\)pendingMemoryCandidates\.delete/);
 });
 
 test("memory center is a dedicated agent-aware tree beside the global settings entry", async () => {
