@@ -28,6 +28,7 @@ export interface PanelRunRecord {
   baseParentEntryId?: string | null;
   message?: string;
   attachmentIds?: string[];
+  requestOutputs?: boolean;
   expectedRevision?: string;
   plannedUserEntryId?: string;
   stagedEntries?: unknown[];
@@ -46,6 +47,7 @@ function validate(value: unknown, expectedRunId?: string): PanelRunRecord {
       typeof item.updatedAt !== "string" || !Number.isInteger(item.sequence) || typeof item.status !== "string" || !["accepted", "running", "materializing", "committing", "committed", "aborting", "completed", "failed", "aborted"].includes(item.status)) {
     throw new Error("run record 格式无效");
   }
+  if (item.requestOutputs !== undefined && typeof item.requestOutputs !== "boolean") throw new Error("run record 格式无效");
   return item as PanelRunRecord;
 }
 

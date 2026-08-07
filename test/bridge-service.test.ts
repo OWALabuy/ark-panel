@@ -34,7 +34,7 @@ test("bridge 在临时 session 清理前汇总本轮 artifact 与专属 outputs"
   const client: GatewayClient = { async version() { return "2026.6.11"; }, async createSession() { return created; },
     async send(_key, message, _idempotency, attachments) {
       assert.equal(attachments?.[0]?.fileName, "input.docx");
-      assert.match(message, /仅当用户明确要求生成可下载文件/); assert.match(message, new RegExp(`${runUuid}/outputs`));
+      assert.match(message, /用户已为本轮开启“需要文件”/); assert.match(message, new RegExp(`${runUuid}/outputs`));
       assert.match(message, /不要将用户上传的输入附件复制到该目录/);
       const output = join(workspace, ".openclaw", "tmp", "ark-panel", runUuid, "outputs", "answer.txt"); await writeFile(output, "answer");
       return { runId: "gateway-run" };
@@ -60,12 +60,13 @@ test("没有 outputCapture 时 gateway 和验证器收到未改写的面板原�
   const created: CreatedSession = { sessionId: id, sessionKey: "agent:runtime:no-output", transcriptPath: join(root, `${id}.jsonl`) };
   await writeFile(join(root, `${id}.jsonl.deleted.fixture`), "x");
   const client: GatewayClient = { async version() { return "2026.6.11"; }, async createSession() { return created; },
-    async send(_key, message) { assert.equal(message, original); return { runId: "run" }; }, async waitForCompletion() {}, async abort() {}, async deleteSession() {} };
+    async send(_key, message) { assert.equal(message, original); return { runId: "run" }; }, async waitForCompletion() {}, async abort() {}, async deleteSession() {},
+    async collectRunArtifacts() { return [{ source: "artifact", fileName: "native.txt", bytes: Buffer.from("native") }]; } };
   const materializer: BridgeMaterializer = { async replaceCreatedTranscript() { return 0; }, async readNewEntries() { return []; },
     verifyAndStripSubmittedUser(entries, expected) { assert.equal(expected, original); return entries; } };
   const result = await new BridgeService(client, materializer, new Map([["runtime", root]])).generate({ runtimeAgentId: "runtime",
     historyThroughPreviousRun: { header: { type: "session" }, entries: [] }, latestUserMessage: original, latestUserEntryId: "u", idempotencyKey: "key" });
-  assert.deepEqual(result.entries, []);
+  assert.deepEqual(result.entries, []); assert.deepEqual(result.outputs?.map(output => output.fileName), ["native.txt"]);
 });
 
 test("bridge 在清理临时会话前捕获 OpenClaw 原生上下文用量", async t => {

@@ -10,7 +10,7 @@ interface AttachmentSender { send(sessionKey: string, message: string, idempoten
 
 function submittedMessage(message: string, outputCapture?: PreparedOutputCapture): string {
   if (!outputCapture) return message;
-  return `${message}\n\n[ark-panel 运行指令]\n仅当用户明确要求生成可下载文件时，才将产出写入本轮专属目录：${outputCapture.outputsRoot}\n不要将用户上传的输入附件复制到该目录；输入附件已由运行时单独提供。`;
+  return `${message}\n\n[ark-panel 运行指令]\n用户已为本轮开启“需要文件”。请将可下载产出写入本轮专属目录：${outputCapture.outputsRoot}\n不要将用户上传的输入附件复制到该目录；输入附件已由运行时单独提供。`;
 }
 
 export class BridgeService {

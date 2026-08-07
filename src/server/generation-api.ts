@@ -67,8 +67,8 @@ export async function materializeOpenClawHistory(dataRoot: string, agentId: stri
 export class PanelGenerationApi implements GenerationApi {
   private static readonly MAX_COMPLETED = 512;
   private readonly operations: SessionOperationCoordinator;
-  private readonly completed = new Map<string, { recordId: string; message: string; value: { runId: string; entries: unknown[]; revision?: string } }>();
-  private readonly inflight = new Map<string, { recordId: string; message: string; promise: Promise<{ runId: string; entries: unknown[]; revision?: string }> }>();
+  private readonly completed = new Map<string, { recordId: string; message: string; requestOutputs: boolean; value: { runId: string; entries: unknown[]; revision?: string } }>();
+  private readonly inflight = new Map<string, { recordId: string; message: string; requestOutputs: boolean; promise: Promise<{ runId: string; entries: unknown[]; revision?: string }> }>();
   private readonly controllers = new Map<string, AbortController>();
   private readonly runStore: PanelRunStore;
   private readonly executions = new Map<string, Promise<void>>();
@@ -122,7 +122,7 @@ export class PanelGenerationApi implements GenerationApi {
           }
         } else if (record.status === "accepted" && record.message !== undefined && record.plannedUserEntryId) {
           this.plannedUserIds.set(record.runId, record.plannedUserEntryId);
-          const execution = this.executeRun(record, record.message, record.expectedRevision, record.attachmentIds ?? []).catch(error => { process.stderr.write(`[ark-panel] recovered run failed runId=${record.runId}: ${String(error)}\n`); }).finally(() => this.executions.delete(record.runId));
+          const execution = this.executeRun(record, record.message, record.expectedRevision, record.attachmentIds ?? [], record.requestOutputs === true).catch(error => { process.stderr.write(`[ark-panel] recovered run failed runId=${record.runId}: ${String(error)}\n`); }).finally(() => this.executions.delete(record.runId));
           this.executions.set(record.runId, execution);
         } else { const cleaned = await this.cleanupOrphan(record); await this.runStore.put(this.scrub({ ...record, sequence: record.sequence + 1, status: "failed", updatedAt: now, finishedAt: now, cleanupPending: !cleaned,
           error: { code: "RUN_ORPHANED_AFTER_RESTART", message: "服务重启后无法安全恢复该任务，请重新发送。" } })); }
@@ -148,17 +148,24 @@ export class PanelGenerationApi implements GenerationApi {
     await garbageCollectAttachments(this.config.dataRoot);
   }
 
-  async create(recordId: string, message: string, runId: string = randomUUID(), expectedRevision?: string, attachmentIds: readonly string[] = []): Promise<PublicPanelRun & { newlyCreated?: boolean }> {
+  async create(recordId: string, message: string, runId: string = randomUUID(), expectedRevision?: string, attachmentIds: readonly string[] = [], requestOutputs = false): Promise<PublicPanelRun & { newlyCreated?: boolean }> {
+    if (typeof requestOutputs !== "boolean") throw new Error("REQUEST_OUTPUTS_INVALID");
     const normalizedAttachments = [...attachmentIds];
-    const requestHash = createHash("sha256").update(JSON.stringify({ recordId, message, expectedRevision: expectedRevision ?? null, attachmentIds: normalizedAttachments })).digest("hex");
+    const requestHash = this.requestHash(recordId, message, expectedRevision, normalizedAttachments, requestOutputs);
     const pending = this.creations.get(runId); if (pending) { if (pending.requestHash !== requestHash) throw new Error("IDEMPOTENCY_KEY_REUSED"); return { ...await pending.promise, newlyCreated: false }; }
-    const creation = this.createOnce(recordId, message, runId, expectedRevision, normalizedAttachments).finally(() => this.creations.delete(runId));
+    const creation = this.createOnce(recordId, message, runId, expectedRevision, normalizedAttachments, requestOutputs).finally(() => this.creations.delete(runId));
     this.creations.set(runId, { requestHash, promise: creation }); return await creation;
   }
 
-  private async createOnce(recordId: string, message: string, runId: string, expectedRevision?: string, attachmentIds: readonly string[] = []): Promise<PublicPanelRun & { newlyCreated?: boolean }> {
+  private requestHash(recordId: string, message: string, expectedRevision: string | undefined, attachmentIds: readonly string[], requestOutputs: boolean): string {
+    // Keep the false/omitted shape compatible with durable runs created before requestOutputs existed.
+    return createHash("sha256").update(JSON.stringify({ recordId, message, expectedRevision: expectedRevision ?? null, attachmentIds,
+      ...(requestOutputs ? { requestOutputs: true } : {}) })).digest("hex");
+  }
+
+  private async createOnce(recordId: string, message: string, runId: string, expectedRevision?: string, attachmentIds: readonly string[] = [], requestOutputs = false): Promise<PublicPanelRun & { newlyCreated?: boolean }> {
     await this.initialize();
-    const requestHash = createHash("sha256").update(JSON.stringify({ recordId, message, expectedRevision: expectedRevision ?? null, attachmentIds })).digest("hex");
+    const requestHash = this.requestHash(recordId, message, expectedRevision, attachmentIds, requestOutputs);
     let release!: () => void; const previous = this.creationGate; this.creationGate = new Promise<void>(resolve => { release = resolve; }); await previous;
     let accepted: PanelRunRecord;
     try {
@@ -168,10 +175,11 @@ export class PanelGenerationApi implements GenerationApi {
       if (active) throw new Error("SESSION_BUSY");
       const now = new Date().toISOString(), plannedUserEntryId = randomUUID();
       accepted = { version: 1, runId, recordId, requestHash, sequence: 1, status: "accepted", createdAt: now, updatedAt: now, message,
-        plannedUserEntryId, ...(attachmentIds.length ? { attachmentIds: [...attachmentIds] } : {}), ...(expectedRevision ? { expectedRevision } : {}) };
+        plannedUserEntryId, ...(attachmentIds.length ? { attachmentIds: [...attachmentIds] } : {}), ...(requestOutputs ? { requestOutputs: true } : {}),
+        ...(expectedRevision ? { expectedRevision } : {}) };
       await this.runStore.put(accepted); this.plannedUserIds.set(runId, plannedUserEntryId);
     } finally { release(); }
-    const execution = this.executeRun(accepted, message, expectedRevision, attachmentIds).catch(error => {
+    const execution = this.executeRun(accepted, message, expectedRevision, attachmentIds, requestOutputs).catch(error => {
       process.stderr.write(`[ark-panel] run manager failed runId=${runId}: ${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
     }).finally(() => this.executions.delete(runId));
     this.executions.set(runId, execution);
@@ -210,11 +218,11 @@ export class PanelGenerationApi implements GenerationApi {
     return this.visible(updated);
   }
 
-  private async executeRun(accepted: PanelRunRecord, message: string, expectedRevision?: string, attachmentIds: readonly string[] = []): Promise<void> {
+  private async executeRun(accepted: PanelRunRecord, message: string, expectedRevision?: string, attachmentIds: readonly string[] = [], requestOutputs = false): Promise<void> {
     let current = await this.transition(accepted, { status: "running", startedAt: new Date().toISOString() });
     try {
       if (this.abortRequested.has(accepted.runId)) throw new Error("BRIDGE_ABORTED");
-      const result = await this.generate(accepted.recordId, message, new AbortController().signal, accepted.runId, expectedRevision, attachmentIds);
+      const result = await this.generate(accepted.recordId, message, new AbortController().signal, accepted.runId, expectedRevision, attachmentIds, requestOutputs);
       current = (await this.runStore.get(accepted.runId)) ?? current;
       current = await this.transition(current, { status: "completed", finishedAt: new Date().toISOString(), ...(result.revision ? { revision: result.revision } : {}),
         ...(result.runtimeAgentId ? { runtimeAgentId: result.runtimeAgentId } : {}), ...(result.temporarySessionId ? { temporarySessionId: result.temporarySessionId } : {}),
@@ -319,7 +327,7 @@ export class PanelGenerationApi implements GenerationApi {
     void task.finally(() => { if (this.streamTails.get(runId) === task) { this.streamTails.delete(runId); } });
   }
   private scrub(record: PanelRunRecord): PanelRunRecord {
-    const { message: _message, attachmentIds: _attachmentIds, expectedRevision: _expectedRevision, stagedEntries: _stagedEntries, ...clean } = record; return clean;
+    const { message: _message, attachmentIds: _attachmentIds, requestOutputs: _requestOutputs, expectedRevision: _expectedRevision, stagedEntries: _stagedEntries, ...clean } = record; return clean;
   }
   private async committedRevision(recordId: string, userEntryId: string): Promise<string | undefined> {
     for (const agentId of this.config.runtimeByAgent.keys()) try {
@@ -368,12 +376,13 @@ export class PanelGenerationApi implements GenerationApi {
     }
   }
 
-  async generate(recordId: string, message: string, signal: AbortSignal, runId: string = randomUUID(), expectedRevision?: string, attachmentIds: readonly string[] = []): Promise<{ runId: string; entries: unknown[]; revision?: string; runtimeAgentId?: string; temporarySessionId?: string; gatewayRunId?: string }> {
+  async generate(recordId: string, message: string, signal: AbortSignal, runId: string = randomUUID(), expectedRevision?: string, attachmentIds: readonly string[] = [], requestOutputs = false): Promise<{ runId: string; entries: unknown[]; revision?: string; runtimeAgentId?: string; temporarySessionId?: string; gatewayRunId?: string }> {
+    if (typeof requestOutputs !== "boolean") throw new Error("REQUEST_OUTPUTS_INVALID");
     const done = this.completed.get(runId); if (done) {
-      if (done.recordId !== recordId || done.message !== message) throw new Error("IDEMPOTENCY_KEY_REUSED"); return done.value;
+      if (done.recordId !== recordId || done.message !== message || done.requestOutputs !== requestOutputs) throw new Error("IDEMPOTENCY_KEY_REUSED"); return done.value;
     }
     const running = this.inflight.get(runId); if (running) {
-      if (running.recordId !== recordId || running.message !== message) throw new Error("IDEMPOTENCY_KEY_REUSED"); return await running.promise;
+      if (running.recordId !== recordId || running.message !== message || running.requestOutputs !== requestOutputs) throw new Error("IDEMPOTENCY_KEY_REUSED"); return await running.promise;
     }
     // 每个 run 拥有自己的 AbortController，按 runId 登记，供显式 abort() 中断。
     // 外部传入的 signal（HTTP 连接、测试）转发进来，但连接断开本身已不再触发 abort。
@@ -381,17 +390,17 @@ export class PanelGenerationApi implements GenerationApi {
     if (this.abortRequested.has(runId)) controller.abort();
     if (signal?.aborted) controller.abort(); else signal?.addEventListener("abort", forward, { once: true });
     this.controllers.set(runId, controller);
-    const promise = this.generateOnce(recordId, message, controller.signal, runId, expectedRevision, attachmentIds);
-    this.inflight.set(runId, { recordId, message, promise });
+    const promise = this.generateOnce(recordId, message, controller.signal, runId, expectedRevision, attachmentIds, requestOutputs);
+    this.inflight.set(runId, { recordId, message, requestOutputs, promise });
     try {
-      const value = await promise; this.completed.set(runId, { recordId, message, value });
+      const value = await promise; this.completed.set(runId, { recordId, message, requestOutputs, value });
       while (this.completed.size > (this.config.completedCacheLimit ?? PanelGenerationApi.MAX_COMPLETED)) this.completed.delete(this.completed.keys().next().value as string);
       return value;
     }
     finally { this.inflight.delete(runId); this.controllers.delete(runId); signal?.removeEventListener("abort", forward); }
   }
 
-  private async generateOnce(recordId: string, message: string, signal: AbortSignal, runId: string, expectedRevision?: string, attachmentIds: readonly string[] = []): Promise<{ runId: string; entries: unknown[]; revision?: string; runtimeAgentId?: string; temporarySessionId?: string; gatewayRunId?: string }> {
+  private async generateOnce(recordId: string, message: string, signal: AbortSignal, runId: string, expectedRevision?: string, attachmentIds: readonly string[] = [], requestOutputs = false): Promise<{ runId: string; entries: unknown[]; revision?: string; runtimeAgentId?: string; temporarySessionId?: string; gatewayRunId?: string }> {
     if (message.trimStart().startsWith("/")) throw new Error("SLASH_COMMANDS_UNSUPPORTED");
     if (attachmentIds.length > 10 || new Set(attachmentIds).size !== attachmentIds.length) throw new Error("ATTACHMENTS_INVALID");
     return await this.operations.runGeneration(recordId, async () => {
@@ -427,7 +436,7 @@ export class PanelGenerationApi implements GenerationApi {
         latestUserEntryId: userId, idempotencyKey: runId,
         ...(storedAttachments.length ? { attachments: storedAttachments.map(({ stored, bytes }) => ({ fileName: stored.manifest.fileName,
           mimeType: stored.manifest.mimeType, content: bytes.toString("base64") })) } : {}),
-        ...(this.config.workspaceByAgent?.get(agentId) ? { outputCapture: { workspaceRoot: this.config.workspaceByAgent.get(agentId)!,
+        ...(requestOutputs && this.config.workspaceByAgent?.get(agentId) ? { outputCapture: { workspaceRoot: this.config.workspaceByAgent.get(agentId)!,
           cleanupRoot: join(this.config.dataRoot, "files", "output-cleanup") } } : {}),
         overrides: { ...(metadata.modelOverride ? { modelOverride: metadata.modelOverride } : {}),
           ...(metadata.thinkingLevel ? { thinkingLevel: metadata.thinkingLevel } : {}),

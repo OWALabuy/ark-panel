@@ -9,7 +9,7 @@ import { MAX_AVATAR_BYTES, validateSettingsPatch, type PanelSettings, type Setti
 import { MAX_ATTACHMENT_BYTES } from "../storage/attachments.js";
 
 export interface GenerationApi {
-  create(recordId: string, message: string, runId?: string, expectedRevision?: string, attachmentIds?: readonly string[]): Promise<PublicPanelRun>;
+  create(recordId: string, message: string, runId?: string, expectedRevision?: string, attachmentIds?: readonly string[], requestOutputs?: boolean): Promise<PublicPanelRun>;
   get(runId: string): Promise<PublicPanelRun | undefined>;
   subscribe(runId: string, listener: (run: PublicPanelRun) => void): Promise<(() => void) | undefined>;
   abortRun(runId: string): Promise<PublicPanelRun | undefined>;
@@ -242,15 +242,16 @@ export function createPanelServer(options: AppOptions) {
           if (!options.generation) return fail(res, 501, "GATEWAY_NOT_CONNECTED", "后台任务适配器尚未接入", requestId);
           const recordId = decodeURIComponent(url.pathname.slice("/api/v1/sessions/".length, -"/runs".length));
           if (options.reads) { const target = await options.reads.conversation(recordId) as { sourceKind?: unknown } | null; if (!target) return fail(res, 404, "SESSION_NOT_FOUND", "会话不存在", requestId); if (target.sourceKind !== "panel") return fail(res, 409, "SOURCE_READ_ONLY", "真实活会话和归档只读，请先 fork 为面板会话", requestId); }
-          const value = await body(req) as { message?: unknown; revision?: unknown; attachmentIds?: unknown };
+          const value = await body(req) as { message?: unknown; revision?: unknown; attachmentIds?: unknown; requestOutputs?: unknown };
           if (typeof value.message !== "string") return fail(res, 400, "MESSAGE_REQUIRED", "消息格式错误", requestId);
           if (value.attachmentIds !== undefined && (!Array.isArray(value.attachmentIds) || value.attachmentIds.length > 10 || value.attachmentIds.some(item => typeof item !== "string"))) return fail(res, 400, "ATTACHMENTS_INVALID", "附件列表格式错误", requestId);
+          if (value.requestOutputs !== undefined && typeof value.requestOutputs !== "boolean") return fail(res, 400, "REQUEST_OUTPUTS_INVALID", "文件产出标志格式错误", requestId);
           const attachmentIds = (value.attachmentIds ?? []) as string[];
           if (!value.message.trim() && attachmentIds.length === 0) return fail(res, 400, "MESSAGE_REQUIRED", "消息和附件不能同时为空", requestId);
           if (value.revision !== undefined && typeof value.revision !== "string") return fail(res, 400, "REVISION_INVALID", "revision 格式错误", requestId);
           const retryKey = req.headers["idempotency-key"];
           if (retryKey !== undefined && !validRunId(retryKey)) return fail(res, 400, "IDEMPOTENCY_KEY_INVALID", "Idempotency-Key 格式错误", requestId);
-          const created = await options.generation.create(recordId, value.message, typeof retryKey === "string" ? retryKey : undefined, typeof value.revision === "string" ? value.revision : undefined, attachmentIds) as PublicPanelRun & { newlyCreated?: boolean };
+          const created = await options.generation.create(recordId, value.message, typeof retryKey === "string" ? retryKey : undefined, typeof value.revision === "string" ? value.revision : undefined, attachmentIds, value.requestOutputs === true) as PublicPanelRun & { newlyCreated?: boolean };
           const { newlyCreated, ...snapshot } = created; return send(res, newlyCreated === false ? 200 : 202, { data: snapshot });
         }
         if (req.method === "GET" && /^\/api\/v1\/sessions\/[^/]+\/runs\/active$/.test(url.pathname)) {

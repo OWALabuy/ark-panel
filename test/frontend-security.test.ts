@@ -431,3 +431,22 @@ test("composer uploads raw attachments and preserves their ids for idempotent ru
   assert.match(styles,/\.image-preview-dialog/);
   assert.match(styles,/\.composer\.dragging/);
 });
+
+test("per-turn output intent is accessible, draft-scoped, and preserved until run acceptance", async () => {
+  const source=await readFile("src/frontend/app.js","utf8");
+  const html=await readFile("src/frontend/index.html","utf8");
+  const styles=await readFile("src/frontend/styles.css","utf8");
+
+  assert.match(html,/id="request-outputs"[^>]*aria-pressed="false"/);
+  assert.match(html,/class="request-outputs-icon"[^>]*>▧</);
+  assert.match(source,/OUTPUT_INTENT_PREFIX="ark-panel:request-outputs:v1:"/);
+  assert.match(source,/function outputIntentKey\(sessionId=activeSession,agentId=activeAgent\)\{return sessionId\?`\$\{OUTPUT_INTENT_PREFIX\}session:/);
+  assert.match(source,/moveOutputIntent\(null,sourceAgent,createdId,sourceAgent\)/);
+  assert.match(source,/submittedRequestOutputs:run\.submittedRequestOutputs/);
+  assert.match(source,/requestOutputs:run\.submittedRequestOutputs===true/);
+  assert.match(source,/clearAcceptedOutputIntent\(accepted\);const snapshot=rememberRun\(accepted\)/);
+  assert.match(source,/\$\("#request-outputs"\)\.disabled=busy\|\|!writable\|\|command/);
+  assert.match(source,/textContent=enabled\?"✓":"▧"/);
+  assert.match(styles,/\.request-outputs\[aria-pressed="true"\]/);
+  assert.match(styles,/@media\(max-width:760px\)\{\.composer-foot \.request-outputs\{min-height:44px\}\}/);
+});

@@ -37,8 +37,8 @@
 - **面板内看记忆**：已实现独立只读工作区；从 Agent 栏齿轮上方进入，按 Agent 和类别树状列出 `MEMORY.md`、`DREAMS.md` 与 `memory/**/*.md`，右侧安全渲染正文并可跳回面板贡献的来源会话；不开放任意 workspace 浏览或在线编辑。
 - **会话置顶（pin）**：已实现，状态只存面板 metadata；会话列表提供快捷操作。
 - **导出会话为 Markdown**：已实现当前权威分支下载，包含时间、思考与工具调用结果，不包含内部路径和隐藏 metadata。
-- **草稿与输入状态**：已实现为按 agent + session 隔离的浏览器本地草稿，不同步服务端；发送失败保留，成功后清除。浏览器也按 session 保存正在生成的 run，只有该 run 所属会话的输入框会锁定；切换到其他会话后仍可编辑其草稿。
-- **附件 / 多模态输入与模型产出文件**：已实现。上传文件由面板持久化并作为结构化附件交给 OpenClaw；模型产出只从本轮 artifact 或隔离输出目录收集。
+- **草稿与输入状态**：已实现为按 agent + session 隔离的浏览器本地草稿，不同步服务端；发送失败保留，成功后清除。“需要文件”同样按现有会话或新会话 Agent 草稿隔离，服务端接受 run 后关闭，明确提交失败时保留。浏览器也按 session 保存正在生成的 run，只有该 run 所属会话的输入框会锁定；切换到其他会话后仍可编辑其草稿。
+- **附件 / 多模态输入与模型产出文件**：已实现。上传文件由面板持久化并作为结构化附件交给 OpenClaw；OpenClaw 本轮 artifact 始终收集，隔离输出目录仅在本轮显式开启“需要文件”时启用。
 - **会话内切模型 / 切供应商**：能力依赖 gateway，随斜杠命令适配到位即可获得，面板不自建（见 §6.5、§8.6）。
 - **自动生成会话标题**：保持手填；未填时截取首条用户消息。不自动生成（会牵动 gateway 侧提示词，且 Owl 通常仍会手动改名）。
 - **视图内分支切换**：fork / 编辑重发一律在侧边栏产生独立会话（§6.2），不在同一视图内切换消息版本，避免两套心智模型。
@@ -199,7 +199,8 @@ gateway 的会话索引属于其内部状态：它仅使用进程内锁，也没
 - 浏览器上传的是文件字节和显示名称，不得提交服务器路径。服务端将其写入 `PANEL_DATA_DIR/files`：blob 按 SHA-256 内容寻址，manifest 与会话消息引用分离；目录/文件权限分别收紧到 `0700`/`0600`。
 - 输入附件与 user entry 一起进入 transcript，fork 只继承祖先消息真正引用的附件。图片、文本、PDF 由 OpenClaw/模型按其能力消费；Office 文件原样传递，面板不做 Office → 文本/PDF 转换，模型若需读取应使用自身 Python 或 skill。
 - 面板 transcript 中的 `attachment` 是持久化与 UI 使用的专用块，不能原样物化给 OpenClaw。续聊时，服务端会校验附件与消息的归属，将历史用户图片从私有存储恢复为带真实 Base64 的 OpenClaw `image` 块；其他历史附件只生成文件名与 MIME 文字说明，避免 OpenAI-compatible 适配器把未知块误编码成无效图片。
-- 模型可下载产出只接受两个来源：OpenClaw 为当前 run 明确登记的 artifact，或服务端可信 `workspaceRoot` 下 `.openclaw/tmp/ark-panel/<run-id>/outputs`。客户端不能控制 workspace 或输出目录。
+- 模型可下载产出只接受两个来源：OpenClaw 为当前 run 明确登记的 artifact，或服务端可信 `workspaceRoot` 下 `.openclaw/tmp/ark-panel/<run-id>/outputs`。artifact 每轮都收集且不需要改写 user message；只有浏览器为本轮提交经过运行时校验的 `requestOutputs: true` 时，服务端才创建隔离目录并向送入 runtime 的本轮消息附加产出指令。普通轮次保持原始用户消息。客户端不能控制 workspace 或输出目录。
+- `requestOutputs` 是单轮幂等请求的一部分，随非终态 run 持久化以支持进程重启和浏览器重连；附件输入不会自动开启它，结构化斜杠命令也不消费它。
 - 收集发生在临时 OpenClaw session 清理前；内容先安全复制进面板存储，再删除运行目录。路径逃逸、符号链接、硬链接、特殊文件、读取竞态、文件数和总容量越界都会使本轮失败，不提供任意 workspace 文件下载接口。
 - 下载和图片预览均经过面板登录鉴权。下载使用 `Content-Disposition: attachment`；预览只接受服务端真实解码且有尺寸/像素上限的单帧 PNG、JPEG、WebP，并使用 `inline`、`nosniff`、`no-store` 与隔离 CSP。HTML、SVG、动图和伪图片绝不以内联页面执行。
 
