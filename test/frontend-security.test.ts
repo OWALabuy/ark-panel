@@ -450,7 +450,9 @@ test("per-turn output intent is accessible, draft-scoped, and preserved until ru
   const styles=await readFile("src/frontend/styles.css","utf8");
 
   assert.match(html,/id="request-outputs"[^>]*aria-pressed="false"/);
+  assert.match(html,/id="request-outputs"[^>]*aria-label="[^"]+"[^>]*title="[^"]+"/);
   assert.match(html,/class="request-outputs-icon"[^>]*>▧</);
+  assert.doesNotMatch(html,/id="request-outputs"[^>]*>[\s\S]*?data-i18n="composer\.requestOutputs"/);
   assert.match(source,/OUTPUT_INTENT_PREFIX="ark-panel:request-outputs:v1:"/);
   assert.match(source,/function outputIntentKey\(sessionId=activeSession,agentId=activeAgent\)\{return sessionId\?`\$\{OUTPUT_INTENT_PREFIX\}session:/);
   assert.match(source,/moveOutputIntent\(null,sourceAgent,createdId,sourceAgent\)/);
@@ -460,5 +462,5 @@ test("per-turn output intent is accessible, draft-scoped, and preserved until ru
   assert.match(source,/\$\("#request-outputs"\)\.disabled=busy\|\|!writable\|\|command/);
   assert.match(source,/textContent=enabled\?"✓":"▧"/);
   assert.match(styles,/\.request-outputs\[aria-pressed="true"\]/);
-  assert.match(styles,/@media\(max-width:760px\)\{\.composer-foot \.request-outputs\{min-height:44px\}\}/);
+  assert.match(styles,/@media\(max-width:760px\)\{\.composer-foot \.request-outputs\{width:44px;min-height:44px\}\}/);
 });
