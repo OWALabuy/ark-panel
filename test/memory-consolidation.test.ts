@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { link, mkdtemp, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { MemoryConsolidationStore } from "../src/storage/memory-consolidation.js";
@@ -64,4 +64,61 @@ test("旧版逐 batch 文件作为基线迁移，滚动 state 持久化后安全
   await assert.rejects(readFile(join(workspace, oldPath)), /ENOENT/);
   const migrated = JSON.parse(await readFile(statePath, "utf8")) as { version: number; legacyTargets?: unknown };
   assert.equal(migrated.version, 2); assert.equal(migrated.legacyTargets, undefined);
+});
+
+test("滚动文件删除后以最后确认的完整候选恢复，保留 checkpoint 且支持无新增重建", async () => {
+  const root = await mkdtemp(join(tmpdir(), "panel-memory-restore-")), data = join(root, "data"), workspace = join(root, "workspace"); await mkdir(data); await mkdir(workspace);
+  const firstStore = new MemoryConsolidationStore(data), first = await firstStore.createCandidate({ agentId: "agent", recordId: "record", sourceKind: "panel", sourceRevision: "one", fromEntryId: "u1", throughEntryId: "a1", content: "# Remembered\n\n- Kept" });
+  const ledger = await firstStore.confirm(first.batchId, first.contentHash, workspace); await unlink(join(workspace, ledger.targetPath));
+  const store = new MemoryConsolidationStore(data);
+  assert.equal(await store.recovery("record", workspace), "restore_or_rebuild");
+  await assert.rejects(store.context("record", workspace), /MEMORY_RECOVERY_REQUIRED/);
+  const context = await store.context("record", workspace, "restore");
+  assert.equal(context.baseContent, first.content); assert.equal(context.checkpointEntryId, "a1"); assert.equal(context.targetState, "absent");
+  const recovery = await store.createCandidate({ agentId: "agent", recordId: "record", sourceKind: "panel", sourceRevision: "one",
+    previousCheckpointEntryId: "a1", ...(context.baseContentHash ? { baseContentHash: context.baseContentHash } : {}), fromEntryId: "a1", throughEntryId: "a1", content: context.baseContent!,
+    mode: "restore", stateHash: context.stateHash, expectedTargetState: context.targetState });
+  await store.confirm(recovery.batchId, recovery.contentHash, workspace);
+  assert.equal(await readFile(join(workspace, ledger.targetPath), "utf8"), first.content + "\n"); assert.equal(await store.checkpoint("record"), "a1");
+  assert.equal(await store.recovery("record", workspace), "none");
+});
+
+test("恢复候选以 state 和缺失目标做 CAS，拒绝生成期间被重新创建的文件", async () => {
+  const root = await mkdtemp(join(tmpdir(), "panel-memory-restore-cas-")), data = join(root, "data"), workspace = join(root, "workspace"); await mkdir(data); await mkdir(workspace);
+  const store = new MemoryConsolidationStore(data), first = await store.createCandidate({ agentId: "agent", recordId: "record", sourceKind: "panel", sourceRevision: "one", fromEntryId: "u1", throughEntryId: "a1", content: "first" });
+  const ledger = await store.confirm(first.batchId, first.contentHash, workspace); await unlink(join(workspace, ledger.targetPath));
+  const context = await store.context("record", workspace, "restore"), recovery = await store.createCandidate({ agentId: "agent", recordId: "record", sourceKind: "panel", sourceRevision: "two",
+    previousCheckpointEntryId: "a1", ...(context.baseContentHash ? { baseContentHash: context.baseContentHash } : {}), fromEntryId: "u2", throughEntryId: "a2", content: "updated",
+    mode: "restore", stateHash: context.stateHash, expectedTargetState: context.targetState });
+  await writeFile(join(workspace, ledger.targetPath), "recreated elsewhere\n");
+  await assert.rejects(store.confirm(recovery.batchId, recovery.contentHash, workspace), /MEMORY_TARGET_CONFLICT/);
+  assert.equal(await store.checkpoint("record"), "a1");
+});
+
+test("恢复快照缺失或不安全时只允许完整会话重建", async () => {
+  const root = await mkdtemp(join(tmpdir(), "panel-memory-rebuild-only-")), data = join(root, "data"), workspace = join(root, "workspace"); await mkdir(data); await mkdir(workspace);
+  const store = new MemoryConsolidationStore(data), first = await store.createCandidate({ agentId: "agent", recordId: "record", sourceKind: "panel", sourceRevision: "one", fromEntryId: "u1", throughEntryId: "a1", content: "first" });
+  const ledger = await store.confirm(first.batchId, first.contentHash, workspace); await unlink(join(workspace, ledger.targetPath));
+  const candidatePath = join(data, "memory", "candidates", `${first.batchId}.json`), hardlinkPath = join(data, "memory", "candidates", `${first.batchId}.copy`); await link(candidatePath, hardlinkPath);
+  assert.equal(await store.recovery("record", workspace), "rebuild_only");
+  await assert.rejects(store.context("record", workspace, "restore"), /MEMORY_RECOVERY_SNAPSHOT_UNAVAILABLE/);
+  const rebuild = await store.context("record", workspace, "rebuild"); assert.equal(rebuild.baseContent, undefined); assert.equal(rebuild.checkpointEntryId, "a1");
+  await unlink(hardlinkPath);
+});
+
+test("v1 state 的旧 batch 缺失时可从完整会话重建并迁移到 v2", async () => {
+  const root = await mkdtemp(join(tmpdir(), "panel-memory-v1-rebuild-")), data = join(root, "data"), workspace = join(root, "workspace"), stateRoot = join(data, "memory", "state");
+  await mkdir(stateRoot, { recursive: true }); await mkdir(workspace);
+  const recordId = "legacy-missing", batchId = "12345678-1234-4123-8123-123456789abc", targetPath = `memory/2026-07-22-ark-panel-${batchId}.md`;
+  const ledger = { batchId, agentId: "agent", recordId, sourceKind: "panel", sourceRevision: "rev-1", fromEntryId: "u1", throughEntryId: "a1",
+    contentHash: hash("missing legacy"), targetPath, createdAt: "2026-07-22T00:00:00.000Z", confirmedAt: "2026-07-22T00:01:00.000Z", status: "confirmed" };
+  const statePath = join(stateRoot, `${hash(recordId)}.json`); await writeFile(statePath, JSON.stringify({ version: 1, recordId, checkpointEntryId: "a1", batches: [ledger] }) + "\n");
+  const store = new MemoryConsolidationStore(data); assert.equal(await store.recovery(recordId, workspace), "rebuild_only");
+  const context = await store.context(recordId, workspace, "rebuild"), candidate = await store.createCandidate({ agentId: "agent", recordId, sourceKind: "panel", sourceRevision: "rev-2",
+    previousCheckpointEntryId: "a1", fromEntryId: "u1", throughEntryId: "a2", content: "rebuilt from full conversation",
+    mode: "rebuild", stateHash: context.stateHash, expectedTargetState: context.targetState });
+  const confirmed = await store.confirm(candidate.batchId, candidate.contentHash, workspace);
+  assert.equal(await readFile(join(workspace, confirmed.targetPath), "utf8"), "rebuilt from full conversation\n");
+  const migrated = JSON.parse(await readFile(statePath, "utf8")) as { version: number; checkpointEntryId: string };
+  assert.deepEqual({ version: migrated.version, checkpointEntryId: migrated.checkpointEntryId }, { version: 2, checkpointEntryId: "a2" });
 });

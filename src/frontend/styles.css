@@ -61,6 +61,7 @@ select{font:inherit;color:inherit}input,textarea,select{border-color:var(--borde
 .shell.show-memory{grid-template-rows:minmax(0,1fr)}.memory-navigation{overflow:hidden}.memory-navigation>header,.memory-document>header,.memory-navigation>output{flex:none}.memory-tree{flex:1 1 0;overscroll-behavior:contain}
 @media(max-width:760px){.memory-document>header>#back-memory-tree{display:block;width:auto;height:auto}.memory-document>header>#open-memory-source{max-width:34%;overflow:hidden;text-overflow:ellipsis}}
 .memory-candidate-dialog{width:min(760px,calc(100% - 28px))}.memory-candidate-content{overflow:auto;max-height:55vh;padding:5px 14px;border:1px solid var(--border);border-radius:10px;background:var(--surface-subtle)}.memory-candidate-content .markdown{font-size:var(--reading-size,100%)}
+.memory-recovery-actions{flex-wrap:wrap}
 @media(max-width:760px){.settings-drawer{width:calc(100% - 20px)}.settings-trigger{position:absolute;right:20px;bottom:20px}.agents>#open-memory{right:74px}}
 
 /* Collapsible desktop navigation rail. */

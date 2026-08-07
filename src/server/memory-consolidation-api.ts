@@ -3,7 +3,7 @@ import type { TranscriptDocument, JsonObject } from "../domain/transcript.js";
 import type { BridgeService } from "../gateway/bridge-service.js";
 import type { EffectiveToolsInventory } from "../gateway/adapter.js";
 import { workspaceSnapshot } from "../gateway/runtime-acceptance.js";
-import { MemoryConsolidationStore, type MemoryCandidate, type MemoryLedgerEntry } from "../storage/memory-consolidation.js";
+import { MemoryConsolidationStore, type MemoryCandidate, type MemoryConsolidationMode, type MemoryLedgerEntry, type MemoryRecoveryStatus } from "../storage/memory-consolidation.js";
 import type { MemoryConversationSource } from "./read-data.js";
 
 const READ_ONLY_TOOLS = new Set(["memory_search", "memory_get"]);
@@ -44,6 +44,13 @@ function rangeIsCurrent(document: TranscriptDocument, previousCheckpointEntryId:
   if (previousCheckpointEntryId && start === 0 || ids[start] !== fromEntryId) return false;
   return ids.indexOf(throughEntryId, start) >= start;
 }
+function candidateRangeIsCurrent(document: TranscriptDocument, candidate: Pick<MemoryCandidate, "mode" | "previousCheckpointEntryId" | "fromEntryId" | "throughEntryId">): boolean {
+  const mode = candidate.mode ?? "incremental";
+  if (mode === "restore" && candidate.previousCheckpointEntryId && candidate.fromEntryId === candidate.previousCheckpointEntryId && candidate.throughEntryId === candidate.previousCheckpointEntryId) {
+    return document.entries.some(entry => entry.id === candidate.previousCheckpointEntryId);
+  }
+  return rangeIsCurrent(document, mode === "rebuild" ? undefined : candidate.previousCheckpointEntryId, candidate.fromEntryId, candidate.throughEntryId);
+}
 function meaningfulMessage(entry: JsonObject): boolean {
   if (entry.type !== "message") return false;
   const message = entry.message;
@@ -65,15 +72,16 @@ export class PanelMemoryConsolidationApi {
 
   agents(): string[] { return [...this.runtimes.keys()].sort(); }
 
-  async status(recordId: string): Promise<{ available: boolean; eligible: boolean; pending: boolean }> {
+  async status(recordId: string): Promise<{ available: boolean; eligible: boolean; pending: boolean; recovery: MemoryRecoveryStatus }> {
     const source = await this.sources.memorySource(recordId); if (!source) throw new Error("SESSION_NOT_FOUND");
     const available = this.runtimes.has(source.record.agentId), eligible = source.record.memoryDisposition === "eligible";
-    if (!available || !eligible) return { available, eligible, pending: false };
+    if (!available || !eligible) return { available, eligible, pending: false, recovery: "none" };
+    const runtime = this.runtime(source.record.agentId), recovery = await this.store.recovery(recordId, runtime.workspaceRoot);
     const checkpoint = await this.store.checkpoint(recordId), entries = source.document.entries;
     const checkpointIndex = checkpoint ? entries.findIndex(entry => entry.id === checkpoint) : -1;
     const start = checkpointIndex >= 0 ? checkpointIndex + 1 : 0;
     const pending = entries.slice(start).some(meaningfulMessage);
-    return { available, eligible, pending };
+    return { available, eligible, pending, recovery };
   }
 
   private runtime(agentId: string): MemoryRuntime {
@@ -100,13 +108,25 @@ export class PanelMemoryConsolidationApi {
       release(); if (this.indexQueues.get(agentId) === queued) this.indexQueues.delete(agentId);
     }
   }
-  async candidate(recordId: string): Promise<MemoryCandidate> {
+  async candidate(recordId: string, mode: MemoryConsolidationMode = "incremental"): Promise<MemoryCandidate> {
     return await this.serialized(recordId, async () => {
       const source = await this.sources.memorySource(recordId); if (!source) throw new Error("SESSION_NOT_FOUND");
       if (source.record.memoryDisposition !== "eligible") throw new Error("MEMORY_SOURCE_NOT_ELIGIBLE");
       const runtime = this.runtime(source.record.agentId);
-      const context = await this.store.context(recordId, runtime.workspaceRoot), range = fixedRange(source.document, context.checkpointEntryId), before = await workspaceSnapshot(runtime.workspaceRoot);
-      const instruction = context.baseContent
+      const context = await this.store.context(recordId, runtime.workspaceRoot, mode);
+      let range: ReturnType<typeof fixedRange>;
+      try { range = fixedRange(source.document, mode === "rebuild" ? undefined : context.checkpointEntryId); }
+      catch (error) {
+        if (mode !== "restore" || (error as Error).message !== "MEMORY_NOTHING_TO_CONSOLIDATE" || !context.checkpointEntryId || !context.baseContent) throw error;
+        return await this.store.createCandidate({ agentId: source.record.agentId, recordId, sourceKind: source.record.sourceKind,
+          sourceRevision: source.record.revision, previousCheckpointEntryId: context.checkpointEntryId,
+          ...(context.baseContentHash ? { baseContentHash: context.baseContentHash } : {}), fromEntryId: context.checkpointEntryId, throughEntryId: context.checkpointEntryId,
+          content: context.baseContent, mode, stateHash: context.stateHash, expectedTargetState: context.targetState });
+      }
+      const before = await workspaceSnapshot(runtime.workspaceRoot);
+      const instruction = mode === "rebuild"
+        ? "面板会话的滚动短期记忆文件已被移除。请仅根据上面的完整权威会话分支，从头重新生成一份供用户整份审阅的短期记忆 Markdown。不要假设旧的面板记忆仍然有效；只保留未来对话真正有帮助的稳定事实、偏好、决定、项目状态和待办；去重，不写推理过程，不声称已保存，不调用任何工具。仅输出 Markdown 正文。"
+        : context.baseContent
         ? `整理上面的 checkpoint 后固定会话范围，并基于下面的上一版已确认会话记忆，生成一份供用户整份审阅的更新版短期记忆 Markdown。输出必须是合并后的完整会话记忆，不是增量片段；保留仍有效的信息，合并重复项，更新已变化的项目状态和决定，删除已失效的待办。只保留未来对话真正有帮助的稳定事实、偏好、决定、项目状态和待办；不写推理过程，不声称已保存，不调用任何工具。仅输出 Markdown 正文。\n\n<previous_confirmed_memory>\n${context.baseContent}\n</previous_confirmed_memory>`
         : "整理上面的固定会话范围，生成一份供用户整份审阅的完整短期记忆 Markdown。只保留未来对话真正有帮助的稳定事实、偏好、决定、项目状态和待办；去重，不写推理过程，不声称已保存，不调用任何工具。仅输出 Markdown 正文。";
       const result = await this.bridge.generate({ runtimeAgentId: runtime.runtimeAgentId, historyThroughPreviousRun: range.document,
@@ -115,13 +135,14 @@ export class PanelMemoryConsolidationApi {
         lifecycle: async event => { if (event.type === "temporary_session_created") await this.assertRestricted(runtime.runtimeAgentId, event.sessionKey); } });
       const after = await workspaceSnapshot(runtime.workspaceRoot); if (before.hash !== after.hash) throw new Error("MEMORY_WORKSPACE_CHANGED_DURING_PREVIEW");
       const latest = await this.sources.memorySource(recordId); if (!latest || latest.record.memoryDisposition !== "eligible") throw new Error("MEMORY_SOURCE_NOT_ELIGIBLE");
-      if (latest.record.agentId !== source.record.agentId || !rangeIsCurrent(latest.document, context.checkpointEntryId, range.fromEntryId, range.throughEntryId)) throw new Error("MEMORY_SOURCE_CHANGED_DURING_PREVIEW");
-      const current = await this.store.context(recordId, runtime.workspaceRoot);
-      if (current.checkpointEntryId !== context.checkpointEntryId || current.baseContentHash !== context.baseContentHash || current.targetPath !== context.targetPath) throw new Error("MEMORY_SOURCE_CHANGED_DURING_PREVIEW");
+      if (latest.record.agentId !== source.record.agentId || !rangeIsCurrent(latest.document, mode === "rebuild" ? undefined : context.checkpointEntryId, range.fromEntryId, range.throughEntryId)) throw new Error("MEMORY_SOURCE_CHANGED_DURING_PREVIEW");
+      const current = await this.store.context(recordId, runtime.workspaceRoot, mode);
+      if (current.checkpointEntryId !== context.checkpointEntryId || current.baseContentHash !== context.baseContentHash || current.targetPath !== context.targetPath || current.stateHash !== context.stateHash || current.targetState !== context.targetState) throw new Error("MEMORY_SOURCE_CHANGED_DURING_PREVIEW");
       return await this.store.createCandidate({ agentId: source.record.agentId, recordId, sourceKind: source.record.sourceKind,
         sourceRevision: source.record.revision, ...(context.checkpointEntryId ? { previousCheckpointEntryId: context.checkpointEntryId } : {}),
         ...(context.baseContentHash ? { baseContentHash: context.baseContentHash } : {}),
-        fromEntryId: range.fromEntryId, throughEntryId: range.throughEntryId, content: assistantCandidate(result.entries) });
+        fromEntryId: range.fromEntryId, throughEntryId: range.throughEntryId, content: assistantCandidate(result.entries),
+        mode, stateHash: context.stateHash, expectedTargetState: context.targetState });
     });
   }
   async getCandidate(batchId: string): Promise<MemoryCandidate> { return await this.store.loadCandidate(batchId); }
@@ -131,7 +152,7 @@ export class PanelMemoryConsolidationApi {
       const source = await this.sources.memorySource(candidate.recordId);
       if (!source) throw new Error("SESSION_NOT_FOUND"); if (source.record.memoryDisposition !== "eligible") throw new Error("MEMORY_SOURCE_NOT_ELIGIBLE");
       if (source.record.agentId !== candidate.agentId) throw new Error("MEMORY_CANDIDATE_CORRUPT");
-      if (!rangeIsCurrent(source.document, candidate.previousCheckpointEntryId, candidate.fromEntryId, candidate.throughEntryId)) throw new Error("MEMORY_CANDIDATE_STALE");
+      if (!candidateRangeIsCurrent(source.document, candidate)) throw new Error("MEMORY_CANDIDATE_STALE");
       const runtime = this.runtime(candidate.agentId);
       const ledger = await this.store.confirm(batchId, contentHash, runtime.workspaceRoot);
       await this.refreshIndex(candidate.agentId, runtime.indexAgentIds);

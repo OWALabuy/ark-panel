@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { PanelMemoryConsolidationApi } from "../src/server/memory-consolidation-api.js";
@@ -40,13 +40,13 @@ test("再次整理只发送 checkpoint 后原文，并显式合并上一版已�
   }]]), bridge,
     { async effectiveTools() { return { agentId: "panel-memory-agent", scope: "effective-session-tools" as const, toolIds: ["memory_get", "memory_search"] }; },
       async refreshMemoryIndex() {} });
-  assert.deepEqual(await api.status("record"), { available: true, eligible: true, pending: true });
+  assert.deepEqual(await api.status("record"), { available: true, eligible: true, pending: true, recovery: "none" });
   const first = await api.candidate("record"), firstLedger = await api.confirm(first.batchId, first.contentHash);
-  assert.deepEqual(await api.status("record"), { available: true, eligible: true, pending: false });
+  assert.deepEqual(await api.status("record"), { available: true, eligible: true, pending: false, recovery: "none" });
   current = { ...current, entries: [...current.entries,
     { type: "message", id: "u2", parentId: "a1", message: { role: "user", content: "New decision" } },
     { type: "message", id: "a2", parentId: "u2", message: { role: "assistant", content: "Recorded" } }] }; revision = "rev-2";
-  assert.deepEqual(await api.status("record"), { available: true, eligible: true, pending: true });
+  assert.deepEqual(await api.status("record"), { available: true, eligible: true, pending: true, recovery: "none" });
   const second = await api.candidate("record");
   assert.deepEqual(calls[1]!.historyThroughPreviousRun.entries.map(entry => entry.id), ["u2", "a2"]);
   assert.match(calls[1]!.latestUserMessage, /上一版已确认会话记忆/); assert.match(calls[1]!.latestUserMessage, /Existing preference/);
@@ -60,9 +60,9 @@ test("pending 状态不暴露 checkpoint，scratch 或未配置 runtime 不阻�
   let disposition:"eligible"|"scratch"="scratch",agentId="agent";
   const sources={async memorySource(){return{record:{recordId:"record",agentId,sourceKind:"panel" as const,sourceKey:"record",revision:"rev",updatedAt:"now",messageCount:2,title:"title",archived:false,hidden:false,pinned:false,memoryDisposition:disposition},document,overrides:{}}}};
   const api=new PanelMemoryConsolidationApi(new MemoryConsolidationStore(join(root,"data")),sources,new Map([["agent",{runtimeAgentId:"memory",workspaceRoot:join(root,"workspace"),indexAgentIds:["agent"]}]]),{} as BridgeService,{async effectiveTools(){return{agentId:"memory",scope:"effective-session-tools" as const,toolIds:[]}},async refreshMemoryIndex(){}});
-  assert.deepEqual(await api.status("record"),{available:true,eligible:false,pending:false});
+  assert.deepEqual(await api.status("record"),{available:true,eligible:false,pending:false,recovery:"none"});
   disposition="eligible";agentId="unconfigured";
-  const value=await api.status("record");assert.deepEqual(value,{available:false,eligible:true,pending:false});
+  const value=await api.status("record");assert.deepEqual(value,{available:false,eligible:true,pending:false,recovery:"none"});
   assert.equal("checkpointEntryId" in value,false);
 });
 
@@ -108,4 +108,35 @@ test("索引刷新失败不回滚已确认记忆，重试确认会再次刷新",
   assert.equal(await store.checkpoint("record"), candidate.throughEntryId);
   const ledger = await api.confirm(candidate.batchId, candidate.contentHash);
   assert.equal(ledger.batchId, candidate.batchId); assert.equal(refreshes, 2);
+});
+
+test("删除滚动文件后可选择恢复并增量整理，或从权威完整会话重建", async () => {
+  const root = await mkdtemp(join(tmpdir(), "panel-memory-api-recovery-")), data = join(root, "data"), workspace = join(root, "workspace"); await mkdir(data); await mkdir(workspace);
+  let current = structuredClone(document), revision = "rev-1", bridgeCalls = 0;
+  const requests: Array<{ historyThroughPreviousRun: typeof document; latestUserMessage: string; lifecycle?: (event: unknown) => Promise<void> }> = [];
+  const sources = { async memorySource() { return { record: { recordId: "record", agentId: "agent", sourceKind: "panel" as const, sourceKey: "record", revision, updatedAt: "now", messageCount: current.entries.length, title: "title", archived: false, hidden: false, pinned: false, memoryDisposition: "eligible" as const }, document: current, overrides: {} }; } };
+  const bridge = { async generate(request: typeof requests[number]) { requests.push(request); bridgeCalls++; await request.lifecycle?.({ type: "temporary_session_created", runtimeAgentId: "panel-memory-agent", sessionId: "temporary", sessionKey: "agent:panel-memory-agent:temporary", transcriptPath: "/fixture" });
+    const ids = request.historyThroughPreviousRun.entries.map(entry => entry.id), content = ids.length > 2 ? "# Rebuilt\n\n- Complete" : ids.includes("u2") ? "# Memory\n\n- Stable\n- New" : "# Memory\n\n- Stable";
+    return { runId: "run", sessionId: "temporary", entries: [{ type: "message", id: "answer", parentId: null, message: { role: "assistant", content } }] }; } } as unknown as BridgeService;
+  const store = new MemoryConsolidationStore(data), api = new PanelMemoryConsolidationApi(store, sources, new Map([["agent", {
+    runtimeAgentId: "panel-memory-agent", workspaceRoot: workspace, indexAgentIds: ["agent", "panel-agent-runtime", "panel-memory-agent"]
+  }]]), bridge, { async effectiveTools() { return { agentId: "panel-memory-agent", scope: "effective-session-tools" as const, toolIds: [] }; }, async refreshMemoryIndex() {} });
+
+  const first = await api.candidate("record"), firstLedger = await api.confirm(first.batchId, first.contentHash); assert.equal(bridgeCalls, 1);
+  await unlink(join(workspace, firstLedger.targetPath));
+  assert.deepEqual(await api.status("record"), { available: true, eligible: true, pending: false, recovery: "restore_or_rebuild" });
+  await assert.rejects(api.candidate("record"), /MEMORY_RECOVERY_REQUIRED/);
+  const restoreOnly = await api.candidate("record", "restore"); assert.equal(bridgeCalls, 1); assert.equal(restoreOnly.content, first.content); assert.equal(restoreOnly.fromEntryId, "a1");
+  await api.confirm(restoreOnly.batchId, restoreOnly.contentHash); assert.equal(await readFile(join(workspace, firstLedger.targetPath), "utf8"), first.content + "\n");
+
+  await unlink(join(workspace, firstLedger.targetPath)); current = { ...current, entries: [...current.entries,
+    { type: "message", id: "u2", parentId: "a1", message: { role: "user", content: "New decision" } },
+    { type: "message", id: "a2", parentId: "u2", message: { role: "assistant", content: "Recorded" } }] }; revision = "rev-2";
+  const restored = await api.candidate("record", "restore"); assert.deepEqual(requests.at(-1)!.historyThroughPreviousRun.entries.map(entry => entry.id), ["u2", "a2"]);
+  assert.match(requests.at(-1)!.latestUserMessage, /previous_confirmed_memory/); await api.confirm(restored.batchId, restored.contentHash);
+
+  await unlink(join(workspace, firstLedger.targetPath));
+  const rebuilt = await api.candidate("record", "rebuild"); assert.deepEqual(requests.at(-1)!.historyThroughPreviousRun.entries.map(entry => entry.id), ["u1", "a1", "u2", "a2"]);
+  assert.doesNotMatch(requests.at(-1)!.latestUserMessage, /previous_confirmed_memory/); await api.confirm(rebuilt.batchId, rebuilt.contentHash);
+  assert.match(await readFile(join(workspace, firstLedger.targetPath), "utf8"), /Rebuilt/); assert.equal(await store.checkpoint("record"), "a2");
 });

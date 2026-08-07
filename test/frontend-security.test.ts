@@ -262,6 +262,18 @@ test("confirmed memory candidate exposes an unambiguous close action", async () 
   assert.match(source,/addEventListener\("close",\(\)=>\{if\(pendingMemoryCandidate&&memoryCandidateDialogRecordId\)pendingMemoryCandidates\.delete/);
 });
 
+test("missing panel memory offers scoped restore, rebuild, and cancel choices", async () => {
+  const source=await readFile("src/frontend/app.js","utf8");
+  const html=await readFile("src/frontend/index.html","utf8");
+  assert.match(html,/id="memory-recovery-dialog"[\s\S]*id="cancel-memory-recovery"[\s\S]*id="rebuild-memory"[\s\S]*id="restore-memory"/);
+  assert.match(source,/recovery==="none"/);
+  assert.match(source,/recovery!=="restore_or_rebuild"/);
+  assert.match(source,/body:JSON\.stringify\(\{mode\}\)/);
+  assert.match(source,/mode:"restore",checkRecovery:false/);
+  assert.match(source,/mode:"rebuild",checkRecovery:false/);
+  assert.doesNotMatch(source,/JSON\.stringify\(\{mode,path/);
+});
+
 test("memory center is a dedicated agent-aware tree beside the global settings entry", async () => {
   const source=await readFile("src/frontend/app.js","utf8");
   const html=await readFile("src/frontend/index.html","utf8");

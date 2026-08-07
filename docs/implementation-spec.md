@@ -419,6 +419,9 @@ fork 和编辑重发共用底层（见 §5.0）：都是「从目标 entry 回�
 - ledger/checkpoint 持久化后，确认流程必须刷新共享该 workspace 的真实 agent、普通聊天 runtime 和记忆整理 runtime 三份 OpenClaw 文件索引，不能把 watcher 当作可靠提交通知。索引命令使用服务端 allowlist 的结构化参数且按逻辑 agent 串行；全部成功后才向 UI 报告“已建立索引”。若刷新失败，返回稳定的 `MEMORY_INDEX_REFRESH_FAILED`，明确文件已经安全写入；不得回滚记忆或 checkpoint，重复确认同一 batch 必须再次尝试刷新。
 - 同一来源使用 keyed mutex；确认按 batch id 幂等。候选生成后出现的新消息不进入该批，留待下一批。
 - OpenClaw watcher/index/promote 接手已确认的短期文件；面板不复刻 promote。删除短期源文件不能承诺撤销已被 promote 到 `MEMORY.md` 的副本。旧版逐 batch 文件在首次滚动确认时按 ledger/hash 组成基线；新版文件和 state 持久化后才安全清理，异常残留宁可造成可见重复，也不得误删不确定文件。
+- 手动移除会话滚动文件不表示“忘记”，也可能只是内容已整合进长期记忆后的 workspace 清理。memory status 在原有 `available`、`eligible`、`pending` 外返回稳定恢复枚举 `none` / `restore_or_rebuild` / `rebuild_only`，仍不暴露正文、路径、checkpoint 或 hash。UI 在缺失时显示「恢复面板记忆并继续整理」「从会话重新生成」「暂不处理」；恢复快照不可用时只显示完整会话重建与暂不处理，不使用“忘记”措辞。
+- 候选创建请求只接受 `mode: incremental|restore|rebuild`；浏览器不能提交恢复路径、entry 范围、checkpoint、正文、state 指纹或基线 hash。`restore` 只使用 `PANEL_DATA_DIR` 中与最新 confirmed ledger、v2 current hash、target 和 checkpoint 全部相符的完整候选快照，保留 checkpoint 并仅整理新增范围；无新增时以快照本身生成可确认的重建候选。`rebuild` 忽略旧面板记忆并从权威完整分支起点生成；上下文预算不足时返回既有稳定预算错误，禁止静默截断历史。v1 state、快照缺失/损坏/不安全时只能 `rebuild`。
+- 恢复预览不得写 workspace 或推进 checkpoint。候选额外绑定 state 指纹、生成时的目标缺失状态与固定来源范围；确认时做 CAS。目标在生成期间被重新创建或修改、state/checkpoint/hash 变化、竞争候选已确认或来源分支变化时拒绝覆盖。确认后才原子创建滚动文件并持久化 state/ledger，再刷新真实 agent、聊天 runtime 和记忆 runtime 索引；重复确认仍覆盖写文件后崩溃与索引重试窗口。
 
 **工具写入边界（Owl 2026-07-22 已定）：** 普通 scratch 对话保留完整 agent 工具；用户明确要求模型自行写记忆时允许发生。`memoryDisposition` 只约束面板管理的沉淀流程，不是 workspace 通用只读策略。候选提炼内部 session 则必须无写入副作用，因为确认前 workspace 不得改变；这两类 run 不能共用工具策略。
 
@@ -429,6 +432,7 @@ fork 和编辑重发共用底层（见 §5.0）：都是「从目标 entry 回�
 - 提炼沿用来源会话的有效模型与思考设置；成功、失败、停止和重试前后来源 transcript revision 均不变，内部 tool/reasoning entries 不会出现在会话 API 或导出中。
 - 对受限提炼 session 做工具目录和实际调用验收：只读记忆工具可用，shell/文件写入及其它副作用工具不可用；不能证明时不得开放候选提炼功能。
 - 首次确认创建、后续确认原子替换同一条会话短期文件；完整候选、ledger/checkpoint、基线 hash 与当前文件一致，重复确认不产生第二份，竞争候选不能覆盖新版本，任意故障点不允许 checkpoint 超前。
+- 删除当前滚动文件后，存在有效完整快照时可在有/无新增消息两种情况下恢复并保留 checkpoint；快照不可用时只能从完整权威分支重建。恢复候选生成期间重新创建文件、修改 state、切换来源分支或并发确认均被 CAS 拒绝；确认前 workspace/checkpoint 不变，确认后文件/state/ledger/三索引顺序正确，进程重启与重复确认幂等。
 - 记忆中心不能读取 allowlist 外、越界、symlink 或超限文件；只读来源 transcript 在整个流程中保持逐字不变。
 - 启用 OpenClaw dreaming 前，在隔离环境验证临时 runtime transcript 不会绕过 disposition 摄取 scratch 正文；不能证明时不得把 dreaming 与 scratch 隔离组合标为受支持。
 
@@ -490,7 +494,7 @@ fork 和编辑重发共用底层（见 §5.0）：都是「从目标 entry 回�
 
 14. **持久 `/compact` 与交互闭环（已实现）**：仅允许面板自建会话；active/reset 在服务端以稳定 `SOURCE_READ_ONLY` 拒绝并引导先 fork。服务端以拒绝排队的同会话独占操作锁定 revision，物化 OpenClaw 2026.6.11 可识别的当前分支，在一次性 runtime 应用当前模型、thinking 和 reasoning override 后调用 `sessions.compact` typed RPC。普通消息路径仍拒绝所有 `/` 文本；输入 `/compact`、会话操作按钮、90% 状态动作和超预算错误动作共用同一结构化 command API，绝不发送命令文本。面板重新读取原临时 transcript，只采纳历史前缀完全不变且唯一新增、结构/父链/边界均合法，且用同一个 `ConservativeContextBudget` 复算后让有效上下文严格减少的 `compaction`，再原子追加到完整 transcript；没有有效减少时返回 `compacted: false` 与稳定 reason `NO_EFFECTIVE_REDUCTION`，权威 transcript 和 revision 均不改变。不得为了制造减少而自行改写上游的 `firstKeptEntryId`。会话 DTO 直接输出规范化 current branch；compaction 只暴露 `id`、`parentId`、`timestamp`、`summary`、`firstKeptEntryId`、`tokensBefore`。界面保留全部原始消息，以默认折叠 marker 安全渲染摘要并允许从压缩点 fork；导出 Markdown 同样保留消息和 marker。压缩期间禁发、禁重复压缩并禁用 fork/edit。首版不自动压缩。
 
-- **压缩前记忆提醒（已实现）**：scratch 直接压缩。eligible 会话通过同源鉴权的只读 memory status 检查 current branch 与 ledger checkpoint 之后是否存在有意义的新 message；只返回 `available`、`eligible`、`pending`，不暴露内容或 checkpoint id。仅在 runtime available 且 pending 时显示“整理记忆后压缩 / 直接压缩 / 取消”。前者复用既有整段候选预览，只有确认写入并刷新索引成功后才继续压缩；取消、生成失败或确认失败均不压缩。记忆 runtime 不可用不阻止直接压缩。
+- **压缩前记忆提醒（已实现）**：scratch 直接压缩。eligible 会话通过同源鉴权的只读 memory status 检查 current branch 与 ledger checkpoint 之后是否存在有意义的新 message；返回 `available`、`eligible`、`pending` 和不含内部状态的恢复枚举，不暴露内容或 checkpoint id。仅在 runtime available 且 pending 时显示“整理记忆后压缩 / 直接压缩 / 取消”。前者复用既有整段候选预览；滚动文件缺失时再进入同一恢复/重建选择，只有确认写入并刷新索引成功后才继续压缩。取消、生成失败或确认失败均不压缩。记忆 runtime 不可用不阻止直接压缩。
 14. 多 agent 对真实 agent（`claude`、`main`）的**读、刷新、界面、切换**——只读、无外部影响，可在此段自主验证。
 
 第二段**只对 `paneltest` 验证"发送和生成"**；对真实 agent 只做只读验证，**不向真实 agent 的活会话发送消息**。

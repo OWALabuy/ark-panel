@@ -11,14 +11,18 @@ export interface MemoryCandidate {
   sourceRevision: string; previousCheckpointEntryId?: string; baseContentHash?: string;
   fromEntryId: string; throughEntryId: string; targetPath: string;
   contentHash: string; content: string; createdAt: string;
+  mode?: MemoryConsolidationMode; stateHash?: string; expectedTargetState?: "present" | "absent";
 }
+export type MemoryConsolidationMode = "incremental" | "restore" | "rebuild";
+export type MemoryRecoveryStatus = "none" | "restore_or_rebuild" | "rebuild_only";
 export interface MemoryLedgerEntry {
   batchId: string; agentId: string; recordId: string; sourceKind: MemoryCandidate["sourceKind"];
   sourceRevision: string; fromEntryId: string; throughEntryId: string; baseContentHash?: string; contentHash: string;
-  targetPath: string; createdAt: string; confirmedAt: string; status: "confirmed";
+  targetPath: string; createdAt: string; confirmedAt: string; status: "confirmed"; mode?: MemoryConsolidationMode;
 }
 export interface MemoryConsolidationContext {
   checkpointEntryId?: string; baseContent?: string; baseContentHash?: string; targetPath: string;
+  stateHash: string; targetState: "present" | "absent"; recovery: MemoryRecoveryStatus;
 }
 interface LegacyMemoryRecordState { version: 1; recordId: string; checkpointEntryId?: string; batches: MemoryLedgerEntry[] }
 interface MemoryRecordState {
@@ -35,6 +39,8 @@ function recordKey(recordId: string): string { return digest(recordId); }
 function rollingPath(recordId: string): string { return `memory/ark-panel/${recordKey(recordId)}.md`; }
 function validBatch(value: string): boolean { return /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value); }
 function normalizedContent(value: string): string { return value.trim(); }
+function stateHash(value: StoredMemoryRecordState): string { return digest(JSON.stringify(value)); }
+function candidateMode(value: MemoryCandidate): MemoryConsolidationMode { return value.mode ?? "incremental"; }
 
 async function withLock<T>(key: string, operation: () => Promise<T>): Promise<T> {
   const previous = locks.get(key) ?? Promise.resolve(); let release!: () => void;
@@ -52,7 +58,8 @@ function validLedger(value: unknown): value is MemoryLedgerEntry {
     ["active", "reset", "panel"].includes(item.sourceKind ?? "") && typeof item.sourceRevision === "string" &&
     typeof item.fromEntryId === "string" && typeof item.throughEntryId === "string" && typeof item.contentHash === "string" &&
     typeof item.targetPath === "string" && typeof item.createdAt === "string" && typeof item.confirmedAt === "string" && item.status === "confirmed" &&
-    (item.baseContentHash === undefined || typeof item.baseContentHash === "string");
+    (item.baseContentHash === undefined || typeof item.baseContentHash === "string") &&
+    (item.mode === undefined || ["incremental", "restore", "rebuild"].includes(item.mode));
 }
 
 export class MemoryConsolidationStore {
@@ -88,28 +95,67 @@ export class MemoryConsolidationStore {
     if (digest(content) !== expectedHash) throw new Error("MEMORY_TARGET_CONFLICT");
     return content;
   }
+  private async recoverySnapshot(state: MemoryRecordState): Promise<string | undefined> {
+    if (!state.current || !state.checkpointEntryId) return undefined;
+    const ledger = [...state.batches].reverse().find(batch => batch.contentHash === state.current!.contentHash &&
+      batch.targetPath === state.current!.targetPath && batch.throughEntryId === state.checkpointEntryId);
+    if (!ledger) return undefined;
+    try {
+      const candidate = await this.loadCandidate(ledger.batchId);
+      if (candidate.recordId !== state.recordId || candidate.agentId !== ledger.agentId || candidate.sourceKind !== ledger.sourceKind ||
+        candidate.contentHash !== ledger.contentHash || candidate.targetPath !== ledger.targetPath || candidate.throughEntryId !== ledger.throughEntryId) return undefined;
+      return candidate.content;
+    } catch { return undefined; }
+  }
   private async contextFromState(recordId: string, workspaceRoot: string, state: StoredMemoryRecordState): Promise<MemoryConsolidationContext> {
-    const targetPath = rollingPath(recordId);
+    const targetPath = rollingPath(recordId), fingerprint = stateHash(state);
     if (state.version === 2 && state.current) {
       if (state.current.targetPath !== targetPath) throw new Error("MEMORY_STATE_CORRUPT");
-      const baseContent = await this.readVerified(workspaceRoot, state.current.targetPath, state.current.contentHash);
-      return { ...(state.checkpointEntryId ? { checkpointEntryId: state.checkpointEntryId } : {}), baseContent, baseContentHash: state.current.contentHash, targetPath };
+      try {
+        const baseContent = await this.readVerified(workspaceRoot, state.current.targetPath, state.current.contentHash);
+        return { ...(state.checkpointEntryId ? { checkpointEntryId: state.checkpointEntryId } : {}), baseContent,
+          baseContentHash: state.current.contentHash, targetPath, stateHash: fingerprint, targetState: "present", recovery: "none" };
+      } catch (error) {
+        if ((error as Error).message !== "MEMORY_FILE_NOT_FOUND") throw error;
+        const baseContent = await this.recoverySnapshot(state);
+        return { ...(state.checkpointEntryId ? { checkpointEntryId: state.checkpointEntryId } : {}),
+          ...(baseContent ? { baseContent, baseContentHash: state.current.contentHash } : {}), targetPath, stateHash: fingerprint,
+          targetState: "absent", recovery: baseContent ? "restore_or_rebuild" : "rebuild_only" };
+      }
     }
     if (state.version === 1 && state.batches.length) {
       const seen = new Set<string>(), parts: string[] = [];
-      for (const batch of state.batches) {
-        if (seen.has(batch.targetPath)) continue; seen.add(batch.targetPath);
-        parts.push(await this.readVerified(workspaceRoot, batch.targetPath, batch.contentHash));
+      try {
+        for (const batch of state.batches) {
+          if (seen.has(batch.targetPath)) continue; seen.add(batch.targetPath);
+          parts.push(await this.readVerified(workspaceRoot, batch.targetPath, batch.contentHash));
+        }
+      } catch (error) {
+        if ((error as Error).message !== "MEMORY_FILE_NOT_FOUND") throw error;
+        return { ...(state.checkpointEntryId ? { checkpointEntryId: state.checkpointEntryId } : {}), targetPath,
+          stateHash: fingerprint, targetState: "absent", recovery: "rebuild_only" };
       }
       const baseContent = parts.filter(Boolean).join("\n\n").trim();
       if (!baseContent || Buffer.byteLength(baseContent, "utf8") > MAX_BASE_BYTES) throw new Error("MEMORY_BASE_INVALID");
-      return { ...(state.checkpointEntryId ? { checkpointEntryId: state.checkpointEntryId } : {}), baseContent, baseContentHash: digest(baseContent), targetPath };
+      return { ...(state.checkpointEntryId ? { checkpointEntryId: state.checkpointEntryId } : {}), baseContent,
+        baseContentHash: digest(baseContent), targetPath, stateHash: fingerprint, targetState: "absent", recovery: "none" };
     }
-    return { ...(state.checkpointEntryId ? { checkpointEntryId: state.checkpointEntryId } : {}), targetPath };
+    return { ...(state.checkpointEntryId ? { checkpointEntryId: state.checkpointEntryId } : {}), targetPath,
+      stateHash: fingerprint, targetState: "absent", recovery: "none" };
   }
 
-  async context(recordId: string, workspaceRoot: string): Promise<MemoryConsolidationContext> {
-    return await withLock(recordId, async () => await this.contextFromState(recordId, workspaceRoot, await this.state(recordId)));
+  async context(recordId: string, workspaceRoot: string, mode: MemoryConsolidationMode = "incremental"): Promise<MemoryConsolidationContext> {
+    return await withLock(recordId, async () => {
+      const context = await this.contextFromState(recordId, workspaceRoot, await this.state(recordId));
+      if (context.recovery !== "none" && mode === "incremental") throw new Error("MEMORY_RECOVERY_REQUIRED");
+      if (context.recovery === "none" && mode !== "incremental") throw new Error("MEMORY_RECOVERY_NOT_REQUIRED");
+      if (mode === "restore" && context.recovery !== "restore_or_rebuild") throw new Error("MEMORY_RECOVERY_SNAPSHOT_UNAVAILABLE");
+      if (mode === "rebuild") { const { baseContent: _baseContent, ...rebuild } = context; return rebuild; }
+      return context;
+    });
+  }
+  async recovery(recordId: string, workspaceRoot: string): Promise<MemoryRecoveryStatus> {
+    return await withLock(recordId, async () => (await this.contextFromState(recordId, workspaceRoot, await this.state(recordId))).recovery);
   }
   async checkpoint(recordId: string): Promise<string | undefined> { return (await this.state(recordId)).checkpointEntryId; }
 
@@ -118,6 +164,7 @@ export class MemoryConsolidationStore {
       const content = normalizedContent(input.content); if (!content || Buffer.byteLength(content, "utf8") > MAX_CANDIDATE_BYTES) throw new Error("MEMORY_CANDIDATE_INVALID");
       const state = await this.state(input.recordId);
       if (state.checkpointEntryId !== input.previousCheckpointEntryId) throw new Error("MEMORY_CANDIDATE_STALE");
+      if (input.stateHash && stateHash(state) !== input.stateHash) throw new Error("MEMORY_CANDIDATE_STALE");
       await this.ensure(); const candidate: MemoryCandidate = { version: 2, batchId: randomUUID(), ...input, targetPath: rollingPath(input.recordId),
         contentHash: digest(content), content, createdAt: new Date().toISOString() };
       const path = this.candidatePath(candidate.batchId), handle = await open(path, "wx", 0o600);
@@ -132,12 +179,18 @@ export class MemoryConsolidationStore {
     if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || stat.size > MAX_CANDIDATE_BYTES * 2) throw new Error("MEMORY_STORAGE_UNSAFE");
     const value = JSON.parse(await readFile(path, "utf8")) as Omit<Partial<MemoryCandidate>, "version"> & { version?: number };
     if (value.version === 1) throw new Error("MEMORY_CANDIDATE_VERSION_UNSUPPORTED");
+    const recoveryFields = [value.mode, value.stateHash, value.expectedTargetState].filter(item => item !== undefined).length;
     if (value.version !== 2 || value.batchId !== batchId || typeof value.recordId !== "string" || typeof value.agentId !== "string" ||
       !["active", "reset", "panel"].includes(value.sourceKind ?? "") || typeof value.content !== "string" || digest(value.content) !== value.contentHash ||
       typeof value.fromEntryId !== "string" || typeof value.throughEntryId !== "string" || typeof value.sourceRevision !== "string" ||
       typeof value.targetPath !== "string" || value.targetPath !== rollingPath(value.recordId) ||
       (value.previousCheckpointEntryId !== undefined && typeof value.previousCheckpointEntryId !== "string") ||
-      (value.baseContentHash !== undefined && typeof value.baseContentHash !== "string") || typeof value.createdAt !== "string") throw new Error("MEMORY_CANDIDATE_CORRUPT");
+      (value.baseContentHash !== undefined && typeof value.baseContentHash !== "string") ||
+      (value.mode !== undefined && !["incremental", "restore", "rebuild"].includes(value.mode)) ||
+      (value.stateHash !== undefined && (typeof value.stateHash !== "string" || !/^[0-9a-f]{64}$/i.test(value.stateHash))) ||
+      (value.expectedTargetState !== undefined && !["present", "absent"].includes(value.expectedTargetState)) ||
+      recoveryFields !== 0 && recoveryFields !== 3 || value.expectedTargetState === "present" && value.baseContentHash === undefined ||
+      typeof value.createdAt !== "string") throw new Error("MEMORY_CANDIDATE_CORRUPT");
     return value as MemoryCandidate;
   }
 
@@ -171,6 +224,7 @@ export class MemoryConsolidationStore {
     return await withLock(candidate.recordId, async () => {
       const state = await this.state(candidate.recordId), confirmed = state.batches.find(batch => batch.batchId === batchId); if (confirmed) return confirmed;
       if (state.checkpointEntryId !== candidate.previousCheckpointEntryId) throw new Error("MEMORY_CANDIDATE_STALE");
+      if (candidate.stateHash && stateHash(state) !== candidate.stateHash) throw new Error("MEMORY_CANDIDATE_STALE");
       const workspace = await this.ensureRollingDirectory(workspaceRoot), target = assertWithin(workspace, join(workspace, ...candidate.targetPath.split("/")));
       let targetHash: string | undefined;
       try {
@@ -179,17 +233,22 @@ export class MemoryConsolidationStore {
         if ((error as Error).message !== "MEMORY_FILE_NOT_FOUND") throw error;
       }
       const alreadyWritten = targetHash === candidate.contentHash;
-      const context = alreadyWritten && state.version === 2
-        ? { ...(state.checkpointEntryId ? { checkpointEntryId: state.checkpointEntryId } : {}), ...(state.current ? { baseContentHash: state.current.contentHash } : {}), targetPath: rollingPath(candidate.recordId) }
-        : await this.contextFromState(candidate.recordId, workspaceRoot, state);
-      if (context.baseContentHash !== candidate.baseContentHash || context.targetPath !== candidate.targetPath) throw new Error("MEMORY_CANDIDATE_STALE");
-      if (!alreadyWritten && (state.version === 2 && state.current ? targetHash !== context.baseContentHash : targetHash !== undefined)) throw new Error("MEMORY_TARGET_CONFLICT");
+      if (candidate.expectedTargetState) {
+        if (!alreadyWritten && (candidate.expectedTargetState === "present" ? targetHash !== candidate.baseContentHash : targetHash !== undefined)) throw new Error("MEMORY_TARGET_CONFLICT");
+      } else {
+        const context = alreadyWritten && state.version === 2
+          ? { ...(state.checkpointEntryId ? { checkpointEntryId: state.checkpointEntryId } : {}), ...(state.current ? { baseContentHash: state.current.contentHash } : {}), targetPath: rollingPath(candidate.recordId) }
+          : await this.contextFromState(candidate.recordId, workspaceRoot, state);
+        if (context.baseContentHash !== candidate.baseContentHash || context.targetPath !== candidate.targetPath) throw new Error("MEMORY_CANDIDATE_STALE");
+        if (!alreadyWritten && (state.version === 2 && state.current ? targetHash !== context.baseContentHash : targetHash !== undefined)) throw new Error("MEMORY_TARGET_CONFLICT");
+      }
       if (!alreadyWritten) await atomicWrite(target, candidate.content + "\n");
       const legacyTargets = state.version === 1 ? state.batches.map(batch => ({ targetPath: batch.targetPath, contentHash: batch.contentHash })) : state.legacyTargets;
       const ledger: MemoryLedgerEntry = { batchId, agentId: candidate.agentId, recordId: candidate.recordId, sourceKind: candidate.sourceKind,
         sourceRevision: candidate.sourceRevision, fromEntryId: candidate.fromEntryId, throughEntryId: candidate.throughEntryId,
         ...(candidate.baseContentHash ? { baseContentHash: candidate.baseContentHash } : {}), contentHash: candidate.contentHash,
-        targetPath: candidate.targetPath, createdAt: candidate.createdAt, confirmedAt: new Date().toISOString(), status: "confirmed" };
+        targetPath: candidate.targetPath, createdAt: candidate.createdAt, confirmedAt: new Date().toISOString(), status: "confirmed",
+        ...(candidate.mode ? { mode: candidateMode(candidate) } : {}) };
       const next: MemoryRecordState = { version: 2, recordId: candidate.recordId, checkpointEntryId: candidate.throughEntryId,
         current: { targetPath: candidate.targetPath, contentHash: candidate.contentHash },
         ...(legacyTargets?.length ? { legacyTargets } : {}), batches: [...state.batches, ledger] };

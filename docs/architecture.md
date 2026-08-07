@@ -3,7 +3,7 @@
 > 为 Claude agent 自建一个具有 claude.ai 会话管理体验的 Web 面板。
 > **范围更新（2026-07-17）：**当前实现已为 panel 自建 / fork 会话提供 A 类面板原生命令与 C 类只读命令（`/commands`、`/help`、`/status`、`/models`、`/tools`、`/usage`）。普通消息接口仍永久拒绝以 `/` 开头的输入，命令只走独立结构化派发接口。真实 active 会话与 reset 归档保持只读。完整范围见 [`decisions/slash-commands.md`](decisions/slash-commands.md)。
 > 本文档记录当前有效的需求、设计决定和实现依据，供 Owl 与 Codex 共同维护。
-> 最近更新 2026-07-21（重定记忆模块语义：所有会话读取既有记忆，仅 eligible 会话进入可审阅的显式沉淀流程；后端既有行为见 §5）。
+> 最近更新 2026-08-07（滚动会话记忆缺失时由用户选择从最后确认快照恢复、从权威完整会话重建或暂不处理；后端既有行为见 §5）。
 >
 > 历史说明：2026-07-08 曾评估第三方面板 ClawGPT 并写过一版方案。旧版关于设备身份验证和实现方式的部分结论，已经被本轮验证推翻。旧版保留在 Git 历史中，当前实现以本文为准。
 
@@ -31,7 +31,7 @@
 12. **Markdown、数学公式渲染与复制**：消息正文按 Markdown 渲染（标题、列表、代码块、表格、链接等），并用 KaTeX 渲染行内与块级 LaTeX 数学公式；提供整条消息复制，以及代码块单独复制。Markdown 仍走安全 DOM，KaTeX 使用同源静态资源并关闭受信任命令，不引入 CDN 或新的任意 HTML/XSS 路径（与 §6.4 工具/思考块的安全渲染同一要求）。
 13. **消息时间标记**：每条消息在 UI 上显示本地时区的日期与时间（来源是 transcript entry 自带的 `timestamp`）。这是纯展示能力；**是否让模型感知“当前时间”不由面板处理**——系统提示中的时间注入由 gateway 负责，面板不改写消息内容去塞时间。
 14. **会话管理（重命名 / 归档 / 删除）**：见 §6.8。所有会话可重命名（只改面板 metadata，不动源文件）；归档与隐藏是两个正交状态（归档会话仍在归档列表可见，隐藏则从所有列表移除，见 implementation-spec §4.3）；只读会话的“删除”只能是隐藏，永不触碰源文件；面板自建会话归档后才可彻底删除。
-15. **面板记忆系统**：所有面板会话（包括 `scratch`）都读取目标 agent 的既有记忆，保证人格与上下文连续；`memoryDisposition` 只决定当前会话能否进入面板管理的候选提炼和写入流程。只有 `eligible` 会话可在用户预览确认后写入独立的 OpenClaw 短期记忆文件，后续索引与 promote 仍交给 OpenClaw。详见 [`decisions/panel-memory.md`](decisions/panel-memory.md)。
+15. **面板记忆系统**：所有面板会话（包括 `scratch`）都读取目标 agent 的既有记忆，保证人格与上下文连续；`memoryDisposition` 只决定当前会话能否进入面板管理的候选提炼和写入流程。只有 `eligible` 会话可在用户预览确认后写入独立的 OpenClaw 短期记忆文件，后续索引与 promote 仍交给 OpenClaw。滚动文件被手动删除不等于遗忘：再次整理时用户可从最后确认的完整快照恢复并保留 checkpoint，或从权威完整会话重建。详见 [`decisions/panel-memory.md`](decisions/panel-memory.md)。
 
 ### 范围补充（部分后续已实现）
 - **面板内看记忆**：已实现独立只读工作区；从 Agent 栏齿轮上方进入，按 Agent 和类别树状列出 `MEMORY.md`、`DREAMS.md` 与 `memory/**/*.md`，右侧安全渲染正文并可跳回面板贡献的来源会话；不开放任意 workspace 浏览或在线编辑。
