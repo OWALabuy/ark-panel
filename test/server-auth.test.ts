@@ -83,6 +83,14 @@ test("non-mock reads are delegated without connecting a real agent", async t => 
   assert.deepEqual((await (await fetch(`${x.base}/api/v1/agents`,{headers:{cookie:cookies}})).json()).data,[{id:"safe"}]); assert.deepEqual((await (await fetch(`${x.base}/api/v1/sessions?agentId=safe`,{headers:{cookie:cookies}})).json()).data,[{recordId:"record"}]); assert.deepEqual((await (await fetch(`${x.base}/api/v1/projects?agentId=safe`,{headers:{cookie:cookies}})).json()).data,["Project"]); assert.deepEqual((await (await fetch(`${x.base}/api/v1/sessions/record`,{headers:{cookie:cookies}})).json()).data,{title:"safe"});
   assert.equal((await fetch(`${x.base}/api/v1/projects`,{headers:{cookie:cookies}})).status,400);
 });
+test("panel 会话存储不可用时 HTTP 返回稳定脱敏的服务端错误", async t => {
+  const reads: ReadApi = { async agents(){return[]}, async sessions(){throw new Error("PANEL_SESSION_STORAGE_UNAVAILABLE")}, async conversation(){return null} };
+  const x = await fixture(t, undefined, reads), login = await fetch(`${x.base}/api/v1/auth/login`, { method: "POST", headers: { origin: x.base, "content-type": "application/json" }, body: JSON.stringify({ username: "owl", password: "correct" }) });
+  const cookies = login.headers.getSetCookie().map(value => value.split(";", 1)[0]).join("; ");
+  const response = await fetch(`${x.base}/api/v1/sessions`, { headers: { cookie: cookies } }), body = await response.json();
+  assert.equal(response.status, 500); assert.equal(body.error.code, "PANEL_SESSION_STORAGE_UNAVAILABLE");
+  assert.equal(body.error.message, "面板会话存储暂不可用"); assert.equal(JSON.stringify(body).includes("/private"), false);
+});
 test("Markdown 导出需要登录并使用安全附件响应", async t => {
   const reads: ReadApi = { async agents(){return[]}, async sessions(){return[]}, async conversation(){return null}, async exportMarkdown(recordId){assert.equal(recordId,"record");return{filename:"中文标题.md",markdown:"# safe\n"}} };
   const x=await fixture(t, undefined,reads);assert.equal((await fetch(`${x.base}/api/v1/sessions/record/export.md`)).status,401);

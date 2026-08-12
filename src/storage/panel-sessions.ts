@@ -18,8 +18,10 @@ export interface PanelMetadata {
 const metadataUpdates = new Map<string, Promise<void>>();
 const sessionCreates = new Map<string, Promise<void>>();
 const STAGING_PREFIX = ".panel-session-staging-";
+const STORAGE_UNAVAILABLE = "PANEL_SESSION_STORAGE_UNAVAILABLE";
 
-export type PanelSessionPublishStep = "metadata-write" | "metadata-sync" | "transcript-write" | "transcript-sync" |
+export type PanelSessionPublishStep = "sessions-parent-sync" | "agent-parent-sync" |
+  "metadata-write" | "metadata-sync" | "transcript-write" | "transcript-sync" |
   "staging-directory-sync" | "publish-rename" | "published-directory-sync";
 export interface PanelSessionPublishOptions { beforeStep?: (step: PanelSessionPublishStep) => void | Promise<void> }
 
@@ -57,6 +59,16 @@ function diagnostic(sink: PanelSessionDiagnosticSink, agentId: string, name: str
 }
 
 function isMissing(error: unknown): boolean { return (error as NodeJS.ErrnoException).code === "ENOENT"; }
+function storageUnavailable(): Error { return new Error(STORAGE_UNAVAILABLE); }
+
+async function validatedDataRoot(dataRoot: string): Promise<string> {
+  const root = resolve(dataRoot); let stat: Stats;
+  try { stat = await lstat(root); }
+  catch { throw storageUnavailable(); }
+  const wrongOwner = typeof process.getuid === "function" && stat.uid !== process.getuid();
+  if (!stat.isDirectory() || stat.isSymbolicLink() || wrongOwner || (stat.mode & 0o777) !== 0o700) throw storageUnavailable();
+  return root;
+}
 
 function assertPrivateDirectory(stat: Stats, label: string): void {
   if (!stat.isDirectory() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0) throw new Error(`${label}目录不安全`);
@@ -67,30 +79,35 @@ async function syncDirectory(path: string): Promise<void> {
   try { await directory.sync(); } finally { await directory.close(); }
 }
 
-async function ensurePrivateChild(parent: string, path: string, label: string): Promise<void> {
-  let created = false;
-  try { await mkdir(path, { mode: 0o700 }); created = true; }
-  catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
-  assertPrivateDirectory(await lstat(path), label);
-  if (created) await syncDirectory(parent);
+async function ensurePrivateChild(parent: string, path: string, label: string, syncStep: PanelSessionPublishStep,
+  options: PanelSessionPublishOptions): Promise<void> {
+  try {
+    try { await mkdir(path, { mode: 0o700 }); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
+    assertPrivateDirectory(await lstat(path), label);
+  } catch { throw storageUnavailable(); }
+  await options.beforeStep?.(syncStep);
+  try { await syncDirectory(parent); }
+  catch { throw storageUnavailable(); }
 }
 
-async function prepareAgentRoot(dataRoot: string, agentId: string): Promise<string> {
-  opaqueComponent(agentId, "agentId"); const root = resolve(dataRoot);
-  const rootStat = await lstat(root); if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) throw new Error("panel data 根目录不安全");
-  const sessionsRoot = assertWithin(root, join(root, "sessions")); await ensurePrivateChild(root, sessionsRoot, "panel sessions");
-  const agentRoot = assertWithin(sessionsRoot, join(sessionsRoot, agentId)); await ensurePrivateChild(sessionsRoot, agentRoot, "panel agent");
+async function prepareAgentRoot(dataRoot: string, agentId: string, options: PanelSessionPublishOptions): Promise<string> {
+  opaqueComponent(agentId, "agentId"); const root = await validatedDataRoot(dataRoot);
+  const sessionsRoot = assertWithin(root, join(root, "sessions"));
+  await ensurePrivateChild(root, sessionsRoot, "panel sessions", "sessions-parent-sync", options);
+  const agentRoot = assertWithin(sessionsRoot, join(sessionsRoot, agentId));
+  await ensurePrivateChild(sessionsRoot, agentRoot, "panel agent", "agent-parent-sync", options);
   return agentRoot;
 }
 
 async function existingAgentRoot(dataRoot: string, agentId: string): Promise<string | undefined> {
-  opaqueComponent(agentId, "agentId"); const root = resolve(dataRoot), sessionsRoot = assertWithin(root, join(root, "sessions"));
+  opaqueComponent(agentId, "agentId"); const root = await validatedDataRoot(dataRoot), sessionsRoot = assertWithin(root, join(root, "sessions"));
+  try { assertPrivateDirectory(await lstat(sessionsRoot), "panel sessions"); }
+  catch (error) { if (isMissing(error)) { await validatedDataRoot(dataRoot); return undefined; } throw storageUnavailable(); }
+  const agentRoot = assertWithin(sessionsRoot, join(sessionsRoot, agentId));
   try {
-    const rootStat = await lstat(root); if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) throw new Error("panel data 根目录不安全");
-    assertPrivateDirectory(await lstat(sessionsRoot), "panel sessions");
-    const agentRoot = assertWithin(sessionsRoot, join(sessionsRoot, agentId)); assertPrivateDirectory(await lstat(agentRoot), "panel agent");
-    return agentRoot;
-  } catch (error) { if (isMissing(error)) return undefined; throw error; }
+    assertPrivateDirectory(await lstat(agentRoot), "panel agent"); return agentRoot;
+  } catch (error) { if (isMissing(error)) { await validatedDataRoot(dataRoot); return undefined; } throw storageUnavailable(); }
 }
 
 async function serializedCreate<T>(key: string, operation: () => Promise<T>): Promise<T> {
@@ -159,7 +176,7 @@ export async function createPanelSession(dataRoot: string, agentId: string, docu
     ...(source?.parentRecordId && source.forkedFromMessageId ? { parentRecordId: source.parentRecordId, forkedFromMessageId: source.forkedFromMessageId } : {}) }, agentId, recordId);
   const key = `${resolve(dataRoot)}\0${agentId}\0${recordId}`;
   return await serializedCreate(key, async () => {
-    const agentRoot = await prepareAgentRoot(dataRoot, agentId), directory = assertWithin(agentRoot, join(agentRoot, recordId));
+    const agentRoot = await prepareAgentRoot(dataRoot, agentId, options), directory = assertWithin(agentRoot, join(agentRoot, recordId));
     try { await lstat(directory); throw new Error("PANEL_SESSION_EXISTS"); }
     catch (error) { if (!isMissing(error)) throw error; }
     const staging = assertWithin(agentRoot, join(agentRoot, `${STAGING_PREFIX}${randomUUID()}`));
@@ -190,8 +207,10 @@ export async function createPanelSession(dataRoot: string, agentId: string, docu
 export async function scanPanelSessions(dataRoot: string, agentId: string,
   onDiagnostic: PanelSessionDiagnosticSink = defaultDiagnostic): Promise<ScannedPanelSession[]> {
   const root = await existingAgentRoot(dataRoot, agentId); if (!root) return [];
-  const records: ScannedPanelSession[] = [];
-  for (const name of (await readdir(root)).sort()) {
+  const records: ScannedPanelSession[] = []; let names: string[];
+  try { names = (await readdir(root)).sort(); }
+  catch { throw storageUnavailable(); }
+  for (const name of names) {
     if (name.startsWith(STAGING_PREFIX)) { diagnostic(onDiagnostic, agentId, name, "STAGING_DIRECTORY"); continue; }
     try { opaqueComponent(name, "recordId"); }
     catch { diagnostic(onDiagnostic, agentId, name, "ENTRY_UNSAFE"); continue; }
@@ -236,7 +255,9 @@ export async function updatePanelMetadata(dataRoot: string, agentId: string, rec
 async function publishedRecordDirectory(dataRoot: string, agentId: string, recordId: string): Promise<string> {
   opaqueComponent(agentId, "agentId"); opaqueComponent(recordId, "recordId");
   const agentRoot = await existingAgentRoot(dataRoot, agentId); if (!agentRoot) throw new Error("PANEL_SESSION_NOT_FOUND");
-  const directory = assertWithin(agentRoot, join(agentRoot, recordId)); const stat = await lstat(directory);
+  const directory = assertWithin(agentRoot, join(agentRoot, recordId)); let stat: Stats;
+  try { stat = await lstat(directory); }
+  catch (error) { if (isMissing(error)) { await validatedDataRoot(dataRoot); throw new Error("PANEL_SESSION_NOT_FOUND"); } throw storageUnavailable(); }
   assertPrivateDirectory(stat, "panel 会话"); return directory;
 }
 

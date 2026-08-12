@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { chmod, link, lstat, mkdir, readFile, readdir, symlink, writeFile } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createPanelSession, deletePanelSession, listPanelSessions, commitPanelTranscript, loadPanelSession, updatePanelMetadata,
   type PanelSessionDiagnostic, type PanelSessionPublishStep } from "../src/storage/panel-sessions.js";
@@ -69,8 +69,37 @@ test("panel 会话在完整 durability 后才以目录 rename 原子发布", asy
   assert.equal((await lstat(recordRoot)).mode & 0o777, 0o700);
   assert.equal((await lstat(join(recordRoot, "metadata.json"))).mode & 0o777, 0o600);
   assert.equal((await lstat(join(recordRoot, "transcript.jsonl"))).mode & 0o777, 0o600);
-  assert.deepEqual(steps, ["metadata-write", "metadata-sync", "transcript-write", "transcript-sync",
+  assert.deepEqual(steps, ["sessions-parent-sync", "agent-parent-sync",
+    "metadata-write", "metadata-sync", "transcript-write", "transcript-sync",
     "staging-directory-sync", "publish-rename", "published-directory-sync"]);
+});
+
+test("父目录 fsync 失败后的重试仍重新建立 sessions 与 agent 目录项耐久性", async t => {
+  for (const failingStep of ["sessions-parent-sync", "agent-parent-sync"] as const) await t.test(failingStep, async t => {
+    const root = await tempFixture(t, `panel-parent-sync-${failingStep}-`); let syncAttempts = 0;
+    const options = { beforeStep(step: PanelSessionPublishStep) {
+      if (step !== failingStep) return;
+      syncAttempts += 1;
+      if (syncAttempts <= 2) throw new Error(`injected ${step} attempt ${syncAttempts}`);
+    } };
+    await assert.rejects(createPanelSession(root, "agent", emptyDocument, { recordId: "record" }, options),
+      new RegExp(`injected ${failingStep} attempt 1`));
+    assert.deepEqual(await readdir(root), ["sessions"]); assert.deepEqual(await readdir(join(root, "sessions")), failingStep === "sessions-parent-sync" ? [] : ["agent"]);
+    const sessionsRoot = join(root, "sessions"), agentRoot = join(sessionsRoot, "agent");
+    if (failingStep === "sessions-parent-sync") {
+      await rm(sessionsRoot, { recursive: true }); await mkdir(sessionsRoot, { mode: 0o700 }); await mkdir(agentRoot, { mode: 0o700 });
+    } else {
+      await rm(agentRoot, { recursive: true }); await mkdir(agentRoot, { mode: 0o700 });
+    }
+    assert.equal(syncAttempts, 1); assert.deepEqual(await listPanelSessions(root, "agent", () => {}), []);
+    await assert.rejects(createPanelSession(root, "agent", emptyDocument, { recordId: "record" }, options),
+      new RegExp(`injected ${failingStep} attempt 2`));
+    assert.equal(syncAttempts, 2, "第二次尝试不得因目录已存在而跳过父目录 fsync");
+    assert.deepEqual(await listPanelSessions(root, "agent", () => {}), []);
+    await createPanelSession(root, "agent", emptyDocument, { recordId: "record" }, options);
+    assert.equal(syncAttempts, 3);
+    assert.deepEqual((await listPanelSessions(root, "agent")).map(item => item.recordId), ["record"]);
+  });
 });
 
 test("发布的任一写入、sync 或 rename 故障都只留下不可枚举 staging", async t => {
@@ -170,6 +199,35 @@ test("sessions 根不存在时仍返回空列表", async t => {
   const root = await tempFixture(t, "panel-list-empty-"), diagnostics: PanelSessionDiagnostic[] = [];
   assert.deepEqual(await listPanelSessions(root, "agent", event => diagnostics.push(event)), []);
   assert.deepEqual(diagnostics, []);
+  await assert.rejects(loadPanelSession(root, "agent", "record"), /PANEL_SESSION_NOT_FOUND/);
+  await assert.rejects(updatePanelMetadata(root, "agent", "record", current => current), /PANEL_SESSION_NOT_FOUND/);
+  await assert.rejects(deletePanelSession(root, "agent", "record"), /PANEL_SESSION_NOT_FOUND/);
+});
+
+test("data 根缺失或不安全时稳定失败，不能降级为空库或会话不存在", async t => {
+  const root = await tempFixture(t, "panel-data-root-error-"), missing = join(root, "private-missing-root");
+  const unavailable = (error: unknown) => {
+    assert.equal((error as Error).message, "PANEL_SESSION_STORAGE_UNAVAILABLE");
+    assert.equal(String(error).includes(root), false); return true;
+  };
+  await assert.rejects(listPanelSessions(missing, "agent"), unavailable);
+  await assert.rejects(loadPanelSession(missing, "agent", "record"), unavailable);
+  await assert.rejects(updatePanelMetadata(missing, "agent", "record", current => current), unavailable);
+  await assert.rejects(deletePanelSession(missing, "agent", "record"), unavailable);
+  await assert.rejects(commitPanelTranscript(missing, {
+    version: 1, recordId: "record", agentId: "agent", createdAt: "2026-08-12T00:00:00.000Z"
+  }, emptyDocument), unavailable);
+
+  const wrong = join(root, "private-wrong-root"); await writeFile(wrong, "not a directory");
+  await assert.rejects(listPanelSessions(wrong, "agent"), unavailable);
+  const linked = join(root, "private-linked-root"); await symlink(root, linked);
+  await assert.rejects(listPanelSessions(linked, "agent"), unavailable);
+  const publicRoot = await tempFixture(t, "panel-public-data-root-"); await chmod(publicRoot, 0o755);
+  await assert.rejects(listPanelSessions(publicRoot, "agent"), unavailable);
+
+  const unsafeSessionsRoot = await tempFixture(t, "panel-unsafe-sessions-root-"), sessionsRoot = join(unsafeSessionsRoot, "sessions");
+  await mkdir(sessionsRoot, { mode: 0o700 }); await chmod(sessionsRoot, 0o755);
+  await assert.rejects(listPanelSessions(unsafeSessionsRoot, "agent"), unavailable);
 });
 
 test("agentId 和 recordId 的路径穿越在写入前被拒绝", async t => {

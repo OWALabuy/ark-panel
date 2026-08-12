@@ -14,7 +14,7 @@ const jsonl = (...entries: object[]) => [header, ...entries].map(value => JSON.s
 
 test("只读扫描 active/reset/panel，容忍 active 半行并拒绝符号链接来源", async t => {
   const root = await tempFixture(t, "panel-read-"), sessions = join(root, "source"), data = join(root, "data");
-  await mkdir(sessions); await mkdir(data);
+  await mkdir(sessions); await mkdir(data, { mode: 0o700 });
   const activeId = "11111111-1111-4111-8111-111111111111", linkedId = "22222222-2222-4222-8222-222222222222";
   const activePath = join(sessions, `${activeId}.jsonl`); await writeFile(activePath, jsonl(user, assistant) + '{"type":"message"');
   await writeFile(join(sessions, `${activeId}.jsonl.reset.2026-07-11T00-00-00Z`), jsonl(user));
@@ -68,7 +68,7 @@ test("只读扫描 active/reset/panel，容忍 active 半行并拒绝符号链�
 });
 
 test("记忆整理从原生会话分支继承有效模型与思考等级", async t => {
-  const root = await tempFixture(t, "panel-memory-source-"), sessions = join(root, "source"), data = join(root, "data"); await mkdir(sessions); await mkdir(data);
+  const root = await tempFixture(t, "panel-memory-source-"), sessions = join(root, "source"), data = join(root, "data"); await mkdir(sessions); await mkdir(data, { mode: 0o700 });
   const model = { type: "model_change", id: "m1", parentId: null, provider: "fixture-provider", modelId: "fixture-model" };
   const thinking = { type: "thinking_level_change", id: "t1", parentId: "m1", thinkingLevel: "high" };
   const linkedUser = { ...user, parentId: "t1" }; await writeFile(join(sessions, `${header.id}.jsonl`), jsonl(model, thinking, linkedUser, assistant));
@@ -79,7 +79,7 @@ test("记忆整理从原生会话分支继承有效模型与思考等级", async
 
 test("面板会话要求显式确认并先归档才可永久删除", async t => {
   const root = await tempFixture(t, "panel-read-delete-"), sessions = join(root, "source"), data = join(root, "data");
-  await mkdir(sessions); await mkdir(data); const reads = new SessionReadData([{ agentId: "fixture", sessionsRoot: sessions }], data);
+  await mkdir(sessions); await mkdir(data, { mode: 0o700 }); const reads = new SessionReadData([{ agentId: "fixture", sessionsRoot: sessions }], data);
   const created = await reads.createPanel("fixture") as { recordId: string };
   assert.equal((await reads.conversation(created.recordId) as { memoryDisposition: string }).memoryDisposition, "scratch");
   await reads.updateSession(created.recordId, { memoryDisposition: "eligible" });
@@ -93,7 +93,7 @@ test("面板会话要求显式确认并先归档才可永久删除", async t => 
 
 test("面板会话状态只把绑定当前 tip 的 OpenClaw fresh 用量作为主上下文", async t => {
   const root = await tempFixture(t, "panel-read-status-"), sessions = join(root, "source"), data = join(root, "data");
-  await mkdir(sessions); await mkdir(data); const reads = new SessionReadData([{ agentId: "fixture", sessionsRoot: sessions }], data, new ConservativeContextBudget(1_024));
+  await mkdir(sessions); await mkdir(data, { mode: 0o700 }); const reads = new SessionReadData([{ agentId: "fixture", sessionsRoot: sessions }], data, new ConservativeContextBudget(1_024));
   const created = await reads.createPanel("fixture", "status") as { recordId: string };
   await updatePanelMetadata(data, "fixture", created.recordId, current => ({ ...current, modelOverride: "provider/model", thinkingLevel: "high", reasoningLevel: "stream" }));
   const loaded = await loadPanelSession(data, "fixture", created.recordId);
@@ -117,7 +117,7 @@ test("面板会话状态只把绑定当前 tip 的 OpenClaw fresh 用量作为�
 
 test("conversation DTO 仅返回规范化 current branch 与 compaction 安全字段", async t => {
   const root=await tempFixture(t, "panel-read-compact-"),sessions=join(root,"source"),data=join(root,"data");
-  await mkdir(sessions);await mkdir(data);const reads=new SessionReadData([{agentId:"fixture",sessionsRoot:sessions}],data);
+  await mkdir(sessions);await mkdir(data,{mode:0o700});const reads=new SessionReadData([{agentId:"fixture",sessionsRoot:sessions}],data);
   const created=await reads.createPanel("fixture","compact") as {recordId:string},loaded=await loadPanelSession(data,"fixture",created.recordId);
   const document={...loaded.document,entries:[
     {type:"message",id:"u",parentId:null,timestamp:"2026-07-24T00:00:00Z",message:{role:"user",content:"visible"}},
@@ -133,7 +133,7 @@ test("conversation DTO 仅返回规范化 current branch 与 compaction 安全�
 
 test("project 目录汇总正常与归档会话、忽略大小写重复和隐藏来源", async t => {
   const root = await tempFixture(t, "panel-read-projects-"), sessions = join(root, "source"), data = join(root, "data");
-  await mkdir(sessions); await mkdir(data);
+  await mkdir(sessions); await mkdir(data, { mode: 0o700 });
   const activeId = "33333333-3333-4333-8333-333333333333";
   await writeFile(join(sessions, `${activeId}.jsonl`), jsonl(user));
   await writeFile(join(sessions, `${activeId}.jsonl.reset.2026-07-10T00-00-00Z`), jsonl(user));
@@ -149,14 +149,26 @@ test("project 目录汇总正常与归档会话、忽略大小写重复和隐藏
 
 test("sessions 根目录本身是符号链接时拒绝读取", async t => {
   const root = await tempFixture(t, "panel-read-link-"), actual = join(root, "actual"), link = join(root, "link"), data = join(root, "data");
-  await mkdir(actual); await mkdir(data); await symlink(actual, link);
+  await mkdir(actual); await mkdir(data, { mode: 0o700 }); await symlink(actual, link);
   const reads = new SessionReadData([{ agentId: "fixture", sessionsRoot: link }], data);
   await assert.rejects(reads.sessions(), /根目录不安全/);
 });
 
+test("panel data 根缺失时列表、读取与搜索返回稳定脱敏错误", async t => {
+  const root = await tempFixture(t, "panel-read-data-root-error-"), sessions = join(root, "source"); await mkdir(sessions);
+  const missing = join(root, "private-missing-data"), reads = new SessionReadData([{ agentId: "fixture", sessionsRoot: sessions }], missing);
+  const unavailable = (error: unknown) => {
+    assert.equal((error as Error).message, "PANEL_SESSION_STORAGE_UNAVAILABLE");
+    assert.equal(String(error).includes(root), false); assert.equal(String(error).includes("private-missing-data"), false); return true;
+  };
+  await assert.rejects(reads.sessions("fixture"), unavailable);
+  await assert.rejects(reads.conversation("record"), unavailable);
+  await assert.rejects(reads.search("needle", "fixture"), unavailable);
+});
+
 test("单条残缺 panel 记录不会拖垮健康会话的列表、读取或搜索", async t => {
   const root = await tempFixture(t, "panel-read-quarantine-"), sessions = join(root, "source"), data = join(root, "data");
-  await mkdir(sessions); await mkdir(data);
+  await mkdir(sessions); await mkdir(data, { mode: 0o700 });
   const healthy = await createPanelSession(data, "fixture", { header: { type: "session", version: 3, id: "healthy" }, entries: [
     { type: "message", id: "u", parentId: null, message: { role: "user", content: "healthy searchable needle" } }
   ] }, { recordId: "healthy" });
