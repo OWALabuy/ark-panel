@@ -24,11 +24,12 @@ const roots = new Map([["paneltest", runtimeRoot]]);
 const generation = new PanelGenerationApi(new BridgeService(new OpenClawCliClient({ sessionsRoots: roots, runTimeoutMs: 90_000 }), new FileBridgeMaterializer(), roots),
   { dataRoot, runtimeByAgent: new Map([["claude", "paneltest"]]) });
 const publicDir = join(process.cwd(), "src", "frontend"), username = "smoke", password = randomUUID(), secret = randomUUID();
-const server = createPanelServer({ auth: { username, passwordHash: passwordHash(password, "0011223344556677"), sessionSecret: secret }, publicDir, reads, generation });
+const allowedHosts: string[] = [], publicOrigins: string[] = [];
+const server = createPanelServer({ auth: { username, passwordHash: passwordHash(password, "0011223344556677"), sessionSecret: secret }, publicDir, allowedHosts, publicOrigins, reads, generation });
 
 try {
   server.listen(0, "127.0.0.1"); await once(server, "listening"); const address = server.address(); if (!address || typeof address === "string") throw new Error("监听失败");
-  const base = `http://127.0.0.1:${address.port}`;
+  const base = `http://127.0.0.1:${address.port}`; allowedHosts.push(`127.0.0.1:${address.port}`); publicOrigins.push(base);
   const login = await fetch(`${base}/api/v1/auth/login`, { method: "POST", headers: { origin: base, "content-type": "application/json" }, body: JSON.stringify({ username, password }) });
   if (!login.ok) throw new Error("登录失败"); const loginValue = await login.json() as { data: { csrfToken: string } };
   const cookie = login.headers.getSetCookie().map(value => value.split(";", 1)[0]).join("; ");

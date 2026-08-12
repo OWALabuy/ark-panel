@@ -553,6 +553,7 @@ fork 和编辑重发共用底层（见 §5.0）：都是「从目标 entry 回�
 
 ### 安全基线（第一天起就要有，不等登录那步）
 - 面板服务端**只监听 `127.0.0.1`**，不对外暴露端口（外部靠 SSH 转发）。
+- HTTPS 反代只通过启动时严格校验的单一 canonical `PANEL_PUBLIC_ORIGIN` 和精确 Host allowlist 扩展入口；监听地址不变，不信任 `Forwarded` / `X-Forwarded-*`，不根据请求学习 origin。Host 失败为 `421 HOST_REJECTED`；登录和 mutation 的 Origin 缺失、`null` 或跨源继续失败，mutation 仍同时要求 CSRF token。
 - gateway token **绝不下发到浏览器、绝不写进日志**。
 - **日志默认不记录消息正文和提示词**（会话内容和记忆一样敏感）。
 - 所有修改类接口要有 CSRF 防护或严格同源检查。

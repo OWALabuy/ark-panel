@@ -60,6 +60,42 @@ test("运行 timeout 使用长程默认值并校验独立 grace", async () => {
   assert.throws(() => parsePanelConfig({ ...auth, PANEL_RUN_WATCHER_GRACE_MS: "600001" }, moduleUrl), /PANEL_RUN_WATCHER_GRACE_MS/);
 });
 
+test("默认请求边界只信任规范化的本机 HTTP Host 与 Origin", () => {
+  const defaults = parsePanelConfig(auth, moduleUrl);
+  assert.equal(defaults.host, "127.0.0.1"); assert.equal(defaults.publicOrigin, undefined);
+  assert.deepEqual(defaults.trustedHosts, ["127.0.0.1:8790", "localhost:8790"]);
+  assert.deepEqual(defaults.allowedOrigins, ["http://127.0.0.1:8790", "http://localhost:8790"]);
+
+  const defaultPort = parsePanelConfig({ ...auth, PANEL_PORT: "80" }, moduleUrl);
+  assert.deepEqual(defaultPort.trustedHosts, ["127.0.0.1", "localhost"]);
+  assert.deepEqual(defaultPort.allowedOrigins, ["http://127.0.0.1", "http://localhost"]);
+});
+
+test("HTTPS public origin 与额外可信 Host 在启动时规范化", () => {
+  const config = parsePanelConfig({ ...auth, PANEL_SECURE_COOKIE: "1", PANEL_PUBLIC_ORIGIN: "HTTPS://Panel.Example.TEST:443",
+    PANEL_TRUSTED_HOSTS: JSON.stringify(["proxy.internal.test:8443", "[::1]:8790"]) }, moduleUrl);
+  assert.equal(config.publicOrigin, "https://panel.example.test");
+  assert.deepEqual(config.allowedOrigins, ["http://127.0.0.1:8790", "http://localhost:8790", "https://panel.example.test"]);
+  assert.deepEqual(config.trustedHosts, ["127.0.0.1:8790", "localhost:8790", "panel.example.test", "proxy.internal.test:8443", "[::1]:8790"]);
+});
+
+test("public origin 与可信 Host 配置严格拒绝混淆值和重复项", () => {
+  const invalidOrigins = [
+    "ftp://panel.example.test", "https://*.example.test", "https://user@panel.example.test", "https://panel.example.test/",
+    "https://panel.example.test/path", "https://panel.example.test?query", "https://panel.example.test#fragment", "null",
+    "https://例子.example", "https://xn--fsqu00a.example", "https://127.1", "https://[0:0:0:0:0:0:0:1]",
+    "https://panel.example.test:0443", "https://panel.example.test:0", "https://panel.example.test:65536"
+  ];
+  for (const value of invalidOrigins) assert.throws(() => parsePanelConfig({ ...auth, PANEL_SECURE_COOKIE: "1", PANEL_PUBLIC_ORIGIN: value }, moduleUrl), /PANEL_PUBLIC_ORIGIN/);
+  assert.throws(() => parsePanelConfig({ ...auth, PANEL_PUBLIC_ORIGIN: "https://panel.example.test" }, moduleUrl), /PANEL_SECURE_COOKIE=1/);
+  assert.throws(() => parsePanelConfig({ ...auth, PANEL_PUBLIC_ORIGIN: "http://127.0.0.1:8790" }, moduleUrl), /重复/);
+  assert.throws(() => parsePanelConfig({ ...auth, PANEL_TRUSTED_HOSTS: "not-json" }, moduleUrl), /PANEL_TRUSTED_HOSTS/);
+  assert.throws(() => parsePanelConfig({ ...auth, PANEL_TRUSTED_HOSTS: JSON.stringify(["*.example.test"]) }, moduleUrl), /PANEL_TRUSTED_HOSTS/);
+  assert.throws(() => parsePanelConfig({ ...auth, PANEL_TRUSTED_HOSTS: JSON.stringify(["Panel.Example.test", "panel.example.test"]) }, moduleUrl), /重复/);
+  assert.throws(() => parsePanelConfig({ ...auth, PANEL_SECURE_COOKIE: "1", PANEL_PUBLIC_ORIGIN: "https://panel.example.test",
+    PANEL_TRUSTED_HOSTS: JSON.stringify(["panel.example.test"]) }, moduleUrl), /重复/);
+});
+
 test("记忆整理 runtime 必须独立且对应已配置 workspace", async t => {
   const x = await layout(t), read = join(x.root, "read"), runtime = join(x.root, "agents", "panel-runtime-safe", "sessions"), memory = join(x.root, "agents", "panel-memory-safe", "sessions"), workspace = join(x.root, "workspace");
   await mkdir(read); await mkdir(runtime, { recursive: true }); await mkdir(memory, { recursive: true }); await mkdir(workspace);

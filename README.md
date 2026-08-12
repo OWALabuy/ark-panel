@@ -121,6 +121,11 @@ export PANEL_PASSWORD_HASH='scrypt:...'
 export PANEL_SESSION_SECRET='a-random-secret-with-at-least-32-characters'
 export PANEL_DATA_DIR="$HOME/.local/share/ark-panel"
 export PANEL_PORT='8790'
+# Required together for one HTTPS reverse-proxy entry point:
+# export PANEL_PUBLIC_ORIGIN='https://panel.example.com'
+# export PANEL_SECURE_COOKIE='1'
+# Optional exact additional Host values if the proxy rewrites Host (JSON array):
+# export PANEL_TRUSTED_HOSTS='["panel-internal.example.com"]'
 export PANEL_CONTEXT_HISTORY_BUDGET_TOKENS='100000'
 export PANEL_GATEWAY_RUN_TIMEOUT_MS='1800000'
 export PANEL_RUN_WATCHER_GRACE_MS='30000'
@@ -171,7 +176,52 @@ geckodriver on `PATH`):
 npm run test:browser
 ```
 
-When serving through an HTTPS reverse proxy, set `PANEL_SECURE_COOKIE=1`. The first version is pinned to OpenClaw `2026.6.11`; rerun integration acceptance before upgrading OpenClaw.
+### HTTPS reverse proxy
+
+The application still listens only on `127.0.0.1`; a reverse proxy is the TLS
+boundary. Configure exactly one browser-visible origin and secure cookies:
+
+```sh
+export PANEL_PUBLIC_ORIGIN='https://panel.example.com'
+export PANEL_SECURE_COOKIE='1'
+```
+
+`PANEL_PUBLIC_ORIGIN` is exactly `http(s)://host[:port]`, with no trailing
+slash, userinfo, path, query, fragment, or wildcard. Its normalized Host is
+trusted automatically. `PANEL_TRUSTED_HOSTS` is an optional JSON array of at
+most 16 additional exact Host values for a proxy that deliberately rewrites
+`Host`; normally it should be omitted. Normalized duplicates, IDN/punycode
+names, alternate numeric-IP spellings, and non-canonical IPv6 forms are
+rejected at startup. Only one external origin is supported.
+
+For example, place this in an nginx TLS-enabled server configuration (using
+the real certificate paths for the deployment):
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name panel.example.com;
+    ssl_certificate /etc/ssl/ark-panel/fullchain.pem;
+    ssl_certificate_key /etc/ssl/ark-panel/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:8790;
+        proxy_http_version 1.1;
+        proxy_set_header Host $http_host;
+        proxy_buffering off;
+        proxy_read_timeout 1h;
+    }
+}
+```
+
+The panel validates the actual `Host` and browser `Origin` independently. It
+does not read `X-Forwarded-Host`, `X-Forwarded-Proto`, `Forwarded`, or any other
+proxy header, so those headers cannot expand the trust boundary. Missing or
+`null` Origin values still fail login and mutations, and the existing CSRF
+token remains required. Without these variables, localhost and SSH-forwarded
+HTTP keep their existing defaults.
+
+The first version is pinned to OpenClaw `2026.6.11`; rerun integration acceptance before upgrading OpenClaw.
 
 ## Documentation
 

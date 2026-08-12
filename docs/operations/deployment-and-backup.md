@@ -29,6 +29,11 @@ export PANEL_PASSWORD_HASH='scrypt:...'
 export PANEL_SESSION_SECRET='至少32字符的随机秘密'
 export PANEL_DATA_DIR="$HOME/.local/share/ark-panel"
 export PANEL_PORT='8790'
+# HTTPS 反代时设置：
+# export PANEL_PUBLIC_ORIGIN='https://panel.example.com'
+# export PANEL_SECURE_COOKIE='1'
+# 代理改写 Host 时才补充精确值：
+# export PANEL_TRUSTED_HOSTS='["panel-internal.example.com"]'
 export PANEL_CONTEXT_HISTORY_BUDGET_TOKENS='100000'
 export PANEL_GATEWAY_RUN_TIMEOUT_MS='1800000'
 export PANEL_RUN_WATCHER_GRACE_MS='30000'
@@ -74,7 +79,58 @@ npm run healthcheck
 # 或 curl --fail http://127.0.0.1:8790/api/v1/health
 ```
 
-如经 HTTPS 反向代理访问，设置 `PANEL_SECURE_COOKIE=1`。第一版固定支持 OpenClaw `2026.6.11`，升级 OpenClaw 前应重跑集成测试。
+## HTTPS 反向代理
+
+面板进程在反代部署中仍只监听 `127.0.0.1`，不能把监听地址改成公网接口。
+在 systemd 的 `panel.env` 中同时配置浏览器看到的唯一 origin 和安全 Cookie：
+
+```sh
+PANEL_PUBLIC_ORIGIN='https://panel.example.com'
+PANEL_SECURE_COOKIE='1'
+```
+
+origin 只接受精确的 `http(s)://host[:port]`，不能有末尾 `/`、userinfo、路径、
+query、fragment 或 wildcard。默认端口会规范化，Host 大小写会规范化；规范化后
+的重复项会拒绝启动。为避免 IDNA、数字 IP 和 IPv6 的多种文本表示形成配置歧义，
+IDN/punycode、替代数字 IP 写法和非规范 IPv6 写法也会拒绝。HTTPS origin 未同时
+设置 `PANEL_SECURE_COOKIE=1` 时服务拒绝启动。
+
+origin 对应的 Host 自动加入信任列表。若代理有意把公网 Host 改成另一个固定值，
+可以用 `PANEL_TRUSTED_HOSTS` JSON 数组增加最多 16 个精确 Host；不要在其中重复
+origin Host 或默认的 `127.0.0.1:<port>` / `localhost:<port>`。通常应保留公网
+Host，而不需要设置这个变量。
+
+完整 nginx 示例：
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name panel.example.com;
+    ssl_certificate /etc/ssl/ark-panel/fullchain.pem;
+    ssl_certificate_key /etc/ssl/ark-panel/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:8790;
+        proxy_http_version 1.1;
+        proxy_set_header Host $http_host;
+        proxy_buffering off;
+        proxy_read_timeout 1h;
+    }
+}
+```
+
+修改后先执行 `nginx -t`，再重启面板并 reload nginx。使用正式证书验证静态页、
+登录、创建或修改操作，以及保持一段 SSE 连接；健康检查可访问
+`https://panel.example.com/api/v1/health`。面板始终直接校验实际 `Host` 和浏览器
+`Origin`，完全忽略 `Forwarded`、`X-Forwarded-Host`、`X-Forwarded-Proto` 等头，
+因此配置这些头不会产生信任。登录和 mutation 的 Origin 缺失、为 `null` 或不匹配
+时仍拒绝，mutation 还必须通过既有 CSRF token 校验。
+
+回滚时移除 `PANEL_PUBLIC_ORIGIN` 与 `PANEL_TRUSTED_HOSTS`，按需恢复
+`PANEL_SECURE_COOKIE`，重启面板后回到仅本机/SSH 转发的 HTTP 信任边界。该变化
+不修改任何会话或配置存储 schema。
+
+第一版固定支持 OpenClaw `2026.6.11`，升级 OpenClaw 前应重跑集成测试。
 
 ## 数据与并发语义
 

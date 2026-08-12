@@ -7,6 +7,7 @@ import { ForkError } from "../domain/fork.js";
 import type { PublicPanelRun } from "./run-store.js";
 import { MAX_AVATAR_BYTES, validateSettingsPatch, type PanelSettings, type SettingsPatch, type StoredAvatar } from "./experience-store.js";
 import { MAX_ATTACHMENT_BYTES } from "../storage/attachments.js";
+import { requestHostAllowed, requestOriginAllowed } from "./origin-policy.js";
 
 export interface GenerationApi {
   create(recordId: string, message: string, runId?: string, expectedRevision?: string, attachmentIds?: readonly string[], requestOutputs?: boolean): Promise<PublicPanelRun>;
@@ -42,7 +43,7 @@ export interface ReadApi {
 }
 export interface MemoryApi { list(agentId: string): Promise<unknown[]>; read(agentId: string, path: string): Promise<unknown> }
 export interface MemoryConsolidationApi { agents(): string[]; status(recordId: string): Promise<unknown>; candidate(recordId: string, mode?: "incremental" | "restore" | "rebuild"): Promise<unknown>; getCandidate(batchId: string): Promise<unknown>; confirm(batchId: string, contentHash: string): Promise<unknown> }
-export interface AppOptions { auth: AuthConfig; publicDir: string; mock?: boolean; now?: () => number; generation?: GenerationApi; commands?: CommandApi; reads?: ReadApi; experience?: ExperienceApi; attachments?: AttachmentApi; memory?: MemoryApi; memoryConsolidation?: MemoryConsolidationApi; allowedHosts?: readonly string[]; publicOrigins?: readonly string[] }
+export interface AppOptions { auth: AuthConfig; publicDir: string; allowedHosts: readonly string[]; publicOrigins: readonly string[]; mock?: boolean; now?: () => number; generation?: GenerationApi; commands?: CommandApi; reads?: ReadApi; experience?: ExperienceApi; attachments?: AttachmentApi; memory?: MemoryApi; memoryConsolidation?: MemoryConsolidationApi }
 const jsonHeaders = { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" };
 function send(res: ServerResponse, status: number, body: unknown, headers = {}): void { res.writeHead(status, { ...jsonHeaders, ...headers }); res.end(JSON.stringify(body)); }
 function fail(res: ServerResponse, status: number, code: string, message: string, requestId: string): void { send(res, status, { error: { code, message, requestId } }); }
@@ -55,8 +56,8 @@ async function binaryBody(req: IncomingMessage, maximum: number, code = "AVATAR_
   for await (const chunk of req) { const bytes = Buffer.from(chunk); size += bytes.length; if (size > maximum) throw new HttpError(413, code); chunks.push(bytes); }
   return Buffer.concat(chunks, size);
 }
-function sameOrigin(req: IncomingMessage, options: AppOptions): boolean { const origin = req.headers.origin; if (!origin) return false; return options.publicOrigins?.includes(origin) ?? origin === `http://${req.headers.host}`; }
-function allowedHost(req: IncomingMessage, options: AppOptions): boolean { return !options.allowedHosts || (!!req.headers.host && options.allowedHosts.includes(req.headers.host)); }
+function sameOrigin(req: IncomingMessage, options: AppOptions): boolean { return requestOriginAllowed(req, options.publicOrigins); }
+function allowedHost(req: IncomingMessage, options: AppOptions): boolean { return requestHostAllowed(req, options.allowedHosts); }
 function validRunId(value: unknown): value is string { return typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value); }
 
 export function createPanelServer(options: AppOptions) {

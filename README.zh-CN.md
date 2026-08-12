@@ -121,6 +121,11 @@ export PANEL_PASSWORD_HASH='scrypt:...'
 export PANEL_SESSION_SECRET='a-random-secret-with-at-least-32-characters'
 export PANEL_DATA_DIR="$HOME/.local/share/ark-panel"
 export PANEL_PORT='8790'
+# 为一个 HTTPS 反代入口成对设置：
+# export PANEL_PUBLIC_ORIGIN='https://panel.example.com'
+# export PANEL_SECURE_COOKIE='1'
+# 仅当代理改写 Host 时，可选填额外精确 Host（JSON 数组）：
+# export PANEL_TRUSTED_HOSTS='["panel-internal.example.com"]'
 export PANEL_CONTEXT_HISTORY_BUDGET_TOKENS='100000'
 export PANEL_GATEWAY_RUN_TIMEOUT_MS='1800000'
 export PANEL_RUN_WATCHER_GRACE_MS='30000'
@@ -171,7 +176,49 @@ npm run healthcheck
 npm run test:browser
 ```
 
-通过 HTTPS 反向代理提供服务时，设置 `PANEL_SECURE_COOKIE=1`。首个版本固定适配 OpenClaw `2026.6.11`;升级 OpenClaw 前请重新运行集成验收。
+### HTTPS 反向代理
+
+应用仍然只监听 `127.0.0.1`，由反向代理终止 TLS。配置唯一一个浏览器可见
+origin，并开启安全 Cookie：
+
+```sh
+export PANEL_PUBLIC_ORIGIN='https://panel.example.com'
+export PANEL_SECURE_COOKIE='1'
+```
+
+`PANEL_PUBLIC_ORIGIN` 必须精确为 `http(s)://host[:port]`，不能带末尾斜杠、
+userinfo、路径、查询、fragment 或 wildcard；它规范化后的 Host 会自动进入信任
+列表。`PANEL_TRUSTED_HOSTS` 是可选 JSON 数组，最多 16 个值，只用于代理明确
+改写 `Host` 时补充精确 Host，通常不应设置。规范化后的重复项、IDN/punycode
+域名、替代数字 IP 写法和非规范 IPv6 写法都会在启动时被拒绝。只支持一个外部
+origin。
+
+例如，在 nginx 的 TLS server 配置中加入以下完整入口（证书路径替换为部署的
+实际路径）：
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name panel.example.com;
+    ssl_certificate /etc/ssl/ark-panel/fullchain.pem;
+    ssl_certificate_key /etc/ssl/ark-panel/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:8790;
+        proxy_http_version 1.1;
+        proxy_set_header Host $http_host;
+        proxy_buffering off;
+        proxy_read_timeout 1h;
+    }
+}
+```
+
+面板分别校验实际 `Host` 与浏览器 `Origin`，不会读取 `X-Forwarded-Host`、
+`X-Forwarded-Proto`、`Forwarded` 或其它代理头，因此伪造这些头不能扩大信任
+边界。缺失或为 `null` 的 Origin 仍会让登录和修改请求失败，既有 CSRF token
+也仍然必需。不设置这些变量时，本机与 SSH 端口转发的 HTTP 默认行为保持不变。
+
+首个版本固定适配 OpenClaw `2026.6.11`;升级 OpenClaw 前请重新运行集成验收。
 
 ## 文档
 

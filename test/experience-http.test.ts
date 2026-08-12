@@ -12,10 +12,11 @@ import { tempFixture } from "./test-helpers.js";
 async function fixture(t: import("node:test").TestContext) {
   const root = await tempFixture(t, "panel-experience-http-"), publicDir = join(root, "public"), dataRoot = join(root, "data");
   await import("node:fs/promises").then(fs => Promise.all([fs.mkdir(publicDir), fs.mkdir(dataRoot)])); await writeFile(join(publicDir, "index.html"), "ok");
-  const server = createPanelServer({ auth: { username: "owl", passwordHash: passwordHash("correct", "0011223344556677"), sessionSecret: "test-secret-long-enough" }, publicDir, experience: new ExperienceStore(dataRoot, ["claude"]) });
+  const allowedHosts: string[] = [], publicOrigins: string[] = [];
+  const server = createPanelServer({ auth: { username: "owl", passwordHash: passwordHash("correct", "0011223344556677"), sessionSecret: "test-secret-long-enough" }, publicDir, allowedHosts, publicOrigins, experience: new ExperienceStore(dataRoot, ["claude"]) });
   t.after(async () => { if (server.listening) { server.close(); await once(server, "close"); } });
   server.listen(0, "127.0.0.1"); await once(server, "listening"); const address = server.address(); if (!address || typeof address === "string") throw new Error("no address");
-  const base = `http://127.0.0.1:${address.port}`;
+  const base = `http://127.0.0.1:${address.port}`; allowedHosts.push(`127.0.0.1:${address.port}`); publicOrigins.push(base);
   const login = await fetch(`${base}/api/v1/auth/login`, { method: "POST", headers: { origin: base, "content-type": "application/json" }, body: JSON.stringify({ username: "owl", password: "correct" }) });
   const loginBody = await login.json() as { data: { csrfToken: string } }, cookie = login.headers.getSetCookie().map(value => value.split(";", 1)[0]).join("; ");
   return { server, base, cookie, csrf: loginBody.data.csrfToken };

@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
+import { request as httpRequest } from "node:http";
+import { connect } from "node:net";
 import { symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
@@ -14,11 +16,30 @@ function snapshot(status:PublicPanelRun["status"]="completed",runId=testRunId):P
 function fakeGeneration(overrides:Partial<GenerationApi>={}):GenerationApi{return{async create(){return snapshot("completed")},async get(){return snapshot("completed")},async subscribe(_id,listener){listener(snapshot("completed"));return()=>undefined},async abortRun(){return snapshot("aborted")},async activeForRecord(){return undefined},...overrides}}
 async function fixture(t: TestContext, generation?: GenerationApi, reads?: ReadApi, commands?: CommandApi, attachments?: AttachmentApi, memory?: MemoryApi, memoryConsolidation?: MemoryConsolidationApi) {
   const publicDir = await tempFixture(t, "panel-web-"); await writeFile(join(publicDir, "index.html"), "ok");
-  const server = createPanelServer({ auth: { username: "owl", passwordHash: passwordHash("correct", "0011223344556677"), sessionSecret: "test-secret-long-enough" }, publicDir, mock: reads ? false : true, ...(generation ? { generation } : {}), ...(reads ? { reads } : {}), ...(commands ? { commands } : {}), ...(attachments ? { attachments } : {}), ...(memory ? { memory } : {}), ...(memoryConsolidation ? { memoryConsolidation } : {}) });
+  const allowedHosts: string[] = [], publicOrigins: string[] = [];
+  const server = createPanelServer({ auth: { username: "owl", passwordHash: passwordHash("correct", "0011223344556677"), sessionSecret: "test-secret-long-enough" }, publicDir, allowedHosts, publicOrigins, mock: reads ? false : true, ...(generation ? { generation } : {}), ...(reads ? { reads } : {}), ...(commands ? { commands } : {}), ...(attachments ? { attachments } : {}), ...(memory ? { memory } : {}), ...(memoryConsolidation ? { memoryConsolidation } : {}) });
   t.after(async () => { if (server.listening) { server.close(); await once(server, "close"); } });
   server.listen(0, "127.0.0.1"); await once(server, "listening");
   const address = server.address(); if (!address || typeof address === "string") throw new Error("no address");
-  return { server, base: `http://127.0.0.1:${address.port}` };
+  const base = `http://127.0.0.1:${address.port}`; allowedHosts.push(`127.0.0.1:${address.port}`); publicOrigins.push(base);
+  return { server, base };
+}
+
+async function rawHttp(port: number, request: string): Promise<string> {
+  const socket = connect(port, "127.0.0.1"), chunks: Buffer[] = [];
+  socket.on("data", chunk => chunks.push(Buffer.from(chunk)));
+  await once(socket, "connect"); socket.end(request); await once(socket, "close");
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+async function localHttp(port: number, path: string, options: { method?: string; headers?: Record<string, string>; body?: string } = {}) {
+  return await new Promise<{ status: number; headers: import("node:http").IncomingHttpHeaders; text: string }>((resolveResponse, rejectResponse) => {
+    const request = httpRequest({ hostname: "127.0.0.1", port, path, method: options.method ?? "GET", headers: options.headers }, response => {
+      const chunks: Buffer[] = []; response.on("data", chunk => chunks.push(Buffer.from(chunk)));
+      response.once("end", () => resolveResponse({ status: response.statusCode ?? 0, headers: response.headers, text: Buffer.concat(chunks).toString("utf8") }));
+    });
+    request.once("error", rejectResponse); request.end(options.body);
+  });
 }
 test("附件上传下载要求登录与 CSRF，并保持 Office 原始字节", async t => {
   const original = Buffer.from("raw-docx-bytes"), previewBytes = Buffer.from("safe-preview"); let uploaded: Buffer | undefined;
@@ -146,6 +167,58 @@ test("fixed Host policy, logout, request limit, and static symlink boundary", as
   const login=await fetch(`${base}/api/v1/auth/login`,{method:"POST",headers:{host:"panel.test",origin:"http://panel.test","content-type":"application/json"},body:JSON.stringify({username:"owl",password:"correct"})}); const value=await login.json() as {data:{csrfToken:string}}; const cookieHeader=login.headers.getSetCookie().map(v=>v.split(";",1)[0]).join("; ");
   const huge=await fetch(`${base}/api/v1/sessions/x/runs`,{method:"POST",headers:{host:"panel.test",origin:"http://panel.test",cookie:cookieHeader,"x-csrf-token":value.data.csrfToken,"content-type":"application/json"},body:JSON.stringify({message:"x".repeat(17000)})}); assert.equal(huge.status,413);
   const logout=await fetch(`${base}/api/v1/auth/logout`,{method:"POST",headers:{host:"panel.test",origin:"http://panel.test",cookie:cookieHeader,"x-csrf-token":value.data.csrfToken}}); assert.equal(logout.status,200); assert.ok(logout.headers.getSetCookie().every(item=>item.includes("Max-Age=0")));
+});
+test("显式 HTTPS origin 在可信 Host 下支持静态页、登录、mutation 与 SSE", async t => {
+  const publicDir = await tempFixture(t, "panel-proxy-origin-"); await writeFile(join(publicDir, "index.html"), "proxy-ok");
+  const externalOrigin = "https://panel.example.test", allowedHosts = ["panel.example.test"], publicOrigins = [externalOrigin];
+  const server = createPanelServer({ auth: { username: "owl", passwordHash: passwordHash("correct", "0011223344556677"), sessionSecret: "test-secret-long-enough", secureCookie: true },
+    publicDir, allowedHosts, publicOrigins, mock: true, generation: fakeGeneration() });
+  t.after(async () => { if (server.listening) { server.close(); await once(server, "close"); } });
+  server.listen(0, "127.0.0.1"); await once(server, "listening"); const address = server.address(); if (!address || typeof address === "string") throw new Error("no address");
+  const base = `http://127.0.0.1:${address.port}`; allowedHosts.push(`127.0.0.1:${address.port}`); publicOrigins.push(base);
+
+  const page = await localHttp(address.port, "/", { headers: { host: "PANEL.EXAMPLE.TEST" } }); assert.equal(page.status, 200); assert.equal(page.text, "proxy-ok");
+  const login = await localHttp(address.port, "/api/v1/auth/login", { method: "POST", headers: { host: "panel.example.test", origin: externalOrigin,
+    "x-forwarded-host": "attacker.invalid", "x-forwarded-proto": "http", "content-type": "application/json" }, body: JSON.stringify({ username: "owl", password: "correct" }) });
+  const setCookies = login.headers["set-cookie"] ?? []; assert.equal(login.status, 200); assert.ok(setCookies.every(value => value.includes("Secure")));
+  const value = JSON.parse(login.text) as { data: { csrfToken: string } }, cookies = setCookies.map(item => item.split(";", 1)[0]).join("; ");
+  const missingOrigin = await localHttp(address.port, "/api/v1/sessions/record/runs", { method: "POST", headers: { host: "panel.example.test",
+    cookie: cookies, "x-csrf-token": value.data.csrfToken, "content-type": "application/json" }, body: JSON.stringify({ message: "must be rejected" }) });
+  assert.equal(missingOrigin.status, 403); assert.equal(JSON.parse(missingOrigin.text).error.code, "CSRF_REJECTED");
+  const crossOrigin = await localHttp(address.port, "/api/v1/sessions/record/runs", { method: "POST", headers: { host: "panel.example.test", origin: "https://attacker.invalid",
+    cookie: cookies, "x-csrf-token": value.data.csrfToken, "content-type": "application/json" }, body: JSON.stringify({ message: "must be rejected" }) });
+  assert.equal(crossOrigin.status, 403); assert.equal(JSON.parse(crossOrigin.text).error.code, "CSRF_REJECTED");
+  const created = await localHttp(address.port, "/api/v1/sessions/record/runs", { method: "POST", headers: { host: "panel.example.test", origin: externalOrigin,
+    cookie: cookies, "x-csrf-token": value.data.csrfToken, "content-type": "application/json" }, body: JSON.stringify({ message: "fictional proxy request" }) });
+  assert.equal(created.status, 202);
+  const events = await localHttp(address.port, `/api/v1/runs/${testRunId}/events`, { headers: { host: "panel.example.test", cookie: cookies } });
+  assert.equal(events.status, 200); assert.match(events.text, /event: run.completed/);
+});
+
+test("反代策略拒绝错误 Host、Origin、端口、缺失值及伪造 forwarded headers", async t => {
+  const publicDir = await tempFixture(t, "panel-proxy-reject-"); await writeFile(join(publicDir, "index.html"), "ok");
+  const externalOrigin = "https://panel.example.test:8443", allowedHosts = ["panel.example.test:8443"], publicOrigins = [externalOrigin];
+  const server = createPanelServer({ auth: { username: "owl", passwordHash: passwordHash("correct", "0011223344556677"), sessionSecret: "test-secret-long-enough", secureCookie: true }, publicDir, allowedHosts, publicOrigins });
+  t.after(async () => { if (server.listening) { server.close(); await once(server, "close"); } });
+  server.listen(0, "127.0.0.1"); await once(server, "listening"); const address = server.address(); if (!address || typeof address === "string") throw new Error("no address");
+  const base = `http://127.0.0.1:${address.port}`;
+  const body = JSON.stringify({ username: "owl", password: "correct" });
+  const rejectedHost = await localHttp(address.port, "/api/v1/auth/login", { method: "POST", headers: { host: "attacker.invalid", origin: externalOrigin,
+    "x-forwarded-host": "panel.example.test:8443", "x-forwarded-proto": "https", "content-type": "application/json" }, body });
+  assert.equal(rejectedHost.status, 421); assert.equal(JSON.parse(rejectedHost.text).error.code, "HOST_REJECTED");
+  const rejectedOrigins = [undefined, "null", "http://panel.example.test:8443", "https://panel.example.test", "https://panel.example.test:9443", "https://other.example.test"] as const;
+  for (const origin of rejectedOrigins) {
+    const headers: Record<string, string> = { host: "panel.example.test:8443", "content-type": "application/json", "x-forwarded-host": "panel.example.test:8443", "x-forwarded-proto": "https" };
+    if (origin !== undefined) headers.origin = origin;
+    const response = await localHttp(address.port, "/api/v1/auth/login", { method: "POST", headers, body });
+    assert.equal(response.status, 403); assert.equal(JSON.parse(response.text).error.code, "ORIGIN_REJECTED");
+  }
+  const wrongPort = await localHttp(address.port, "/", { headers: { host: "panel.example.test:9443" } }); assert.equal(wrongPort.status, 421);
+
+  const duplicateHost = await rawHttp(address.port, "GET / HTTP/1.1\r\nHost: panel.example.test:8443\r\nHost: attacker.invalid\r\nConnection: close\r\n\r\n");
+  assert.match(duplicateHost, /^HTTP\/1\.1 421 /); assert.match(duplicateHost, /HOST_REJECTED/);
+  const duplicateOrigin = await rawHttp(address.port, "POST /api/v1/auth/login HTTP/1.1\r\nHost: panel.example.test:8443\r\nOrigin: https:\/\/panel.example.test:8443\r\nOrigin: https:\/\/attacker.invalid\r\nContent-Type: application\/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}");
+  assert.match(duplicateOrigin, /^HTTP\/1\.1 403 /); assert.match(duplicateOrigin, /ORIGIN_REJECTED/);
 });
 test("mutation requires matching CSRF token and login is origin checked", async t => {
   const x=await fixture(t);

@@ -5,6 +5,7 @@ import { createServer } from "node:net";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
+import { request as httpRequest, type IncomingHttpHeaders } from "node:http";
 import { passwordHash } from "../server/auth.js";
 import { createBackup, restoreBackup, verifyBackup } from "./backup.js";
 
@@ -19,11 +20,23 @@ const baseRoot = await mkdtemp(join(tmpdir(), "panel-deploy-smoke-"));
 const fakeReadRoot = join(baseRoot, "fixture-agent-sessions"), dataRoot = join(baseRoot, "data"), backupsRoot = join(baseRoot, "backups"), restoredRoot = join(baseRoot, "restored");
 await mkdir(fakeReadRoot); await mkdir(dataRoot); await mkdir(backupsRoot);
 const port = await freePort(), username = "deploy-smoke", password = randomUUID(), sessionSecret = randomUUID();
+const proxyOrigin = "https://panel.example.test", proxyHost = "panel.example.test";
 const commonEnv = {
   ...process.env, PANEL_USERNAME: username, PANEL_PASSWORD_HASH: passwordHash(password, "0011223344556677"), PANEL_SESSION_SECRET: sessionSecret,
-  PANEL_PORT: String(port), PANEL_READ_AGENTS: JSON.stringify({ fixture: { label: "Fixture", sessionsRoot: fakeReadRoot } }), PANEL_AGENT_RUNTIMES: "{}"
+  PANEL_PORT: String(port), PANEL_PUBLIC_ORIGIN: proxyOrigin, PANEL_TRUSTED_HOSTS: "[]", PANEL_SECURE_COOKIE: "1",
+  PANEL_READ_AGENTS: JSON.stringify({ fixture: { label: "Fixture", sessionsRoot: fakeReadRoot } }), PANEL_AGENT_RUNTIMES: "{}"
 };
 let child: ChildProcess | undefined;
+
+async function localRequest(path: string, options: { method?: string; headers?: Record<string, string>; body?: string } = {}): Promise<{ status: number; headers: IncomingHttpHeaders; text: string }> {
+  return await new Promise((resolveResponse, rejectResponse) => {
+    const request = httpRequest({ hostname: "127.0.0.1", port, path, method: options.method ?? "GET", headers: options.headers }, response => {
+      const chunks: Buffer[] = []; response.on("data", chunk => chunks.push(Buffer.from(chunk)));
+      response.once("end", () => resolveResponse({ status: response.statusCode ?? 0, headers: response.headers, text: Buffer.concat(chunks).toString("utf8") }));
+    });
+    request.once("error", rejectResponse); request.end(options.body);
+  });
+}
 
 async function start(root: string): Promise<{ base: string; cookie: string; csrf: string }> {
   child = spawn(process.execPath, [join(process.cwd(), "dist", "src", "server", "main.js")], { cwd: homedir(), env: { ...commonEnv, PANEL_DATA_DIR: root }, stdio: ["ignore", "pipe", "pipe"] });
@@ -34,6 +47,9 @@ async function start(root: string): Promise<{ base: string; cookie: string; csrf
     await new Promise(resolve => setTimeout(resolve, 100));
     if (attempt === 49) throw new Error("health check 超时");
   }
+  const proxyLogin = await localRequest("/api/v1/auth/login", { method: "POST", headers: { host: proxyHost, origin: proxyOrigin, "content-type": "application/json" },
+    body: JSON.stringify({ username, password }) });
+  if (proxyLogin.status !== 200 || !(proxyLogin.headers["set-cookie"] ?? []).every(value => value.includes("Secure"))) throw new Error("HTTPS 反代 origin 登录失败");
   const login = await fetch(`${base}/api/v1/auth/login`, { method: "POST", headers: { origin: base, "content-type": "application/json" }, body: JSON.stringify({ username, password }) });
   if (!login.ok) throw new Error("登录失败"); const payload = await login.json() as { data: { csrfToken: string } };
   return { base, cookie: login.headers.getSetCookie().map(value => value.split(";", 1)[0]).join("; "), csrf: payload.data.csrfToken };
@@ -57,7 +73,7 @@ try {
   client = await start(dataRoot); if (!(await conversation(client, recordId)).ok) throw new Error("重启后数据不可读"); await stop();
   const backup = await createBackup(dataRoot, backupsRoot, "dry-run"); await verifyBackup(backup); await restoreBackup(backup, restoredRoot);
   client = await start(restoredRoot); if (!(await conversation(client, recordId)).ok) throw new Error("恢复目录启动后数据不可读"); await stop();
-  process.stdout.write(JSON.stringify({ ok: true, health: true, login: true, gracefulStop: true, restartReadable: true, restoredReadable: true }) + "\n");
+  process.stdout.write(JSON.stringify({ ok: true, health: true, login: true, proxyOrigin: true, gracefulStop: true, restartReadable: true, restoredReadable: true }) + "\n");
 } finally {
   if (child && child.exitCode === null) { child.kill("SIGTERM"); await once(child, "exit").catch(() => undefined); }
   await rm(baseRoot, { recursive: true, force: true });

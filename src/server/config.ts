@@ -2,12 +2,14 @@ import { chmod, lstat, mkdir, realpath } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { relative, resolve, sep } from "node:path";
 import type { ReadAgentConfig } from "./read-data.js";
+import { canonicalHost, canonicalOrigin } from "./origin-policy.js";
 
 export interface RuntimeConfig { runtimeAgentId: string; sessionsRoot: string; workspaceRoot?: string }
 export interface MemoryRuntimeConfig { runtimeAgentId: string; sessionsRoot: string }
 export interface PanelConfig {
   username: string; passwordHash: string; sessionSecret: string; secureCookie: boolean;
   host: "127.0.0.1"; port: number; publicDir: string; dataRoot?: string; mock: boolean;
+  publicOrigin?: string; trustedHosts: readonly string[]; allowedOrigins: readonly string[];
   readAgents: ReadAgentConfig[]; runtimes: Map<string, RuntimeConfig>;
   memoryRuntimes: Map<string, MemoryRuntimeConfig>;
   contextHistoryBudgetTokens: number;
@@ -27,6 +29,18 @@ function jsonObject(value: string | undefined, name: string): Record<string, Rec
   return parsed as Record<string, Record<string, unknown>>;
 }
 
+function jsonStringArray(value: string | undefined, name: string): string[] {
+  if (value === undefined) return [];
+  let parsed: unknown; try { parsed = JSON.parse(value); } catch { throw new Error(`${name} 不是有效 JSON`); }
+  if (!Array.isArray(parsed) || parsed.length > 16 || parsed.some(item => typeof item !== "string")) throw new Error(`${name} 格式错误`);
+  return parsed;
+}
+
+function addUnique(values: string[], value: string, name: string): void {
+  if (values.includes(value)) throw new Error(`${name} 包含重复项`);
+  values.push(value);
+}
+
 export function pathsOverlap(left: string, right: string): boolean {
   const fromLeft = relative(resolve(left), resolve(right)), fromRight = relative(resolve(right), resolve(left));
   return fromLeft === "" || (!fromLeft.startsWith(`..${sep}`) && fromLeft !== "..") || (!fromRight.startsWith(`..${sep}`) && fromRight !== "..");
@@ -36,6 +50,17 @@ export function parsePanelConfig(env: NodeJS.ProcessEnv, moduleUrl: string): Pan
   for (const name of ["PANEL_USERNAME", "PANEL_PASSWORD_HASH", "PANEL_SESSION_SECRET"] as const) if (!env[name]) throw new Error(`缺少环境变量 ${name}`);
   if (env.PANEL_SESSION_SECRET!.length < 32) throw new Error("PANEL_SESSION_SECRET 至少需要 32 个字符");
   const port = Number(env.PANEL_PORT ?? "8790"); if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("PANEL_PORT 无效");
+  const secureCookie = env.PANEL_SECURE_COOKIE === "1";
+  const localOrigins = [canonicalOrigin(`http://127.0.0.1:${port}`), canonicalOrigin(`http://localhost:${port}`)];
+  const trustedHosts: string[] = [], allowedOrigins: string[] = [];
+  for (const local of localOrigins) { addUnique(trustedHosts, local.host, "本机 Host"); addUnique(allowedOrigins, local.origin, "本机 Origin"); }
+  const external = env.PANEL_PUBLIC_ORIGIN === undefined ? undefined : canonicalOrigin(env.PANEL_PUBLIC_ORIGIN, "PANEL_PUBLIC_ORIGIN");
+  if (external) {
+    if (external.protocol === "https:" && !secureCookie) throw new Error("HTTPS PANEL_PUBLIC_ORIGIN 需要 PANEL_SECURE_COOKIE=1");
+    addUnique(trustedHosts, external.host, "PANEL_PUBLIC_ORIGIN");
+    addUnique(allowedOrigins, external.origin, "PANEL_PUBLIC_ORIGIN");
+  }
+  for (const value of jsonStringArray(env.PANEL_TRUSTED_HOSTS, "PANEL_TRUSTED_HOSTS")) addUnique(trustedHosts, canonicalHost(value, "PANEL_TRUSTED_HOSTS"), "PANEL_TRUSTED_HOSTS");
   const contextHistoryBudgetTokens = Number(env.PANEL_CONTEXT_HISTORY_BUDGET_TOKENS ?? "100000");
   if (!Number.isInteger(contextHistoryBudgetTokens) || contextHistoryBudgetTokens < 1024) throw new Error("PANEL_CONTEXT_HISTORY_BUDGET_TOKENS 必须是至少 1024 的整数");
   const gatewayRunTimeoutMs = boundedInteger(env.PANEL_GATEWAY_RUN_TIMEOUT_MS, 30 * 60_000, "PANEL_GATEWAY_RUN_TIMEOUT_MS", 1_000, 24 * 60 * 60_000);
@@ -63,10 +88,10 @@ export function parsePanelConfig(env: NodeJS.ProcessEnv, moduleUrl: string): Pan
     memoryRuntimes.set(agentId, { runtimeAgentId: value.runtimeAgentId, sessionsRoot: resolve(value.sessionsRoot) });
   }
   if ((readAgents.length || runtimes.size) && !env.PANEL_DATA_DIR) throw new Error("配置会话数据源时必须设置 PANEL_DATA_DIR");
-  return { username: env.PANEL_USERNAME!, passwordHash: env.PANEL_PASSWORD_HASH!, sessionSecret: env.PANEL_SESSION_SECRET!, secureCookie: env.PANEL_SECURE_COOKIE === "1",
+  return { username: env.PANEL_USERNAME!, passwordHash: env.PANEL_PASSWORD_HASH!, sessionSecret: env.PANEL_SESSION_SECRET!, secureCookie,
     host: "127.0.0.1", port, publicDir: env.PANEL_PUBLIC_DIR ? resolve(env.PANEL_PUBLIC_DIR) : fileURLToPath(new URL("../../../src/frontend/", moduleUrl)),
     ...(env.PANEL_DATA_DIR ? { dataRoot: resolve(env.PANEL_DATA_DIR) } : {}), mock: env.PANEL_MOCK_DATA === "1", readAgents, runtimes, contextHistoryBudgetTokens,
-    gatewayRunTimeoutMs, runWatcherGraceMs, memoryRuntimes };
+    ...(external ? { publicOrigin: external.origin } : {}), trustedHosts, allowedOrigins, gatewayRunTimeoutMs, runWatcherGraceMs, memoryRuntimes };
 }
 
 async function safeDirectory(path: string, label: string): Promise<string> {

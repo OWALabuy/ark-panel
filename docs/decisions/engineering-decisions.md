@@ -29,6 +29,15 @@ API 统一位于 `/api/v1`。成功响应是 `{ "data": ... }`；失败响应是
 
 服务只监听 `127.0.0.1`。修改请求必须通过严格同源检查；实现登录后再加双重提交 CSRF token。日志不记录消息正文、提示词、token 或完整路径。
 
+## HTTPS 反向代理信任边界（2026-08-13）
+
+- 监听地址、浏览器可见的 canonical origin 与可接受的 HTTP `Host` 是三个独立概念。进程仍固定监听 `127.0.0.1`；`PANEL_PUBLIC_ORIGIN` 只增加一个显式外部 origin，其规范化 Host 自动加入信任列表。
+- 默认信任仅为实际监听端口上的 `127.0.0.1` 与 `localhost` HTTP。`PANEL_TRUSTED_HOSTS` 只允许补充有限数量的精确 Host，不支持 wildcard，也不能用重复值表达优先级。
+- origin/Host 在启动时和请求时使用同一规范化规则。只接受 HTTP(S)、ASCII DNS/规范 IP 与精确端口；拒绝 userinfo、路径、query、fragment、IDN/punycode、替代数字 IP 和非规范 IPv6 表示。HTTPS 外部 origin 必须启用 Secure cookie。
+- 请求只以实际 `Host` 和浏览器 `Origin` 为依据。服务不读取 `Forwarded` 或任何 `X-Forwarded-*`，也不会从请求动态学习 origin；未来若支持这些头，必须另立 trusted-proxy 身份边界。
+- Host 校验覆盖健康检查、静态资源、API 与 SSE，失败继续使用 `421 HOST_REJECTED`。登录和所有 mutation 继续要求显式匹配的 Origin；缺失/`null`/跨源保持拒绝，mutation 还必须通过登录态与 CSRF token，错误码保持既有 `ORIGIN_REJECTED` / `CSRF_REJECTED`。
+- 配置校验错误和启动日志只说明变量或监听地址，不回显外部部署名称、请求头、凭据或路径。
+
 ## 存储
 
 - panel 会话的 transcript 与 metadata 是权威数据；会话读取索引只存在于进程内，可随时清空并从权威文件重建。遗留 `index.json` 不参与读取。

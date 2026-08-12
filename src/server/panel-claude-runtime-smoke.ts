@@ -27,9 +27,10 @@ const generation = new PanelGenerationApi(
   { dataRoot, runtimeByAgent: new Map([["claude", runtimeAgentId]]) }
 );
 const username = "acceptance", password = randomUUID(), secret = randomUUID();
+const allowedHosts: string[] = [], publicOrigins: string[] = [];
 const server = createPanelServer({
   auth: { username, passwordHash: passwordHash(password, "0011223344556677"), sessionSecret: secret },
-  publicDir: join(process.cwd(), "src", "frontend"), reads, generation
+  publicDir: join(process.cwd(), "src", "frontend"), allowedHosts, publicOrigins, reads, generation
 });
 let removeGeneratedSkillsCache = false;
 
@@ -43,7 +44,7 @@ try {
 
   server.listen(0, "127.0.0.1"); await once(server, "listening");
   const address = server.address(); if (!address || typeof address === "string") throw new Error("监听失败");
-  const base = `http://127.0.0.1:${address.port}`;
+  const base = `http://127.0.0.1:${address.port}`; allowedHosts.push(`127.0.0.1:${address.port}`); publicOrigins.push(base);
   const login = await fetch(`${base}/api/v1/auth/login`, { method: "POST", headers: { origin: base, "content-type": "application/json" }, body: JSON.stringify({ username, password }) });
   if (!login.ok) throw new Error("登录失败");
   const loginValue = await login.json() as { data: { csrfToken: string } };
