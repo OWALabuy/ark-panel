@@ -1,12 +1,44 @@
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
+import { mkdtempSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { createPanelServer } from "../dist/src/server/app.js";
 import { passwordHash } from "../dist/src/server/auth.js";
 
 const FIXED_NOW = Date.parse("2030-01-02T03:04:05.000Z");
 const PREVIEW_PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
+const FIXTURE_ROOT = fileURLToPath(new URL("../", import.meta.url));
 const terminal = status => ["completed", "failed", "aborted"].includes(status);
+
+function oneShotGate() {
+  let pending;
+  return {
+    arm() {
+      if (pending) throw new Error("Fixture gate is already armed");
+      let release;
+      const promise = new Promise(resolveGate => { release = resolveGate; });
+      pending = { promise, release };
+    },
+    async wait() {
+      const current = pending;
+      if (!current) return;
+      await current.promise;
+      if (pending === current) pending = undefined;
+    },
+    release() {
+      const current = pending;
+      if (!current) throw new Error("Fixture gate is not armed");
+      pending = undefined;
+      current.release();
+    },
+    releaseIfArmed() {
+      const current = pending;
+      if (!current) return;
+      pending = undefined;
+      current.release();
+    }
+  };
+}
 
 function initialConversation(recordId, sourceKind, title, entries) {
   return {
@@ -47,7 +79,16 @@ function createFixtureState(externalImages) {
       { type: "message", id: "active-u1", parentId: null, timestamp: "2030-01-02T03:01:00.000Z", message: { role: "user", content: "这是虚构且只读的上游来源。" } }
     ])]
   ]);
-  return { conversations, runs: new Map(), listeners: new Map(), uploads: new Map(), nextRecord: 3, nextEntry: 1, nextTick: 1 };
+  return {
+    conversations,
+    runs: new Map(),
+    listeners: new Map(),
+    uploads: new Map(),
+    calls: { createPanels: [], generationCreates: [], uploads: [] },
+    nextRecord: 3,
+    nextEntry: 1,
+    nextTick: 1
+  };
 }
 
 function snapshotConversation(value) {
@@ -86,6 +127,7 @@ export async function startBrowserFixture({ port = 0 } = {}) {
     requests
   };
   const state = createFixtureState(externalImages);
+  const gates = { createPanel: oneShotGate(), generationCreate: oneShotGate() };
   const stamp = () => new Date(FIXED_NOW + state.nextTick++ * 1000).toISOString();
   const sessionRef = value => ({ recordId: value.recordId, agentId: value.agentId, sourceKind: "panel", revision: value.revision });
   const createPanel = (agentId, title) => {
@@ -126,7 +168,11 @@ export async function startBrowserFixture({ port = 0 } = {}) {
         .filter(value => JSON.stringify(value.document).toLowerCase().includes(needle))
         .map(({ document: _document, status: _status, ...record }) => ({ ...structuredClone(record), hits: [{ entryId: "a1", role: "assistant", snippet: "虚构搜索命中：浏览器验收内容" }] }));
     },
-    async createPanel(agentId, title) { return snapshotConversation(createPanel(agentId, title)); },
+    async createPanel(agentId, title) {
+      state.calls.createPanels.push({ agentId, title });
+      await gates.createPanel.wait();
+      return snapshotConversation(createPanel(agentId, title));
+    },
     async fork(recordId, messageId) { return fork(recordId, messageId); },
     async editAndFork(recordId, messageId, replacement) {
       const created = fork(recordId, messageId);
@@ -156,7 +202,8 @@ export async function startBrowserFixture({ port = 0 } = {}) {
   };
 
   function publicRun(run) {
-    const { message: _message, requestOutputs: _requestOutputs, droppedSubscription: _droppedSubscription, ...visible } = run;
+    const { message: _message, expectedRevision: _expectedRevision, attachmentIds: _attachmentIds,
+      requestOutputs: _requestOutputs, droppedSubscription: _droppedSubscription, ...visible } = run;
     return { ...structuredClone(visible), canAbort: !terminal(run.status) && ["accepted", "running", "materializing"].includes(run.status) };
   }
   function publish(run) {
@@ -202,17 +249,33 @@ export async function startBrowserFixture({ port = 0 } = {}) {
     publish(run);
     return publicRun(run);
   }
+  function failRun(recordId) {
+    const run = activeRun(recordId);
+    if (!run) throw new Error(`No active fixture run for ${recordId}`);
+    run.status = "failed";
+    run.error = { code: "FIXTURE_GENERATION_FAILED", message: "虚构生成失败" };
+    run.finishedAt = stamp();
+    delete run.stream;
+    publish(run);
+    return publicRun(run);
+  }
   const generation = {
-    async create(recordId, message, runId = crypto.randomUUID(), _expectedRevision, _attachmentIds, requestOutputs = false) {
+    async create(recordId, message, runId = crypto.randomUUID(), expectedRevision, attachmentIds = [], requestOutputs = false) {
+      const normalizedAttachments = [...attachmentIds];
+      state.calls.generationCreates.push({ recordId, message, runId, expectedRevision,
+        attachmentIds: normalizedAttachments, requestOutputs });
+      await gates.generationCreate.wait();
       const existing = state.runs.get(runId);
       if (existing) {
-        if (existing.recordId !== recordId || existing.message !== message || existing.requestOutputs !== requestOutputs) throw new Error("IDEMPOTENCY_KEY_REUSED");
+        if (existing.recordId !== recordId || existing.message !== message || existing.expectedRevision !== expectedRevision ||
+          JSON.stringify(existing.attachmentIds) !== JSON.stringify(normalizedAttachments) || existing.requestOutputs !== requestOutputs) throw new Error("IDEMPOTENCY_KEY_REUSED");
         return { ...publicRun(existing), newlyCreated: false };
       }
       if (!state.conversations.has(recordId)) throw new Error("PANEL_SESSION_NOT_FOUND");
       if (activeRun(recordId)) throw new Error("SESSION_BUSY");
       const now = stamp();
-      const run = { runId, recordId, message, requestOutputs, status: "accepted", sequence: 1, createdAt: now, updatedAt: now };
+      const run = { runId, recordId, message, expectedRevision, attachmentIds: normalizedAttachments,
+        requestOutputs, status: "accepted", sequence: 1, createdAt: now, updatedAt: now };
       state.runs.set(runId, run);
       queueMicrotask(() => startRun(run));
       return { ...publicRun(run), newlyCreated: true };
@@ -257,6 +320,8 @@ export async function startBrowserFixture({ port = 0 } = {}) {
     async upload(recordId, input) {
       if (!state.conversations.has(recordId)) throw new Error("PANEL_SESSION_NOT_FOUND");
       const id = `fixture-upload-${state.uploads.size + 1}`;
+      state.calls.uploads.push({ recordId, attachmentId: id, fileName: input.fileName,
+        mimeType: input.mimeType, sizeBytes: input.bytes.length });
       state.uploads.set(id, { recordId, fileName: input.fileName, mimeType: input.mimeType, bytes: Buffer.from(input.bytes) });
       return { id, attachmentId: id, fileName: input.fileName, mimeType: input.mimeType, sizeBytes: input.bytes.length };
     },
@@ -301,6 +366,8 @@ export async function startBrowserFixture({ port = 0 } = {}) {
   publicOrigins.push(origin);
 
   let closing;
+  let uploadRoot = "";
+  const uploadPaths = [];
   return {
     origin,
     state,
@@ -308,12 +375,31 @@ export async function startBrowserFixture({ port = 0 } = {}) {
     activeRun: recordId => { const run = activeRun(recordId); return run ? publicRun(run) : undefined; },
     advanceRun,
     completeRun,
+    failRun,
+    gates,
+    makeUploadFile(name, content = "fictional browser attachment\n") {
+      if (!uploadRoot) uploadRoot = mkdtempSync(join(FIXTURE_ROOT, ".browser-fixture-"));
+      const path = join(uploadRoot, name);
+      writeFileSync(path, content, { encoding: "utf8", flag: "wx", mode: 0o600 });
+      uploadPaths.push(path);
+      return path;
+    },
     close() {
       if (closing) return closing;
       closing = (async () => {
+        gates.createPanel.releaseIfArmed();
+        gates.generationCreate.releaseIfArmed();
         for (const run of state.runs.values()) if (!terminal(run.status)) await generation.abortRun(run.runId);
         const closeServer = value => new Promise((resolveClose, reject) => value.close(error => error ? reject(error) : resolveClose()));
         await Promise.all([closeServer(server), closeServer(probe)]);
+        for (const path of uploadPaths) {
+          try { unlinkSync(path); }
+          catch (error) { if (error?.code !== "ENOENT") throw error; }
+        }
+        if (uploadRoot) {
+          try { rmdirSync(uploadRoot); }
+          catch (error) { if (error?.code !== "ENOENT") throw error; }
+        }
       })();
       return closing;
     }

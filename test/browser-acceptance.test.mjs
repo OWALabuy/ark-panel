@@ -239,7 +239,7 @@ async function scenario(name, options, run) {
   if (primaryError) { reportDiagnostics(primaryError, name, diagnostics); throw primaryError; }
 }
 
-test("desktop browser acceptance covers security and session lifecycle", { timeout: 60_000 }, async () => {
+test("desktop browser acceptance covers security and session lifecycle", { timeout: 90_000 }, async () => {
   await scenario("desktop", { mobile: false }, async ({ driver, fixture }) => {
     assert.deepEqual(fixture.externalImages.requests, {
       allowed: { count: 0, refererPresent: false, panelCookiePresent: false },
@@ -396,6 +396,96 @@ test("desktop browser acceptance covers security and session lifecycle", { timeo
     fixture.completeRun(createdRecordId);
     await waitText(driver, "#messages", "虚构 SSE 回复：SSE 断线后终态验收", WAIT_MS);
     await waitEnabled(driver, "#message", true);
+
+    await (await visible(driver, '#agents .agent[data-id="fixture"]')).click();
+    await waitScript(driver, "return !document.querySelector('.session-row.active')");
+    const autoCreateFile = fixture.makeUploadFile("fictional-auto-create.txt");
+    const parallelFile = fixture.makeUploadFile("fictional-parallel-draft.txt");
+    const retainedFile = fixture.makeUploadFile("fictional-retained-retry.txt");
+    const autoMessage = "自动建会话迁移验收";
+    const autoTextarea = await visible(driver, "#message");
+    await autoTextarea.sendKeys(autoMessage);
+    await driver.findElement(By.css("#attachment-input")).sendKeys(autoCreateFile);
+    await waitText(driver, "#pending-attachments", "fictional-auto-create.txt");
+    await (await visible(driver, "#request-outputs")).click();
+    fixture.gates.createPanel.arm();
+    fixture.gates.generationCreate.arm();
+    const createPanelCount = fixture.state.calls.createPanels.length;
+    await (await visible(driver, "#send")).click();
+    await driver.wait(() => fixture.state.calls.createPanels.length === createPanelCount + 1, WAIT_MS,
+      "Timed out waiting for the gated new-session creation");
+    assert.equal(await (await visible(driver, "#send")).isEnabled(), false);
+    await driver.executeScript("document.querySelector('#composer').requestSubmit()");
+    assert.equal(fixture.state.calls.createPanels.length, createPanelCount + 1);
+    fixture.gates.createPanel.release();
+    const generationCount = fixture.state.calls.generationCreates.length;
+    await driver.wait(() => fixture.state.calls.generationCreates.length === generationCount + 1, WAIT_MS,
+      "Timed out waiting for the gated generation creation");
+    const autoRecordId = fixture.state.calls.generationCreates.at(-1)?.recordId;
+    assert.match(autoRecordId || "", /^fixture-/);
+    assert.notEqual(autoRecordId, createdRecordId);
+    await driver.wait(async () => await activeRecordId(driver) === autoRecordId, WAIT_MS,
+      "Timed out waiting for the automatically created session to open");
+    const migrated = await driver.executeScript(`
+      const [agentId, recordId] = arguments;
+      return {
+        draft: localStorage.getItem('ark-panel:draft:v1:' + encodeURIComponent(agentId) + ':' + encodeURIComponent(recordId)),
+        newOutput: localStorage.getItem('ark-panel:request-outputs:v1:new:' + encodeURIComponent(agentId)),
+        sessionOutput: localStorage.getItem('ark-panel:request-outputs:v1:session:' + encodeURIComponent(agentId) + ':' + encodeURIComponent(recordId))
+      };
+    `, "fixture", autoRecordId);
+    assert.deepEqual(migrated, { draft: autoMessage, newOutput: null, sessionOutput: "1" });
+    assert.equal(await (await visible(driver, "#request-outputs")).getAttribute("aria-pressed"), "true");
+    await waitText(driver, "#pending-attachments", "fictional-auto-create.txt");
+    const autoUpload = fixture.state.calls.uploads.find(call => call.recordId === autoRecordId);
+    const gatedCreate = fixture.state.calls.generationCreates.at(-1);
+    assert.equal(autoUpload?.fileName, "fictional-auto-create.txt");
+    assert.deepEqual(gatedCreate?.attachmentIds, [autoUpload?.attachmentId]);
+    assert.equal(gatedCreate?.requestOutputs, true);
+    fixture.gates.generationCreate.release();
+    await visible(driver, ".stream-preview");
+    assert.equal(await (await visible(driver, "#request-outputs")).getAttribute("aria-pressed"), "false");
+
+    await openSession(driver, "fixture-2");
+    const parallelTextarea = await visible(driver, "#message");
+    await parallelTextarea.sendKeys("另一会话的新草稿");
+    await driver.findElement(By.css("#attachment-input")).sendKeys(parallelFile);
+    await waitText(driver, "#pending-attachments", "fictional-parallel-draft.txt");
+    fixture.completeRun(autoRecordId);
+    await driver.wait(async () => await driver.executeScript(`
+      return localStorage.getItem('ark-panel:run:v1:' + encodeURIComponent(arguments[0])) === null
+    `, autoRecordId), WAIT_MS, "Timed out waiting for the background terminal run to settle");
+    assert.equal(await parallelTextarea.getAttribute("value"), "另一会话的新草稿");
+    await waitText(driver, "#pending-attachments", "fictional-parallel-draft.txt");
+    assert.equal(await driver.executeScript(`
+      return localStorage.getItem('ark-panel:draft:v1:fixture:' + encodeURIComponent(arguments[0]))
+    `, "fixture-2"), "另一会话的新草稿");
+
+    await openSession(driver, autoRecordId);
+    const retainedTextarea = await visible(driver, "#message");
+    await retainedTextarea.sendKeys("失败和停止后保留的草稿");
+    await driver.findElement(By.css("#attachment-input")).sendKeys(retainedFile);
+    await waitText(driver, "#pending-attachments", "fictional-retained-retry.txt");
+    await (await visible(driver, "#send")).click();
+    await visible(driver, ".stream-preview");
+    fixture.failRun(autoRecordId);
+    await waitEnabled(driver, "#message", true);
+    await waitScript(driver, "return !document.querySelector('.stream-preview')");
+    assert.equal(await retainedTextarea.getAttribute("value"), "失败和停止后保留的草稿");
+    await waitText(driver, "#pending-attachments", "fictional-retained-retry.txt");
+    const failedCreate = fixture.state.calls.generationCreates.at(-1);
+    const uploadsBeforeRetry = fixture.state.calls.uploads.length;
+    const createsBeforeRetry = fixture.state.calls.generationCreates.length;
+    await (await visible(driver, "#retry")).click();
+    await driver.wait(() => fixture.state.calls.generationCreates.length === createsBeforeRetry + 1, WAIT_MS,
+      "Timed out waiting for the retained generation retry");
+    assert.equal(fixture.state.calls.uploads.length, uploadsBeforeRetry);
+    assert.deepEqual(fixture.state.calls.generationCreates.at(-1)?.attachmentIds, failedCreate?.attachmentIds);
+    await visible(driver, ".stream-preview");
+    await (await visible(driver, "#send")).click();
+    await waitEnabled(driver, "#message", true);
+    assert.equal(await retainedTextarea.getAttribute("value"), "失败和停止后保留的草稿");
+    await waitText(driver, "#pending-attachments", "fictional-retained-retry.txt");
 
     await openSession(driver, "fixture-1");
     const lockedTextarea = await visible(driver, "#message");

@@ -2,11 +2,13 @@
 
 > **当前自动化与日期化证据元数据**
 >
-> - Date: `2026-08-12`（初始自动化）、`2026-08-13`（#43 网络边界复验）
-> - ark-panel commit: `3a29ee4`（初始自动化）、`cfe53d9`（外部图片边界）
+> - Date: `2026-08-12`（初始自动化）、`2026-08-13`（#43 网络边界复验、
+>   #49 composer 状态迁移 characterization）
+> - ark-panel commit: `3a29ee4`（初始自动化）、`cfe53d9`（外部图片边界）、
+>   `61cc824`（#49 characterization 的基线；测试与本文件同 commit 提交）
 > - OpenClaw version: 不适用（虚构本地 browser fixture）
 > - Status: runbook `current automated`；2026-08-12 result `historical pass`；
->   2026-08-13 result `partial`
+>   2026-08-13 #43 result `partial`；2026-08-13 #49 result `historical pass`
 > - Superseded/current applicability: 本文件仍是 Firefox 自动化 runbook；其中每次
 >   运行结果只适用于自己的日期与 commit。2026-08-13 的三轮结果因两次
 >   `DRIVER_QUIT_FAILED` 记为 `partial`，详见
@@ -47,11 +49,26 @@ geckodriver 0.37.0，有界执行三轮完整 suite。三轮的桌面与移动�
 的日期化证据，不把 stock teardown 抖动冒充功能成功或连续全绿，也不替代后续
 CI 结果。
 
+2026-08-13 的 #49 composer 状态迁移 characterization 使用 Node.js 22.22.0、
+Firefox 153.0.1 与 geckodriver 0.37.0，在 `61cc824` 基线上有界执行三轮完整
+suite，三轮均为 2/2 通过，未命中 stock teardown 抖动。桌面场景通过一次性事件
+gate 确认：从 `new:<agent>` 自动创建会话时仅发起一次 session create，draft、
+output intent、待发送附件与 submission scope 迁移到 `session:<record>`；run 被
+accepted 前 output intent 保留，accepted 后才消费；另一会话在该 run 期间产生的
+新 draft 与附件不被 terminal 清除；failed 与 aborted run 保留本会话 draft 和
+附件，retry 不重复上传且复用同一 attachment ID。三轮结束后均未留下 fixture
+附件目录、截图或 fixture 拥有的 listener。
+
+同次探索还发现刷新恢复路径不能记为通过：基线会把 localStorage 中未保存
+status 的 run 还原为 `accepted`，进而以相同 run ID 重放一次 create POST。服务端
+幂等边界避免重复执行，但“只恢复 watcher、不重放 create 请求”仍需独立产品修复；
+本 characterization 没有修改前端，也没有把该路径列入通过范围。
+
 ## 自动化矩阵
 
 | 视口 | 输入能力 | 覆盖 |
 | --- | --- | --- |
-| 桌面 | fine pointer、hover、键盘 | 登录/退出、Origin 与 CSRF 拒绝、会话选择、新建、发送、fork、编辑重发、只读来源、会话级运行锁、停止、上下文 `k` 展示、三点菜单边界；外部图片渲染前后零请求，只有跨主机显式链接可脱敏新标签导航，同主机异端口不可导航 |
+| 桌面 | fine pointer、hover、键盘 | 登录/退出、Origin 与 CSRF 拒绝、会话选择、新建、发送、fork、编辑重发、只读来源、会话级运行锁、停止、上下文 `k` 展示、三点菜单边界；自动建会话的 composer scope 迁移，accepted/failed/aborted 状态消费与保留边界，附件重试复用；外部图片渲染前后零请求，只有跨主机显式链接可脱敏新标签导航，同主机异端口不可导航 |
 | 移动 | 500px 以内、coarse pointer、无 hover | Agent → 会话 → 对话导航、真实点击、44px “本轮需要文件”开关、Enter 换行不发送、三点菜单边界、Escape 关闭并恢复焦点、点击发送 |
 | 两者共享 | 真实 Firefox DOM、网络与 SSE | 安全 Markdown 不执行 HTML/`javascript:`，附件图片只走已认证同源预览，SSE 文本与工具阶段、终态替换、终态前断线后的查询恢复 |
 
