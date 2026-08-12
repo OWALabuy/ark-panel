@@ -18,12 +18,14 @@ making the branch denominator depend on process-profile ordering rather than
 executed behavior.
 
 This measurement setting does not change the ordinary test gate. `npm test`
-still uses Node's default per-file process isolation, and CI runs it separately
-before the coverage job. The single-context coverage run shares the module
-cache and process globals across test files, so it complements rather than
-replaces the normally isolated suite. V8 may still vary by a small number of
-reported branch ranges between otherwise identical runs; every run must
-nevertheless satisfy the unchanged line, branch, and function gates below.
+still uses Node's default per-file process isolation, and CI runs it in a
+separate baseline job. The baseline and coverage jobs are independently
+scheduled and may run in parallel; neither establishes an execution-order
+guarantee. The single-context coverage run shares the module cache and process
+globals across test files, so it complements rather than replaces the normally
+isolated suite. V8 may still vary by a small number of reported branch ranges
+between otherwise identical runs; every run must nevertheless satisfy the
+unchanged line, branch, and function gates below.
 
 ## Scope and thresholds
 
