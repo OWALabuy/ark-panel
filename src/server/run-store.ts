@@ -39,6 +39,17 @@ export interface PublicRunTool { callId: string; name: string; phase: "started" 
 export interface PublicRunStream { revision: number; state: "connecting" | "streaming" | "degraded"; text: string; tools: PublicRunTool[] }
 export interface PublicPanelRun { runId: string; recordId: string; status: PanelRunStatus; sequence: number; createdAt: string; updatedAt: string; startedAt?: string; finishedAt?: string; revision?: string; error?: { code: string; message: string }; canAbort: boolean; stream?: PublicRunStream }
 
+export interface PanelRunStoreInstrumentation {
+  onDirectoryScan?(): void;
+  onRecordRead?(runId: string): void;
+}
+
+interface ActiveRunIndex {
+  byRecordId: Map<string, Set<string>>;
+  recordIdByRunId: Map<string, string>;
+}
+type ActiveRunRecord = Pick<PanelRunRecord, "runId" | "recordId" | "status">;
+
 function validate(value: unknown, expectedRunId?: string): PanelRunRecord {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("run record 格式无效");
   const item = value as Partial<PanelRunRecord>;
@@ -53,7 +64,12 @@ function validate(value: unknown, expectedRunId?: string): PanelRunRecord {
 
 export class PanelRunStore {
   private readonly root: string;
-  constructor(dataRoot: string) { this.root = assertWithin(dataRoot, join(dataRoot, "runs")); }
+  private activeIndex?: ActiveRunIndex;
+  private activeIndexBuild: Promise<PanelRunRecord[]> | undefined;
+  private activeIndexRevision = 0;
+  constructor(dataRoot: string, private readonly instrumentation: PanelRunStoreInstrumentation = {}) {
+    this.root = assertWithin(dataRoot, join(dataRoot, "runs"));
+  }
   async initialize(): Promise<void> {
     await mkdir(this.root, { recursive: true, mode: 0o700 });
     const stat = await lstat(this.root); if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("run store 根目录不安全");
@@ -64,22 +80,108 @@ export class PanelRunStore {
   }
   async get(runId: string): Promise<PanelRunRecord | undefined> {
     try {
-      const path = this.path(runId), stat = await lstat(path);
+      const path = this.path(runId); this.instrumentation.onRecordRead?.(runId); const stat = await lstat(path);
       if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("run record 文件不安全");
       return validate(JSON.parse(await readFile(path, "utf8")), runId);
     } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
   }
   async put(record: PanelRunRecord): Promise<void> {
     await this.initialize();
-    await atomicWrite(this.path(record.runId), JSON.stringify(validate(record, record.runId), null, 2) + "\n");
+    const validated = validate(record, record.runId);
+    const indexed = { runId: validated.runId, recordId: validated.recordId, status: validated.status };
+    await atomicWrite(this.path(record.runId), JSON.stringify(validated, null, 2) + "\n");
+    // The durable run file is authoritative. Never publish an accepted state or remove a terminal
+    // state from the derived index until the atomic write and directory fsync have both succeeded.
+    const pendingBuild = this.activeIndexBuild;
+    if (!this.activeIndex && pendingBuild) {
+      try { await pendingBuild; } catch { /* A later lookup will retry the authoritative scan. */ }
+    }
+    if (this.activeIndex) { this.applyToActiveIndex(indexed); this.activeIndexRevision++; }
   }
   async list(): Promise<PanelRunRecord[]> {
-    await this.initialize(); const result: PanelRunRecord[] = [];
+    await this.initialize();
+    if (!this.activeIndex) return [...await this.ensureActiveIndex()];
+    const revision = this.activeIndexRevision, result = await this.scanRecords();
+    // A concurrent successful put already applied its exact state to the index. Do not replace
+    // that state with a scan that may have started before the write committed.
+    if (revision === this.activeIndexRevision) this.activeIndex = this.buildActiveIndex(result);
+    return result;
+  }
+
+  async activeForRecord(recordId: string): Promise<PanelRunRecord | undefined> {
+    await this.initialize(); await this.ensureActiveIndex();
+    while (true) {
+      const runId = this.activeIndex?.byRecordId.get(recordId)?.values().next().value;
+      if (!runId) return undefined;
+      const record = await this.get(runId);
+      if (record && record.recordId === recordId && !terminalRunStatuses.has(record.status)) return record;
+      // A missing or externally replaced run file cannot remain a false active lock. Normal
+      // mutations already update the index in put(); this only repairs an unexpected stale entry.
+      if (record) this.applyToActiveIndex(record); else this.removeFromActiveIndex(runId);
+      this.activeIndexRevision++;
+    }
+  }
+
+  async activeRecordIds(): Promise<Set<string>> {
+    await this.initialize(); await this.ensureActiveIndex();
+    return new Set(this.activeIndex?.byRecordId.keys() ?? []);
+  }
+
+  private async scanRecords(): Promise<PanelRunRecord[]> {
+    this.instrumentation.onDirectoryScan?.(); const result: PanelRunRecord[] = [];
     for (const name of await readdir(this.root)) {
       if (!name.endsWith(".json")) continue;
       const runId = name.slice(0, -5); result.push((await this.get(runId))!);
     }
     return result;
+  }
+
+  private async ensureActiveIndex(): Promise<PanelRunRecord[]> {
+    if (this.activeIndex) return [];
+    const existing = this.activeIndexBuild;
+    if (existing) return await existing;
+    const build = (async () => {
+      await this.initialize();
+      const records = await this.scanRecords();
+      this.activeIndex = this.buildActiveIndex(records);
+      return records;
+    })();
+    this.activeIndexBuild = build;
+    void build.then(
+      () => { if (this.activeIndexBuild === build) this.activeIndexBuild = undefined; },
+      () => { if (this.activeIndexBuild === build) this.activeIndexBuild = undefined; }
+    );
+    return await build;
+  }
+
+  private buildActiveIndex(records: readonly PanelRunRecord[]): ActiveRunIndex {
+    const index: ActiveRunIndex = { byRecordId: new Map(), recordIdByRunId: new Map() };
+    for (const record of records) this.applyToIndex(index, record);
+    return index;
+  }
+
+  private applyToActiveIndex(record: ActiveRunRecord): void {
+    if (this.activeIndex) this.applyToIndex(this.activeIndex, record);
+  }
+
+  private applyToIndex(index: ActiveRunIndex, record: ActiveRunRecord): void {
+    const previousRecordId = index.recordIdByRunId.get(record.runId);
+    if (previousRecordId) {
+      const previous = index.byRecordId.get(previousRecordId); previous?.delete(record.runId);
+      if (!previous?.size) index.byRecordId.delete(previousRecordId);
+      index.recordIdByRunId.delete(record.runId);
+    }
+    if (terminalRunStatuses.has(record.status)) return;
+    const active = index.byRecordId.get(record.recordId) ?? new Set<string>(); active.add(record.runId);
+    index.byRecordId.set(record.recordId, active); index.recordIdByRunId.set(record.runId, record.recordId);
+  }
+
+  private removeFromActiveIndex(runId: string): void {
+    if (!this.activeIndex) return;
+    const recordId = this.activeIndex.recordIdByRunId.get(runId); if (!recordId) return;
+    const active = this.activeIndex.byRecordId.get(recordId); active?.delete(runId);
+    if (!active?.size) this.activeIndex.byRecordId.delete(recordId);
+    this.activeIndex.recordIdByRunId.delete(runId);
   }
 }
 

@@ -9,14 +9,14 @@ import { ConservativeContextBudget, type ContextBudgetEstimator } from "../domai
 import { ContextBudgetExceededError } from "../domain/context-budget.js";
 import { headerWithContextUsage } from "../domain/context-usage.js";
 import { SessionOperationCoordinator } from "./session-operation.js";
-import { PanelRunStore, publicRun, terminalRunStatuses, type PanelRunRecord, type PublicPanelRun, type PublicRunStream, type PublicRunTool } from "./run-store.js";
+import { PanelRunStore, publicRun, terminalRunStatuses, type PanelRunRecord, type PanelRunStoreInstrumentation, type PublicPanelRun, type PublicRunStream, type PublicRunTool } from "./run-store.js";
 import { GatewayRunError } from "../gateway/cli-client.js";
 import { assignSessionAttachments, garbageCollectAttachments, getSessionAttachment, pruneSessionAttachments,
   readSessionAttachmentBytes, removeSessionAttachments, storeSessionAttachment } from "../storage/attachments.js";
 import { currentTranscriptBranch } from "../domain/branch.js";
 
 interface BridgeRunner { generate(request: BridgeRequest): Promise<BridgeResult>; cleanupOrphanedSession?(request: BridgeOrphanCleanupRequest): Promise<string[]> }
-export interface GenerationConfig { dataRoot: string; runtimeByAgent: ReadonlyMap<string, string>; workspaceByAgent?: ReadonlyMap<string, string>; completedCacheLimit?: number; contextBudget?: ContextBudgetEstimator; operations?: SessionOperationCoordinator }
+export interface GenerationConfig { dataRoot: string; runtimeByAgent: ReadonlyMap<string, string>; workspaceByAgent?: ReadonlyMap<string, string>; completedCacheLimit?: number; contextBudget?: ContextBudgetEstimator; operations?: SessionOperationCoordinator; runStoreInstrumentation?: PanelRunStoreInstrumentation }
 interface InternalRunStream { public: PublicRunStream; lastAssistantSeq: number; toolSeq: Map<string, number> }
 const MAX_GATEWAY_ATTACHMENT_BYTES = 15 * 1024 * 1024;
 
@@ -84,7 +84,7 @@ export class PanelGenerationApi implements GenerationApi {
   constructor(private readonly bridge: BridgeRunner, private readonly config: GenerationConfig) {
     if (config.completedCacheLimit !== undefined && (!Number.isInteger(config.completedCacheLimit) || config.completedCacheLimit < 1)) throw new Error("completedCacheLimit 必须是正整数");
     this.operations = config.operations ?? new SessionOperationCoordinator();
-    this.runStore = new PanelRunStore(config.dataRoot);
+    this.runStore = new PanelRunStore(config.dataRoot, config.runStoreInstrumentation);
   }
   completedCacheSize(): number { return this.completed.size; }
 
@@ -135,7 +135,7 @@ export class PanelGenerationApi implements GenerationApi {
   /** Reclaim abandoned uploads and references not represented by a durable transcript.
    * Sessions with an active run are skipped so maintenance cannot race materialization. */
   async maintainAttachments(pruneOrphans = false): Promise<void> {
-    const activeRecords = new Set((await this.runStore.list()).filter(record => !terminalRunStatuses.has(record.status)).map(record => record.recordId));
+    const activeRecords = await this.runStore.activeRecordIds();
     const pendingBefore = new Date(Date.now() - 24 * 60 * 60 * 1000);
     for (const agentId of this.config.runtimeByAgent.keys()) {
       for (const session of await listPanelSessions(this.config.dataRoot, agentId)) {
@@ -171,7 +171,7 @@ export class PanelGenerationApi implements GenerationApi {
     try {
       const existing = await this.runStore.get(runId);
       if (existing) { if (existing.recordId !== recordId || existing.requestHash !== requestHash) throw new Error("IDEMPOTENCY_KEY_REUSED"); return { ...this.visible(existing), newlyCreated: false }; }
-      const active = (await this.runStore.list()).find(item => item.recordId === recordId && !terminalRunStatuses.has(item.status));
+      const active = await this.runStore.activeForRecord(recordId);
       if (active) throw new Error("SESSION_BUSY");
       const now = new Date().toISOString(), plannedUserEntryId = randomUUID();
       accepted = { version: 1, runId, recordId, requestHash, sequence: 1, status: "accepted", createdAt: now, updatedAt: now, message,
@@ -191,7 +191,7 @@ export class PanelGenerationApi implements GenerationApi {
   }
 
   async activeForRecord(recordId: string): Promise<PublicPanelRun | undefined> {
-    await this.initialize(); const active = (await this.runStore.list()).find(item => item.recordId === recordId && !terminalRunStatuses.has(item.status)); return active ? this.visible(active) : undefined;
+    await this.initialize(); const active = await this.runStore.activeForRecord(recordId); return active ? this.visible(active) : undefined;
   }
 
   async subscribe(runId: string, listener: (run: PublicPanelRun) => void): Promise<(() => void) | undefined> {

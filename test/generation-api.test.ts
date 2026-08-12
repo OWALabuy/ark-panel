@@ -9,6 +9,7 @@ import { PanelGenerationApi } from "../src/server/generation-api.js";
 import { ConservativeContextBudget } from "../src/domain/context-budget.js";
 import type { BridgeRequest } from "../src/gateway/adapter.js";
 import { listSessionAttachments, readSessionAttachmentBytes, storeSessionAttachment } from "../src/storage/attachments.js";
+import { PanelRunStore, type PanelRunRecord } from "../src/server/run-store.js";
 import { deferred, tempFixture, waitFor, withTimeout } from "./test-helpers.js";
 
 test("附件原样交给 OpenClaw，输入与本轮模型产出作为消息块持久化", async t => {
@@ -234,6 +235,52 @@ test("后台 run 先持久化再快速返回，持久幂等、会话互斥并在
   gate.resolve();await waitFor(async()=>(await api.get(runId))?.status==="completed","background run completion");
   assert.equal((await api.get(runId))?.status,"completed");const terminal=JSON.parse(await readFile(join(root,"runs",`${runId}.json`),"utf8"));
   assert.equal("message" in terminal,false);assert.equal("requestOutputs" in terminal,false);assert.equal("stagedEntries" in terminal,false);assert.equal(terminal.gatewayRunId,"gateway");
+});
+
+test("大量终态 run 不增加创建、活跃查询或附件维护的目录扫描", async t => {
+  const root = await mkdtemp(join(tmpdir(), "generation-active-index-")); t.after(() => rm(root, { recursive: true, force: true }));
+  const metadata = await createPanelSession(root, "claude", { header: { type: "session" }, entries: [] });
+  const seed = new PanelRunStore(root), now = "2026-08-12T00:00:00.000Z";
+  for (let index = 1; index <= 96; index++) {
+    const id = `10000000-0000-4000-8000-${index.toString(16).padStart(12, "0")}`;
+    const record: PanelRunRecord = { version: 1, runId: id, recordId: `terminal-${index}`, requestHash: `hash-${index}`,
+      sequence: 2, status: "completed", createdAt: now, updatedAt: now, finishedAt: now };
+    await seed.put(record);
+  }
+  const observed = { scans: 0, reads: 0, readRunIds: [] as string[] };
+  const runStoreInstrumentation = {
+    onDirectoryScan() { observed.scans++; },
+    onRecordRead(id: string) { observed.reads++; observed.readRunIds.push(id); }
+  };
+  const started = deferred(), release = deferred(); t.after(() => release.resolve());
+  const api = new PanelGenerationApi({ async generate(request) {
+    started.resolve(); await release.promise;
+    return { runId: request.idempotencyKey, sessionId: "temp", entries: [
+      { type: "message", id: "answer", parentId: request.latestUserEntryId, message: { role: "assistant", content: "ok" } }
+    ] };
+  } }, { dataRoot: root, runtimeByAgent: new Map([["claude", "runtime"]]), runStoreInstrumentation });
+
+  await api.initialize();
+  assert.deepEqual({ scans: observed.scans, reads: observed.reads }, { scans: 1, reads: 96 });
+  observed.readRunIds.length = 0;
+  const runId = "20202020-2020-4020-8020-202020202020";
+  await api.create(metadata.recordId, "hello", runId); await withTimeout(started.promise, "indexed generation start");
+  assert.equal(observed.scans, 1); assert.ok(observed.readRunIds.length > 0);
+  assert.deepEqual(new Set(observed.readRunIds), new Set([runId]));
+
+  const beforeActiveLookup = observed.reads;
+  assert.equal((await api.activeForRecord(metadata.recordId))?.runId, runId);
+  assert.equal(observed.reads, beforeActiveLookup + 1);
+  await api.maintainAttachments(); assert.equal(observed.reads, beforeActiveLookup + 1);
+  const competingRunIds = Array.from({ length: 24 }, (_, index) =>
+    `21212121-2121-4121-8121-${(index + 1).toString(16).padStart(12, "0")}`);
+  const competing = await Promise.allSettled(competingRunIds.map((id, index) => api.create(metadata.recordId, `other-${index}`, id)));
+  assert.equal(competing.every(result => result.status === "rejected" && /SESSION_BUSY/.test(String(result.reason))), true);
+  assert.deepEqual(new Set(observed.readRunIds), new Set([runId, ...competingRunIds])); assert.equal(observed.scans, 1);
+
+  release.resolve();
+  await waitFor(async () => await api.activeForRecord(metadata.recordId) === undefined, "indexed run completion");
+  assert.equal(observed.scans, 1);
 });
 
 test("后台 run 将停止未确认记录为 failed 而不是 aborted", async t => {
