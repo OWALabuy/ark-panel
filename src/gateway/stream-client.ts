@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { BlockList, isIP } from "node:net";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { SUPPORTED_OPENCLAW_VERSION, type GatewayAttachment } from "./adapter.js";
@@ -7,6 +8,10 @@ import { SUPPORTED_OPENCLAW_VERSION, type GatewayAttachment } from "./adapter.js
 const MAX_TEXT_BYTES = 2 * 1024 * 1024;
 const MAX_FRAME_BYTES = 4 * 1024 * 1024;
 const DEFAULT_URL = "ws://127.0.0.1:18789";
+const LOOPBACK_ENDPOINTS = new BlockList();
+LOOPBACK_ENDPOINTS.addSubnet("127.0.0.0", 8, "ipv4");
+LOOPBACK_ENDPOINTS.addAddress("::1", "ipv6");
+LOOPBACK_ENDPOINTS.addSubnet("::ffff:127.0.0.0", 104, "ipv6");
 const GATEWAY_OPERATOR_ROLE = "operator";
 const GATEWAY_OPERATOR_SCOPES = ["operator.read", "operator.write", "operator.admin"] as const;
 
@@ -443,20 +448,74 @@ export class OpenClawStreamObserver implements GatewayControlTransport {
 
 interface GatewayAuth { url: string; token?: string; password?: string }
 
+function trimmedString(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim(); return normalized || undefined;
+}
+
+function gatewayEndpoint(value: string): string | undefined {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "ws:" && url.protocol !== "wss:") return undefined;
+    let host = url.hostname.toLowerCase();
+    if (host.startsWith("[") && host.endsWith("]")) host = host.slice(1, -1);
+    if (host.endsWith(".")) host = host.slice(0, -1);
+    const family = isIP(host);
+    if (host === "localhost" || family !== 0 && LOOPBACK_ENDPOINTS.check(host, family === 4 ? "ipv4" : "ipv6")) host = "loopback";
+    const port = url.port || (url.protocol === "wss:" ? "443" : "80");
+    return `${url.protocol}//${host}:${port}`;
+  } catch { return undefined; }
+}
+
+function sameGatewayEndpoint(left: string, right: string): boolean {
+  const leftEndpoint = gatewayEndpoint(left), rightEndpoint = gatewayEndpoint(right);
+  return Boolean(leftEndpoint && rightEndpoint && leftEndpoint === rightEndpoint);
+}
+
+interface ExplicitCredentials { declared: boolean; token?: string; password?: string }
+
+function localGatewayAuth(mode: unknown, url: string, configToken: string | undefined, configPassword: string | undefined,
+  explicit: ExplicitCredentials): GatewayAuth | undefined {
+  let effectiveMode = mode;
+  if (effectiveMode === undefined) {
+    if (Boolean(configToken) === Boolean(configPassword)) return undefined;
+    effectiveMode = configPassword ? "password" : "token";
+  }
+  if (effectiveMode === "none") return undefined;
+  if (effectiveMode === "token") {
+    const token = explicit.declared ? explicit.token : configToken; return token ? { url, token } : undefined;
+  }
+  if (effectiveMode === "password" || effectiveMode === "trusted-proxy") {
+    const password = explicit.declared ? explicit.password : configPassword; return password ? { url, password } : undefined;
+  }
+  return undefined;
+}
+
 export async function loadGatewayStreamAuth(env: NodeJS.ProcessEnv = process.env, allowWhenStreamingDisabled = false): Promise<GatewayAuth | undefined> {
   if (!allowWhenStreamingDisabled && env.PANEL_OPENCLAW_STREAMING === "0") return undefined;
-  const explicitUrl = nonEmpty(env.PANEL_OPENCLAW_GATEWAY_URL), explicitToken = nonEmpty(env.PANEL_OPENCLAW_GATEWAY_TOKEN), explicitPassword = nonEmpty(env.PANEL_OPENCLAW_GATEWAY_PASSWORD);
-  const hasExplicitCredential = env.PANEL_OPENCLAW_GATEWAY_TOKEN !== undefined || env.PANEL_OPENCLAW_GATEWAY_PASSWORD !== undefined;
-  if (hasExplicitCredential) {
-    if (!explicitToken && !explicitPassword) return undefined;
-    return { url: explicitUrl ?? DEFAULT_URL, ...(explicitToken ? { token: explicitToken } : {}), ...(explicitPassword ? { password: explicitPassword } : {}) };
-  }
+  const explicitUrl = trimmedString(env.PANEL_OPENCLAW_GATEWAY_URL);
+  const explicitToken = trimmedString(env.PANEL_OPENCLAW_GATEWAY_TOKEN), explicitPassword = trimmedString(env.PANEL_OPENCLAW_GATEWAY_PASSWORD);
+  const explicit: ExplicitCredentials = { declared: env.PANEL_OPENCLAW_GATEWAY_TOKEN !== undefined || env.PANEL_OPENCLAW_GATEWAY_PASSWORD !== undefined,
+    ...(explicitToken ? { token: explicitToken } : {}), ...(explicitPassword ? { password: explicitPassword } : {}) };
+  if (explicit.declared && !explicit.token && !explicit.password) return undefined;
   const path = resolve(env.OPENCLAW_CONFIG_PATH ?? env.OPENCLAW_CONFIG ?? `${env.HOME ?? homedir()}/.openclaw/openclaw.json`);
-  try {
-    const config = object(JSON.parse(await readFile(path, "utf8"))), gateway = object(config?.gateway), remote = object(gateway?.remote), auth = object(gateway?.auth);
-    const remoteMode = gateway?.mode === "remote", url = explicitUrl ?? (remoteMode ? nonEmpty(remote?.url) : undefined) ?? DEFAULT_URL;
-    const token = nonEmpty(remoteMode ? remote?.token : auth?.token), password = nonEmpty(remoteMode ? remote?.password : auth?.password);
-    if (!token && !password) return undefined;
-    return { url, ...(token ? { token } : {}), ...(password ? { password } : {}) };
-  } catch { return undefined; }
+  let gateway: Record<string, unknown> | undefined;
+  try { gateway = object(object(JSON.parse(await readFile(path, "utf8")))?.gateway); } catch { return undefined; }
+  if (gateway?.mode !== undefined && gateway.mode !== "local" && gateway.mode !== "remote") return undefined;
+  const remote = object(gateway?.remote), auth = object(gateway?.auth), remoteMode = gateway?.mode === "remote";
+  const configuredPort = typeof gateway?.port === "number" && Number.isInteger(gateway.port) && gateway.port > 0 && gateway.port <= 65_535 ? gateway.port : 18_789;
+  const configuredUrl = remoteMode ? trimmedString(remote?.url) ?? DEFAULT_URL : `ws://127.0.0.1:${configuredPort}`;
+  const url = explicitUrl ?? configuredUrl;
+  if (!gatewayEndpoint(url)) return undefined;
+  const independentEndpoint = Boolean(explicitUrl && !sameGatewayEndpoint(explicitUrl, configuredUrl));
+  if (independentEndpoint) {
+    if (!explicit.declared || !explicit.token && !explicit.password) return undefined;
+    return { url, ...(explicit.token ? { token: explicit.token } : {}), ...(explicit.password ? { password: explicit.password } : {}) };
+  }
+  if (remoteMode) {
+    const token = explicit.declared ? explicit.token : trimmedString(remote?.token), password = explicit.declared ? explicit.password : trimmedString(remote?.password);
+    return token || password ? { url, ...(token ? { token } : {}), ...(password ? { password } : {}) } : undefined;
+  }
+  const configToken = trimmedString(auth?.token), configPassword = trimmedString(auth?.password);
+  return localGatewayAuth(auth?.mode, url, configToken, configPassword, explicit);
 }

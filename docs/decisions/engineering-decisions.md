@@ -74,7 +74,7 @@ API 统一位于 `/api/v1`。成功响应是 `{ "data": ... }`；失败响应是
 
 scope 集合只描述 Gateway 连接具备的上游能力，不替代面板自己的 typed API、登录、CSRF 和 default-deny allowlist。尤其是持有 `operator.admin` 会令内部命令满足 owner 判定，因此普通消息路径继续拒绝所有 `/` 文本，D 类管理命令也不因连接有 admin scope 而获得面板入口。
 
-这是 trusted-local、single-operator 部署中的纵深 guardrail，不是强多租户隔离边界。共享 token/password 按 owner 级 secret 管理，只能存在于服务端环境或 OpenClaw 配置中，不下发浏览器；Gateway 默认只经 loopback 访问，显式远程配置也只能指向同一所有者控制的可信私网，不得直接暴露到公网。上游即使允许 direct-loopback `auth.mode=none`，面板也不以无 secret 身份建立这条 admin 连接：生产必须解析出至少一个非空 token/password，显式空白环境覆盖项不得回落到磁盘配置。远程端点不继承 direct-loopback self-pairing，必须另行完成上游配对与隔离验收。当前凭据已经服务于同一 owner 连接，scope 是握手契约而非本次需要迁移的面板数据，因此本批无需重新签发凭据。
+这是 trusted-local、single-operator 部署中的纵深 guardrail，不是强多租户隔离边界。共享 token/password 按 owner 级 secret 管理，只能存在于服务端环境或 OpenClaw 配置中，不下发浏览器；Gateway 默认只经 loopback 访问，显式远程配置也只能指向同一所有者控制的可信私网，不得直接暴露到公网。上游即使允许 direct-loopback `auth.mode=none`，面板也无条件拒绝由同一本机端点的该 mode 建立 admin 连接，配置遗留 secret 或面板环境 secret 均不得重新激活它。`token` / `password` mode 只使用对应字段，`trusted-proxy` 仅使用同机直连 password fallback；mode 未配置时恰有一种配置凭据才可推导，两种同时存在因歧义 fail closed。声明面板环境凭据时，只覆盖已知 mode 选择的值；整组全为空白必须拒绝且不得回落。`gateway.remote` 凭据独立于本机 `gateway.auth.mode`。只有显式面板 URL 改变 WebSocket origin 并同时提供非空面板凭据时，才将两者作为另一端点的操作员断言；URL 单独变化不能转发配置 secret。该断言不改变目标 Gateway 的服务端 mode，必须与目标 token/password 配置同步发布并留待 #48 验证。远程端点不继承 direct-loopback self-pairing，必须另行完成上游配对与隔离验收。当前凭据已经服务于同一 owner 连接，scope 是握手契约而非本次需要迁移的面板数据，因此本批无需重新签发凭据。
 
 凭据轮换必须把 Gateway 与面板视为同一个发布单元：先准备新 secret，同步更新两端，再重启 Gateway 与面板并确认精确 scope 握手；不得让新旧 secret 长期并存。若轮换需回滚，则在两端恢复受保护的上一份 secret 并再次同步重启。部署本批代码只需正常重启面板以启用握手强制；不改存储格式、不改 OpenClaw pin。若精确 scope 校验与既有部署不兼容，回滚到上一版面板即可，凭据与 OpenClaw 配置无需转换，同时保留版本门禁，不能以接受未知或额外 scope 作为临时绕过。
 

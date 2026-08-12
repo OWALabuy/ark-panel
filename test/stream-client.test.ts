@@ -17,8 +17,11 @@ test("stream parser accepts full text snapshots and tool lifecycle while rejecti
   assert.equal(normalizeGatewayStreamEvent("chat", { runId: "run", sessionKey: "agent:a:s", state: "delta", message: { content: "x".repeat(2 * 1024 * 1024 + 1) } }), undefined);
 });
 
-test("disabling preview does not disable the server control credential", async () => {
+test("disabling preview does not disable the server control credential", async t => {
+  const root = await tempFixture(t, "gateway-preview-contract-"), configPath = join(root, "openclaw.json");
+  await writeFile(configPath, JSON.stringify({ gateway: { auth: { mode: "token", token: "fixture-config-token" } } }));
   const env = {
+    OPENCLAW_CONFIG_PATH: configPath,
     PANEL_OPENCLAW_STREAMING: "0",
     PANEL_OPENCLAW_GATEWAY_URL: "ws://127.0.0.1:18789",
     PANEL_OPENCLAW_GATEWAY_TOKEN: "fixture-control-token"
@@ -30,27 +33,138 @@ test("disabling preview does not disable the server control credential", async (
   });
 });
 
-test("server control auth requires an explicit non-blank secret and never accepts auth-none", async t => {
+test("server control auth follows the pinned mode resolver and never accepts auth-none", async t => {
   const root = await tempFixture(t, "gateway-auth-contract-"), configPath = join(root, "openclaw.json");
-  await writeFile(configPath, JSON.stringify({ gateway: { auth: { mode: "none" } } }));
-  const authNone = await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath }, true);
-  let sockets = 0;
-  const connection = authNone ? new OpenClawStreamObserver({ ...authNone, webSocketFactory: () => { sockets++; throw new Error("must not create an admin socket"); } }) : undefined;
-  assert.equal(authNone, undefined);
-  await assert.rejects(resolveGatewayControlTransport(connection).request("status", {}), error =>
-    error instanceof GatewayControlError && error.code === "GATEWAY_TRANSPORT_UNAVAILABLE");
-  assert.equal(sockets, 0);
+  async function assertNoAdminSocket(auth: Awaited<ReturnType<typeof loadGatewayStreamAuth>>): Promise<void> {
+    let sockets = 0;
+    const connection = auth ? new OpenClawStreamObserver({ ...auth,
+      webSocketFactory: () => { sockets++; throw new Error("must not create an admin socket"); } }) : undefined;
+    assert.equal(auth, undefined);
+    await assert.rejects(resolveGatewayControlTransport(connection).request("status", {}), error =>
+      error instanceof GatewayControlError && error.code === "GATEWAY_TRANSPORT_UNAVAILABLE" &&
+      error.message === "GATEWAY_TRANSPORT_UNAVAILABLE" && !error.message.includes("fixture"));
+    assert.equal(sockets, 0);
+  }
 
-  await writeFile(configPath, JSON.stringify({ gateway: { auth: { mode: "token", token: "config-token", password: "config-password" } } }));
-  assert.deepEqual(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath }, true), {
-    url: "ws://127.0.0.1:18789", token: "config-token", password: "config-password"
+  const rejectedNoneConfigs = [
+    { mode: "none" },
+    { mode: "none", token: "fixture-stale-token" },
+    { mode: "none", password: "fixture-stale-password" },
+    { mode: "none", token: "fixture-stale-token", password: "fixture-stale-password" }
+  ];
+  for (const authConfig of rejectedNoneConfigs) {
+    await writeFile(configPath, JSON.stringify({ gateway: { auth: authConfig } }));
+    await assertNoAdminSocket(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath }, true));
+  }
+
+  const configCases = [
+    { auth: { mode: "token", token: " config-token ", password: "stale-password" }, expected: { token: "config-token" } },
+    { auth: { mode: "password", token: "stale-token", password: " config-password " }, expected: { password: "config-password" } },
+    { auth: { mode: "trusted-proxy", token: "stale-token", password: " proxy-password " }, expected: { password: "proxy-password" } },
+    { auth: { token: " inferred-token " }, expected: { token: "inferred-token" } },
+    { auth: { password: " inferred-password " }, expected: { password: "inferred-password" } },
+    { auth: { token: "ambiguous-token", password: "ambiguous-password" }, expected: undefined },
+    { auth: { mode: "token", password: "wrong-mode-password" }, expected: undefined },
+    { auth: { mode: "password", token: "wrong-mode-token" }, expected: undefined },
+    { auth: { mode: "unknown", token: "unknown-mode-token" }, expected: undefined }
+  ];
+  for (const configCase of configCases) {
+    await writeFile(configPath, JSON.stringify({ gateway: { auth: configCase.auth } }));
+    const expected = configCase.expected ? { url: "ws://127.0.0.1:18789", ...configCase.expected } : undefined;
+    assert.deepEqual(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath }, true), expected);
+  }
+  await writeFile(configPath, JSON.stringify({ gateway: { mode: "unknown", auth: { mode: "token", token: "fixture-token" } } }));
+  await assertNoAdminSocket(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath }, true));
+
+  for (const remoteCase of [
+    { credentials: { token: " remote-token " }, expected: { token: "remote-token" } },
+    { credentials: { password: " remote-password " }, expected: { password: "remote-password" } },
+    { credentials: { token: " remote-token ", password: " remote-password " },
+      expected: { token: "remote-token", password: "remote-password" } }
+  ]) {
+    await writeFile(configPath, JSON.stringify({ gateway: { mode: "remote", auth: {
+      mode: "none", token: "local-stale-token", password: "local-stale-password"
+    }, remote: { url: "wss://gateway.fixture.invalid", ...remoteCase.credentials } } }));
+    assert.deepEqual(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath }, true), {
+      url: "wss://gateway.fixture.invalid", ...remoteCase.expected
+    });
+  }
+  assert.deepEqual(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath,
+    PANEL_OPENCLAW_GATEWAY_TOKEN: " explicit-remote-token " }, true), {
+    url: "wss://gateway.fixture.invalid", token: "explicit-remote-token"
   });
   assert.equal(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath,
-    PANEL_OPENCLAW_GATEWAY_TOKEN: "  ", PANEL_OPENCLAW_GATEWAY_PASSWORD: "\t" }, true), undefined);
+    PANEL_OPENCLAW_GATEWAY_URL: "wss://other-gateway.fixture.invalid" }, true), undefined);
+
+  await writeFile(configPath, JSON.stringify({ gateway: { auth: { mode: "token", token: "must-not-fallback" } } }));
+  for (const blankOverride of [
+    { PANEL_OPENCLAW_GATEWAY_TOKEN: "  " },
+    { PANEL_OPENCLAW_GATEWAY_PASSWORD: "\t" },
+    { PANEL_OPENCLAW_GATEWAY_TOKEN: "  ", PANEL_OPENCLAW_GATEWAY_PASSWORD: "\t" }
+  ]) assert.equal(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath, ...blankOverride }, true), undefined);
   assert.deepEqual(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath,
-    PANEL_OPENCLAW_GATEWAY_URL: "ws://127.0.0.1:19999", PANEL_OPENCLAW_GATEWAY_PASSWORD: "explicit-password" }, true), {
-    url: "ws://127.0.0.1:19999", password: "explicit-password"
+    PANEL_OPENCLAW_GATEWAY_TOKEN: " explicit-local-token " }, true), {
+    url: "ws://127.0.0.1:18789", token: "explicit-local-token"
   });
+  assert.deepEqual(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath,
+    PANEL_OPENCLAW_GATEWAY_TOKEN: " explicit-local-token ", PANEL_OPENCLAW_GATEWAY_PASSWORD: "ignored-password" }, true), {
+    url: "ws://127.0.0.1:18789", token: "explicit-local-token"
+  });
+  assert.equal(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath,
+    PANEL_OPENCLAW_GATEWAY_PASSWORD: "wrong-mode-password" }, true), undefined);
+  assert.equal(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath,
+    PANEL_OPENCLAW_GATEWAY_URL: "wss://independent.fixture.invalid" }, true), undefined);
+
+  for (const localOverrideCase of [
+    { auth: { mode: "password", password: "old-password" }, expected: { password: "new-password" } },
+    { auth: { mode: "trusted-proxy", password: "old-password" }, expected: { password: "new-password" } },
+    { auth: { password: "old-password" }, expected: { password: "new-password" } }
+  ]) {
+    await writeFile(configPath, JSON.stringify({ gateway: { auth: localOverrideCase.auth } }));
+    assert.deepEqual(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath,
+      PANEL_OPENCLAW_GATEWAY_TOKEN: "ignored-token", PANEL_OPENCLAW_GATEWAY_PASSWORD: " new-password " }, true), {
+      url: "ws://127.0.0.1:18789", ...localOverrideCase.expected
+    });
+  }
+  await writeFile(configPath, JSON.stringify({ gateway: { auth: { token: "ambiguous-token", password: "ambiguous-password" } } }));
+  assert.equal(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath,
+    PANEL_OPENCLAW_GATEWAY_TOKEN: "cannot-resolve-ambiguity" }, true), undefined);
+
+  await writeFile(configPath, JSON.stringify({ gateway: { auth: {
+    mode: "none", token: "fixture-stale-token", password: "fixture-stale-password"
+  } } }));
+  for (const sameEndpointOverride of [
+    { PANEL_OPENCLAW_GATEWAY_TOKEN: "fixture-env-token" },
+    { PANEL_OPENCLAW_GATEWAY_PASSWORD: "fixture-env-password" },
+    { PANEL_OPENCLAW_GATEWAY_TOKEN: "fixture-env-token", PANEL_OPENCLAW_GATEWAY_PASSWORD: "fixture-env-password" },
+    { PANEL_OPENCLAW_GATEWAY_URL: "ws://localhost:18789/alternate", PANEL_OPENCLAW_GATEWAY_TOKEN: "fixture-env-token" },
+    { PANEL_OPENCLAW_GATEWAY_URL: "ws://127.0.0.2:18789", PANEL_OPENCLAW_GATEWAY_TOKEN: "fixture-env-token" },
+    { PANEL_OPENCLAW_GATEWAY_URL: "ws://[::1]:18789", PANEL_OPENCLAW_GATEWAY_TOKEN: "fixture-env-token" },
+    { PANEL_OPENCLAW_GATEWAY_URL: "ws://[::ffff:127.0.0.1]:18789", PANEL_OPENCLAW_GATEWAY_TOKEN: "fixture-env-token" }
+  ]) await assertNoAdminSocket(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath, ...sameEndpointOverride }, true));
+
+  await writeFile(configPath, JSON.stringify({ gateway: { port: 19998, auth: {
+    mode: "none", token: "fixture-stale-token"
+  } } }));
+  await assertNoAdminSocket(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath,
+    PANEL_OPENCLAW_GATEWAY_URL: "ws://localhost:19998/path", PANEL_OPENCLAW_GATEWAY_TOKEN: "fixture-env-token" }, true));
+  assert.deepEqual(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath,
+    PANEL_OPENCLAW_GATEWAY_URL: "ws://127.0.0.1:19999", PANEL_OPENCLAW_GATEWAY_TOKEN: " explicit-token " }, true), {
+    url: "ws://127.0.0.1:19999", token: "explicit-token"
+  });
+  assert.deepEqual(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath,
+    PANEL_OPENCLAW_GATEWAY_URL: "ws://127.0.0.1:20000", PANEL_OPENCLAW_GATEWAY_PASSWORD: " explicit-password " }, true), {
+    url: "ws://127.0.0.1:20000", password: "explicit-password"
+  });
+  assert.deepEqual(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath,
+    PANEL_OPENCLAW_GATEWAY_URL: "wss://independent.fixture.invalid", PANEL_OPENCLAW_GATEWAY_TOKEN: "explicit-token",
+    PANEL_OPENCLAW_GATEWAY_PASSWORD: "explicit-password" }, true), {
+    url: "wss://independent.fixture.invalid", token: "explicit-token", password: "explicit-password"
+  });
+
+  await writeFile(configPath, "{not-json");
+  await assertNoAdminSocket(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath,
+    PANEL_OPENCLAW_GATEWAY_URL: "wss://independent.fixture.invalid", PANEL_OPENCLAW_GATEWAY_TOKEN: "fixture-env-token" }, true));
 });
 
 test("missing server control credentials select a stable fail-closed transport", async () => {
