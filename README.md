@@ -51,7 +51,7 @@ Legend: ✅ available · 🚧 scheduled · 💡 candidate (not scheduled) · ⛔
 | Access | Local account login and logout | ✅ | Slow password hashing, secure session cookies, CSRF and Host/Origin checks, login rate limiting |
 | Sessions | Browse active, reset-archive, and panel-owned sessions across agents | ✅ | OpenClaw source transcripts remain read-only |
 | Sessions | Create and continue panel-owned sessions | ✅ | Generation uses a dedicated, channel-free runtime for each agent |
-| Sessions | Full-text search and source/agent filtering | ✅ | Search includes archived sessions; the current view controls which results are shown |
+| Sessions | Full-text search within the selected agent | ✅ | Search covers both the regular and archive views; the current view determines which results are shown |
 | Sessions | Rename, archive, and restore any session source | ✅ | Read-only sources use panel-owned metadata sidecars |
 | Sessions | Permanently delete panel sessions / hide read-only sessions | ✅ | Panel sessions require archive plus explicit confirmation; OpenClaw source files are never deleted |
 | Sessions | Pin and group sessions by project | ✅ | Accessible quick menu assigns existing groups or creates one inline; active and archived sessions share the catalog, groups remain locally collapsible |
