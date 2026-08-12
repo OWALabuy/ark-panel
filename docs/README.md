@@ -16,6 +16,10 @@
 
 - [`operations/deployment-and-backup.md`](operations/deployment-and-backup.md)
 
+## Engineering quality
+
+- [`coverage.md`](coverage.md): executable Node 22 coverage scope, thresholds, exclusions, and known boundaries.
+
 ## Acceptance evidence
 
 The documents under [`testing/`](testing/) record browser, runtime, isolation, durability, and live-session acceptance work. Dated results describe the environment at the time they were run; they are evidence, not timeless product guarantees.

@@ -100,7 +100,10 @@ $$
 npm ci
 npm run check:frontend
 npm test
+npm run test:coverage
 ```
+
+可执行的覆盖率范围、阈值、排除项和浏览器边界见[覆盖率基线](docs/coverage.md)。
 
 生成密码哈希:
 

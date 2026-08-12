@@ -100,7 +100,10 @@ The appearance, sidebar, avatar, title, conversation-status, background-completi
 npm ci
 npm run check:frontend
 npm test
+npm run test:coverage
 ```
+
+The executable coverage scope, thresholds, exclusions, and browser boundary are documented in the [coverage baseline](docs/coverage.md).
 
 Generate a password hash:
 

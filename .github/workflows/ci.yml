@@ -43,6 +43,40 @@ jobs:
       - name: Build and test
         run: npm test
 
+  coverage:
+    name: Node 22 coverage baseline
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node 22
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run coverage baseline
+        run: npm run test:coverage
+
+      - name: Upload coverage reports
+        if: ${{ !cancelled() && hashFiles('coverage/lcov.info') != '' && hashFiles('coverage/summary.json') != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: node-22-coverage
+          path: |
+            coverage/lcov.info
+            coverage/summary.json
+          if-no-files-found: error
+          retention-days: 14
+
   deployment-fixture:
     name: Deployment fixture
     runs-on: ubuntu-latest
