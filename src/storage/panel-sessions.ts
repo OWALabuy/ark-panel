@@ -207,7 +207,7 @@ async function inspectPublishedRecord(root: string, agentId: string, recordId: s
 
 async function publishPanelSession(dataRoot: string, agentId: string, document: TranscriptDocument,
   source?: { parentRecordId?: string; forkedFromMessageId?: string; recordId?: string; createdAt?: string; title?: string; project?: string },
-  options: PanelSessionPublishOptions = {}, attachmentIndex?: SessionAttachmentIndex): Promise<PanelMetadata> {
+  options: PanelSessionPublishOptions = {}, attachmentIndex?: SessionAttachmentIndex): Promise<ScannedPanelSession> {
   const recordId = source?.recordId ?? newPanelRecordId(); const createdAt = source?.createdAt ?? new Date().toISOString();
   opaqueComponent(agentId, "agentId"); opaqueComponent(recordId, "recordId");
   if (attachmentIndex && (attachmentIndex.version !== 1 || attachmentIndex.agentId !== agentId || attachmentIndex.recordId !== recordId || !attachmentIndex.references.length)) throw new Error("fork 附件索引与目标会话不一致");
@@ -221,15 +221,16 @@ async function publishPanelSession(dataRoot: string, agentId: string, document: 
     catch (error) { if (!isMissing(error)) throw error; }
     const staging = assertWithin(agentRoot, join(agentRoot, `${PANEL_SESSION_STAGING_PREFIX}${randomUUID()}`));
     await mkdir(staging, { mode: 0o700 }); assertPrivateDirectory(await lstat(staging), "panel staging");
-    const write = async (name: string, data: string, writeStep: PanelSessionPublishStep, syncStep: PanelSessionPublishStep) => {
+    const write = async (name: string, data: string, writeStep: PanelSessionPublishStep, syncStep: PanelSessionPublishStep): Promise<Stats> => {
       const handle = await open(join(staging, name), "wx", 0o600);
       try {
         await options.beforeStep?.(writeStep); await handle.writeFile(data, "utf8");
         await options.beforeStep?.(syncStep); await handle.sync();
+        return await handle.stat();
       } finally { await handle.close(); }
     };
-    await write("metadata.json", JSON.stringify(metadata, null, 2) + "\n", "metadata-write", "metadata-sync");
-    await write("transcript.jsonl", serializeTranscript(document), "transcript-write", "transcript-sync");
+    const metadataStat = await write("metadata.json", JSON.stringify(metadata, null, 2) + "\n", "metadata-write", "metadata-sync");
+    const transcriptStat = await write("transcript.jsonl", serializeTranscript(document), "transcript-write", "transcript-sync");
     if (attachmentIndex) await write("attachments.json", JSON.stringify(attachmentIndex, null, 2) + "\n", "attachments-write", "attachments-sync");
     await options.beforeStep?.("staging-directory-sync"); await syncDirectory(staging);
     try { await lstat(directory); throw new Error("PANEL_SESSION_EXISTS"); }
@@ -241,14 +242,22 @@ async function publishPanelSession(dataRoot: string, agentId: string, document: 
       catch (rollbackError) { throw new AggregateError([error, rollbackError], "PANEL_SESSION_PUBLISH_DURABILITY_UNCERTAIN"); }
       throw error;
     }
-    return metadata;
+    return { metadata, document, revision: `${transcriptStat.size}:${transcriptStat.mtimeMs}`,
+      updatedAt: transcriptStat.mtime.toISOString(),
+      fingerprint: `${statFingerprint(metadataStat)}|${statFingerprint(transcriptStat)}` };
   });
 }
 
 export async function createPanelSession(dataRoot: string, agentId: string, document: TranscriptDocument,
   source?: { parentRecordId?: string; forkedFromMessageId?: string; recordId?: string; createdAt?: string; title?: string; project?: string },
   options: PanelSessionPublishOptions = {}): Promise<PanelMetadata> {
-  return publishPanelSession(dataRoot, agentId, document, source, options);
+  return (await publishPanelSession(dataRoot, agentId, document, source, options)).metadata;
+}
+
+export async function createPanelSessionWithSnapshot(dataRoot: string, agentId: string, document: TranscriptDocument,
+  source?: { parentRecordId?: string; forkedFromMessageId?: string; recordId?: string; createdAt?: string; title?: string; project?: string },
+  options: PanelSessionPublishOptions = {}): Promise<ScannedPanelSession> {
+  return await publishPanelSession(dataRoot, agentId, document, source, options);
 }
 
 export async function createPanelSessionFork(dataRoot: string, agentId: string, document: TranscriptDocument,
@@ -256,9 +265,9 @@ export async function createPanelSessionFork(dataRoot: string, agentId: string, 
   attachmentSource?: { agentId: string; recordId: string }, options: PanelSessionPublishOptions = {}): Promise<PanelMetadata> {
   opaqueComponent(agentId, "agentId"); opaqueComponent(source.recordId, "recordId"); await validatedDataRoot(dataRoot);
   if (attachmentSource && attachmentSource.agentId !== agentId) throw new Error("FORK_ATTACHMENT_SOURCE_INVALID");
-  if (!attachmentSource) return publishPanelSession(dataRoot, agentId, document, source, options);
+  if (!attachmentSource) return (await publishPanelSession(dataRoot, agentId, document, source, options)).metadata;
   return withForkedSessionAttachmentIndex(dataRoot, attachmentSource, { agentId, recordId: source.recordId }, document,
-    async attachmentIndex => publishPanelSession(dataRoot, agentId, document, source, options, attachmentIndex));
+    async attachmentIndex => (await publishPanelSession(dataRoot, agentId, document, source, options, attachmentIndex)).metadata);
 }
 
 export async function scanPanelSessions(dataRoot: string, agentId: string,

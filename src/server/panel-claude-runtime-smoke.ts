@@ -10,6 +10,7 @@ import { OpenClawCliClient } from "../gateway/cli-client.js";
 import { FileBridgeMaterializer } from "../gateway/materializer.js";
 import { BridgeService } from "../gateway/bridge-service.js";
 import { PanelGenerationApi } from "./generation-api.js";
+import { SessionReadIndex } from "../storage/index.js";
 
 if (process.env.PANEL_ALLOW_CLAUDE_RUNTIME_ACCEPTANCE !== "1") throw new Error("只有显式允许时才能运行 claude runtime 验收");
 
@@ -19,7 +20,8 @@ const readRoot = join(home, ".openclaw", "agents", "claude", "sessions");
 const runtimeAgentId = "panel-claude-runtime";
 const runtimeRoot = join(home, ".openclaw", "agents", runtimeAgentId, "sessions");
 const roots = new Map([[runtimeAgentId, runtimeRoot]]);
-const reads = new SessionReadData([{ agentId: "claude", sessionsRoot: readRoot }], dataRoot);
+const readAgents = [{ agentId: "claude", sessionsRoot: readRoot }];
+const reads = new SessionReadData(readAgents, dataRoot, new SessionReadIndex(readAgents, dataRoot));
 const generation = new PanelGenerationApi(
   new BridgeService(new OpenClawCliClient({ sessionsRoots: roots, runTimeoutMs: 90_000 }), new FileBridgeMaterializer(), roots),
   { dataRoot, runtimeByAgent: new Map([["claude", runtimeAgentId]]) }

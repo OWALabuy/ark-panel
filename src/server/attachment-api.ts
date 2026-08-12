@@ -16,16 +16,17 @@ const MAX_PREVIEW_DIMENSION = 8192;
 const MAX_PREVIEW_PIXELS = 40_000_000;
 
 export class PanelAttachmentApi {
-  private readonly readIndex: SessionReadIndex;
-  constructor(private readonly dataRoot: string, private readonly agentIds: readonly string[], readIndex?: SessionReadIndex) {
-    this.readIndex = readIndex && agentIds.every(agentId => readIndex.hasAgent(agentId)) ? readIndex :
-      new SessionReadIndex(agentIds.map(agentId => ({ agentId })), dataRoot);
+  constructor(private readonly dataRoot: string, private readonly agentIds: readonly string[],
+    private readonly readIndex: SessionReadIndex) {
+    if (!readIndex.hasDataRoot(dataRoot) || !agentIds.every(agentId => readIndex.hasAgent(agentId))) {
+      throw new Error("READ_INDEX_CONFIGURATION_MISMATCH");
+    }
   }
 
-  async initialize(): Promise<void> { await this.readIndex.initialize(); }
+  async initialize(): Promise<void> { await this.readIndex.initialize(this.agentIds); }
 
   private async owner(recordId: string): Promise<string> {
-    const entry = await this.readIndex.lookup(recordId);
+    const entry = await this.readIndex.lookup(recordId, this.agentIds);
     if (entry?.sourceKind === "panel" && this.agentIds.includes(entry.agentId)) return entry.agentId;
     throw new Error("PANEL_SESSION_NOT_FOUND");
   }
@@ -43,7 +44,7 @@ export class PanelAttachmentApi {
   }
 
   async download(attachmentId: string): Promise<{ fileName: string; mimeType: string; bytes: Buffer } | undefined> {
-    for (const session of await this.readIndex.snapshot()) {
+    for (const session of await this.readIndex.snapshotAgents(this.agentIds)) {
       if (session.sourceKind === "panel" && this.agentIds.includes(session.agentId)) {
         try {
           const stored = await getSessionAttachment(this.dataRoot, session.agentId, session.recordId, attachmentId);

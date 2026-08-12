@@ -2,15 +2,15 @@ import { resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { deriveFork } from "../domain/fork.js";
 import { type JsonObject, type TranscriptDocument } from "../domain/transcript.js";
-import { createPanelSession, createPanelSessionFork, deletePanelSession } from "../storage/panel-sessions.js";
-import { updateReadonlyMetadata, type ReadonlySourceIdentity } from "../storage/readonly-metadata.js";
+import { createPanelSessionFork, createPanelSessionWithSnapshot, deletePanelSession } from "../storage/panel-sessions.js";
+import { updateReadonlyMetadata } from "../storage/readonly-metadata.js";
 import { updatePanelMetadata } from "../storage/panel-sessions.js";
 import { currentTranscriptBranch } from "../domain/branch.js";
 import { exportTranscriptMarkdown, markdownFilename } from "../domain/markdown-export.js";
 import { ConservativeContextBudget, type ContextBudgetEstimator } from "../domain/context-budget.js";
 import { contextUsageAtCurrentTip, type OpenClawContextUsage } from "../domain/context-usage.js";
 import { garbageCollectAttachments } from "../storage/attachments.js";
-import { SessionReadIndex, type IndexedSession } from "../storage/index.js";
+import { SessionReadIndex, sessionIdentityKey, type IndexedSession } from "../storage/index.js";
 
 export interface ReadAgentConfig { agentId: string; sessionsRoot: string; label?: string }
 export interface ConversationRecord {
@@ -44,8 +44,6 @@ function nativeOverrides(document: TranscriptDocument): MemoryConversationSource
   return overrides;
 }
 
-const RESET = /^([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.jsonl\.reset\.(.+)$/i;
-
 function text(entry: JsonObject): string {
   const message = entry.message;
   if (!message || typeof message !== "object" || Array.isArray(message)) return "";
@@ -68,20 +66,22 @@ function documentTitle(document: TranscriptDocument): string {
 
 export class SessionReadData {
   private readonly agentsById: ReadonlyMap<string, ReadAgentConfig>;
-  private readonly readIndex: SessionReadIndex;
   constructor(readonly agentsConfig: readonly ReadAgentConfig[], readonly dataRoot: string,
-    private readonly contextBudget: ContextBudgetEstimator = new ConservativeContextBudget(), readIndex?: SessionReadIndex) {
+    private readonly readIndex: SessionReadIndex,
+    private readonly contextBudget: ContextBudgetEstimator = new ConservativeContextBudget()) {
     const entries = agentsConfig.map(agent => {
       if (!/^[A-Za-z0-9_-]+$/.test(agent.agentId)) throw new Error("agentId 格式无效");
       return [agent.agentId, { ...agent, sessionsRoot: resolve(agent.sessionsRoot) }] as const;
     });
     if (new Set(entries.map(([id]) => id)).size !== entries.length) throw new Error("agentId 重复");
     this.agentsById = new Map(entries); this.dataRoot = resolve(dataRoot);
-    this.readIndex = readIndex ?? new SessionReadIndex(entries.map(([, agent]) => agent), this.dataRoot);
+    if (!this.readIndex.hasDataRoot(this.dataRoot) || !entries.every(([agentId]) => this.readIndex.hasAgent(agentId))) {
+      throw new Error("READ_INDEX_CONFIGURATION_MISMATCH");
+    }
   }
 
   sessionIndex(): SessionReadIndex { return this.readIndex; }
-  async initialize(): Promise<void> { await this.readIndex.initialize(); }
+  async initialize(): Promise<void> { await this.readIndex.initialize(this.agentsById.keys()); }
 
   private record(entry: IndexedSession): ConversationRecord {
     const metadata = entry.metadata;
@@ -96,9 +96,11 @@ export class SessionReadData {
 
   private async indexedSessions(agentId?: string, archived: boolean | null = false,
     includeHidden = false): Promise<Array<{ entry: IndexedSession; record: ConversationRecord }>> {
-    const pairs = (await this.readIndex.snapshot(agentId)).map(entry => ({ entry, record: this.record(entry) }));
+    const snapshot = agentId ? await this.readIndex.snapshot(agentId) : await this.readIndex.snapshotAgents(this.agentsById.keys());
+    const pairs = snapshot.map(entry => ({ entry, record: this.record(entry) }));
     return pairs.filter(({ record }) => (includeHidden || !record.hidden) && (archived === null || record.archived === archived))
-      .sort((a, b) => Number(b.record.pinned) - Number(a.record.pinned) || b.record.updatedAt.localeCompare(a.record.updatedAt));
+      .sort((a, b) => Number(b.record.pinned) - Number(a.record.pinned) || b.record.updatedAt.localeCompare(a.record.updatedAt) ||
+        this.readIndex.compare(a.entry, b.entry));
   }
 
   async agents(): Promise<unknown[]> {
@@ -127,7 +129,7 @@ export class SessionReadData {
   }
 
   private async load(recordId: string): Promise<{ record: ConversationRecord; document: TranscriptDocument; entry: IndexedSession } | undefined> {
-    const entry = await this.readIndex.lookup(recordId); if (!entry) return undefined;
+    const entry = await this.readIndex.lookup(recordId, this.agentsById.keys()); if (!entry) return undefined;
     return { record: this.record(entry), document: entry.document, entry };
   }
 
@@ -184,9 +186,12 @@ export class SessionReadData {
     if (!this.agentsById.has(agentId)) throw new Error("AGENT_NOT_ALLOWED");
     const now = new Date().toISOString(), recordId = randomUUID();
     const safeTitle = title?.slice(0, 120);
-    const metadata = await createPanelSession(this.dataRoot, agentId, { header: { type: "session", version: 3, id: randomUUID(), timestamp: now, cwd: ".", panel: { recordId, createdAt: now, ...(safeTitle ? { title: safeTitle } : {}) } }, entries: [] }, { recordId, createdAt: now, ...(safeTitle ? { title: safeTitle } : {}) });
-    const entry = await this.readIndex.refreshPanel(agentId, metadata.recordId);
-    if (!entry) throw new Error("PANEL_SESSION_CREATE_FAILED"); return this.record(entry);
+    const published = await createPanelSessionWithSnapshot(this.dataRoot, agentId, { header: { type: "session", version: 3, id: randomUUID(), timestamp: now, cwd: ".", panel: { recordId, createdAt: now, ...(safeTitle ? { title: safeTitle } : {}) } }, entries: [] }, { recordId, createdAt: now, ...(safeTitle ? { title: safeTitle } : {}) });
+    const entry: IndexedSession = { agentId, sourceKind: "panel", sourceKey: published.metadata.recordId,
+      recordId: published.metadata.recordId, identityKey: sessionIdentityKey({ agentId, sourceKind: "panel", sourceKey: published.metadata.recordId }),
+      revision: published.revision, updatedAt: published.updatedAt, fingerprint: published.fingerprint,
+      document: published.document, metadata: published.metadata };
+    this.refreshPanelAfterCommit(agentId, published.metadata.recordId); return this.record(entry);
   }
 
   async search(query: string, agentId?: string): Promise<unknown[]> {
@@ -207,15 +212,15 @@ export class SessionReadData {
     const title = patch.title?.trim(); if (patch.title !== undefined && (!title || title.length > 120)) throw new Error("SESSION_TITLE_INVALID");
     const project = patch.project?.trim(); if (patch.project !== undefined && patch.project !== null && (!project || project.length > 60 || /[\u0000-\u001f\u007f]/.test(project))) throw new Error("SESSION_PROJECT_INVALID");
     const loaded = await this.load(recordId); if (!loaded) throw new Error("SESSION_NOT_FOUND");
-    if (loaded.record.sourceKind === "panel") {
-      await updatePanelMetadata(this.dataRoot, loaded.record.agentId, recordId, current => { const next = { ...current, ...(title ? { title } : {}), ...(patch.archived !== undefined ? { archived: patch.archived } : {}), ...(patch.pinned !== undefined ? { pinned: patch.pinned } : {}), ...(patch.memoryDisposition ? { memoryDisposition: patch.memoryDisposition } : {}), ...(project ? { project } : {}) }; if (patch.project === null) delete next.project; return next; });
+    let updated: IndexedSession;
+    if (loaded.entry.sourceKind === "panel") {
+      const metadata = await updatePanelMetadata(this.dataRoot, loaded.record.agentId, recordId, current => { const next = { ...current, ...(title ? { title } : {}), ...(patch.archived !== undefined ? { archived: patch.archived } : {}), ...(patch.pinned !== undefined ? { pinned: patch.pinned } : {}), ...(patch.memoryDisposition ? { memoryDisposition: patch.memoryDisposition } : {}), ...(project ? { project } : {}) }; if (patch.project === null) delete next.project; return next; });
+      updated = { ...loaded.entry, metadata }; this.refreshPanelAfterCommit(loaded.entry.agentId, loaded.entry.recordId);
     } else {
-      const match = loaded.record.sourceKind === "active" ? [loaded.record.sourceKey, undefined] : (() => { const parsed = RESET.exec(loaded.record.sourceKey); return [parsed?.[1], parsed?.[2]]; })();
-      if (!match[0]) throw new Error("SESSION_SOURCE_INVALID");
-      const identity: ReadonlySourceIdentity = { sourceKind: loaded.record.sourceKind, agentId: loaded.record.agentId, sourceSessionId: match[0], ...(match[1] ? { resetTimestamp: match[1] } : {}) };
-      await updateReadonlyMetadata(this.dataRoot, identity, current => { const next = { ...current, ...(title ? { title } : {}), ...(patch.archived !== undefined ? { archived: patch.archived } : {}), ...(patch.pinned !== undefined ? { pinned: patch.pinned } : {}), ...(patch.memoryDisposition ? { memoryDisposition: patch.memoryDisposition } : {}), ...(project ? { project } : {}) }; if (patch.project === null) delete next.project; return next; });
+      const metadata = await updateReadonlyMetadata(this.dataRoot, loaded.entry.identity, current => { const next = { ...current, ...(title ? { title } : {}), ...(patch.archived !== undefined ? { archived: patch.archived } : {}), ...(patch.pinned !== undefined ? { pinned: patch.pinned } : {}), ...(patch.memoryDisposition ? { memoryDisposition: patch.memoryDisposition } : {}), ...(project ? { project } : {}) }; if (patch.project === null) delete next.project; return next; });
+      updated = { ...loaded.entry, metadata }; this.refreshEntryAfterCommit(updated);
     }
-    const updated = await this.readIndex.lookup(recordId); if (!updated) throw new Error("SESSION_NOT_FOUND"); return this.record(updated);
+    return this.record(updated);
   }
 
   async deleteSession(recordId: string, confirmed: boolean): Promise<{ action: "deleted" | "hidden" }> {
@@ -224,14 +229,13 @@ export class SessionReadData {
     if (loaded.record.sourceKind === "panel") {
       if (!loaded.record.archived) throw new Error("SESSION_NOT_ARCHIVED");
       await deletePanelSession(this.dataRoot, loaded.record.agentId, recordId);
-      this.readIndex.forget(recordId);
+      this.readIndex.forget(loaded.entry);
       await garbageCollectAttachments(this.dataRoot);
       return { action: "deleted" };
     }
-    const match = loaded.record.sourceKind === "active" ? [loaded.record.sourceKey, undefined] : (() => { const parsed = RESET.exec(loaded.record.sourceKey); return [parsed?.[1], parsed?.[2]]; })();
-    if (!match[0]) throw new Error("SESSION_SOURCE_INVALID");
-    const identity: ReadonlySourceIdentity = { sourceKind: loaded.record.sourceKind, agentId: loaded.record.agentId, sourceSessionId: match[0], ...(match[1] ? { resetTimestamp: match[1] } : {}) };
-    await updateReadonlyMetadata(this.dataRoot, identity, current => ({ ...current, hidden: true })); return { action: "hidden" };
+    if (loaded.entry.sourceKind === "panel") throw new Error("SESSION_SOURCE_INVALID");
+    const metadata = await updateReadonlyMetadata(this.dataRoot, loaded.entry.identity, current => ({ ...current, hidden: true }));
+    this.refreshEntryAfterCommit({ ...loaded.entry, metadata }); return { action: "hidden" };
   }
 
   async fork(recordId: string, messageId: string): Promise<unknown> {
@@ -242,7 +246,7 @@ export class SessionReadData {
     const metadata = await createPanelSessionFork(this.dataRoot, loaded.record.agentId, document,
       { parentRecordId: recordId, forkedFromMessageId: messageId, recordId: newId, createdAt, ...inherited },
       loaded.record.sourceKind === "panel" ? { agentId: loaded.record.agentId, recordId } : undefined);
-    await this.readIndex.refreshPanel(metadata.agentId, metadata.recordId);
+    this.refreshPanelAfterCommit(metadata.agentId, metadata.recordId);
     return { recordId: metadata.recordId, agentId: metadata.agentId, sourceKind: "panel" };
   }
 
@@ -259,7 +263,17 @@ export class SessionReadData {
     const metadata = await createPanelSessionFork(this.dataRoot, loaded.record.agentId, base,
       { parentRecordId: recordId, forkedFromMessageId: messageId, recordId: newId, createdAt, ...inherited },
       loaded.record.sourceKind === "panel" ? { agentId: loaded.record.agentId, recordId } : undefined);
-    await this.readIndex.refreshPanel(metadata.agentId, metadata.recordId);
+    this.refreshPanelAfterCommit(metadata.agentId, metadata.recordId);
     return { recordId: metadata.recordId, agentId: metadata.agentId, sourceKind: "panel" };
+  }
+
+  private refreshPanelAfterCommit(agentId: string, recordId: string): void {
+    this.readIndex.invalidatePanel(agentId, recordId);
+    void this.readIndex.refreshPanel(agentId, recordId).catch(() => undefined);
+  }
+
+  private refreshEntryAfterCommit(entry: IndexedSession): void {
+    this.readIndex.invalidate(entry);
+    void this.readIndex.refresh(entry).catch(() => undefined);
   }
 }

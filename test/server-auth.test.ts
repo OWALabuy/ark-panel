@@ -83,6 +83,18 @@ test("non-mock reads are delegated without connecting a real agent", async t => 
   assert.deepEqual((await (await fetch(`${x.base}/api/v1/agents`,{headers:{cookie:cookies}})).json()).data,[{id:"safe"}]); assert.deepEqual((await (await fetch(`${x.base}/api/v1/sessions?agentId=safe`,{headers:{cookie:cookies}})).json()).data,[{recordId:"record"}]); assert.deepEqual((await (await fetch(`${x.base}/api/v1/projects?agentId=safe`,{headers:{cookie:cookies}})).json()).data,["Project"]); assert.deepEqual((await (await fetch(`${x.base}/api/v1/sessions/record`,{headers:{cookie:cookies}})).json()).data,{title:"safe"});
   assert.equal((await fetch(`${x.base}/api/v1/projects`,{headers:{cookie:cookies}})).status,400);
 });
+test("revision polling preserves composite session identity for colliding recordIds", async t => {
+  const records = [
+    { recordId: "collision", agentId: "safe", sourceKind: "active", sourceKey: "source-active", revision: "1:1", updatedAt: "2026-07-11T00:00:00Z" },
+    { recordId: "collision", agentId: "safe", sourceKind: "panel", sourceKey: "collision", revision: "2:2", updatedAt: "2026-07-11T00:00:00Z" }
+  ];
+  const reads: ReadApi = { async agents(){return[]}, async sessions(agentId){assert.equal(agentId,"safe");return records}, async conversation(){return null} };
+  const x = await fixture(t, undefined, reads), login = await fetch(`${x.base}/api/v1/auth/login`, { method: "POST",
+    headers: { origin: x.base, "content-type": "application/json" }, body: JSON.stringify({ username: "owl", password: "correct" }) });
+  const cookies = login.headers.getSetCookie().map(value => value.split(";", 1)[0]).join("; ");
+  const response = await fetch(`${x.base}/api/v1/revisions?agentId=safe`, { headers: { cookie: cookies } });
+  assert.equal(response.status, 200); assert.deepEqual((await response.json()).data, records);
+});
 test("panel 会话存储不可用时 HTTP 返回稳定脱敏的服务端错误", async t => {
   const reads: ReadApi = { async agents(){return[]}, async sessions(){throw new Error("PANEL_SESSION_STORAGE_UNAVAILABLE")}, async conversation(){return null} };
   const x = await fixture(t, undefined, reads), login = await fetch(`${x.base}/api/v1/auth/login`, { method: "POST", headers: { origin: x.base, "content-type": "application/json" }, body: JSON.stringify({ username: "owl", password: "correct" }) });

@@ -14,7 +14,8 @@ const emptyDocument = { header: { type: "session", version: 3 }, entries: [] };
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "panel-attachment-preview-"));
   const session = await createPanelSession(root, "agent", emptyDocument);
-  return { root, session, api: new PanelAttachmentApi(root, ["agent"]) };
+  const readIndex = new SessionReadIndex([{ agentId: "agent" }], root);
+  return { root, session, api: new PanelAttachmentApi(root, ["agent"], readIndex) };
 }
 
 async function assertUnsupported(api: PanelAttachmentApi, recordId: string, bytes: Buffer) {

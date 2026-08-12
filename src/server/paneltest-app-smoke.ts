@@ -10,14 +10,16 @@ import { OpenClawCliClient } from "../gateway/cli-client.js";
 import { FileBridgeMaterializer } from "../gateway/materializer.js";
 import { BridgeService } from "../gateway/bridge-service.js";
 import { PanelGenerationApi } from "./generation-api.js";
+import { SessionReadIndex } from "../storage/index.js";
 
 if (process.env.PANEL_ALLOW_PANELTEST_INTEGRATION !== "1") throw new Error("只有显式允许时才能运行 paneltest 应用烟测");
 const dataRoot = await mkdtemp(join(tmpdir(), "panel-app-smoke-"));
 const home = homedir(), runtimeRoot = join(home, ".openclaw", "agents", "paneltest", "sessions");
-const reads = new SessionReadData([
+const readAgents = [
   { agentId: "claude", sessionsRoot: join(home, ".openclaw", "agents", "claude", "sessions") },
   { agentId: "main", sessionsRoot: join(home, ".openclaw", "agents", "main", "sessions") }
-], dataRoot);
+] as const;
+const reads = new SessionReadData(readAgents, dataRoot, new SessionReadIndex(readAgents, dataRoot));
 const roots = new Map([["paneltest", runtimeRoot]]);
 const generation = new PanelGenerationApi(new BridgeService(new OpenClawCliClient({ sessionsRoots: roots, runTimeoutMs: 90_000 }), new FileBridgeMaterializer(), roots),
   { dataRoot, runtimeByAgent: new Map([["claude", "paneltest"]]) });

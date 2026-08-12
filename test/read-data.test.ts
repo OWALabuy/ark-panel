@@ -2,12 +2,18 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdir, readFile, readdir, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { SessionReadData } from "../src/server/read-data.js";
+import { SessionReadData, type ReadAgentConfig } from "../src/server/read-data.js";
 import { ConservativeContextBudget } from "../src/domain/context-budget.js";
 import { commitPanelTranscript, createPanelSession, loadPanelSession, updatePanelMetadata } from "../src/storage/panel-sessions.js";
 import { listSessionAttachments, storeSessionAttachment } from "../src/storage/attachments.js";
 import type { TranscriptDocument } from "../src/domain/transcript.js";
 import { tempFixture } from "./test-helpers.js";
+import { SessionReadIndex } from "../src/storage/index.js";
+
+function readData(agents: readonly ReadAgentConfig[], dataRoot: string,
+  contextBudget: ConservativeContextBudget = new ConservativeContextBudget()): SessionReadData {
+  return new SessionReadData(agents, dataRoot, new SessionReadIndex(agents, dataRoot), contextBudget);
+}
 
 const header = { type: "session", version: 3, id: "11111111-1111-4111-8111-111111111111", timestamp: "2026-07-11T00:00:00Z", cwd: "/private/workspace", unknownSecret: "must-not-leak" };
 const user = { type: "message", id: "u1", parentId: null, timestamp: "2026-07-11T00:00:01Z", message: { role: "user", content: "needle private fixture" } };
@@ -21,7 +27,7 @@ test("只读扫描 active/reset/panel，容忍 active 半行并拒绝符号链�
   const activePath = join(sessions, `${activeId}.jsonl`); await writeFile(activePath, jsonl(user, assistant) + '{"type":"message"');
   await writeFile(join(sessions, `${activeId}.jsonl.reset.2026-07-11T00-00-00Z`), jsonl(user));
   const outside = join(root, "outside.jsonl"); await writeFile(outside, jsonl(user)); await symlink(outside, join(sessions, `${linkedId}.jsonl`));
-  const reads = new SessionReadData([{ agentId: "fixture", sessionsRoot: sessions }], data, new ConservativeContextBudget(10_000));
+  const reads = readData([{ agentId: "fixture", sessionsRoot: sessions }], data, new ConservativeContextBudget(10_000));
   const listed = await reads.sessions("fixture"); assert.deepEqual(listed.map(item => item.sourceKind).sort(), ["active", "reset"]);
   assert.equal(listed.find(item => item.sourceKind === "active")!.messageCount, 2);
   const conversation = await reads.conversation(listed.find(item => item.sourceKind === "active")!.recordId) as { status: Record<string, unknown>; document: { header: Record<string, unknown>; entries: unknown[] } };
@@ -74,7 +80,7 @@ test("记忆整理从原生会话分支继承有效模型与思考等级", async
   const model = { type: "model_change", id: "m1", parentId: null, provider: "fixture-provider", modelId: "fixture-model" };
   const thinking = { type: "thinking_level_change", id: "t1", parentId: "m1", thinkingLevel: "high" };
   const linkedUser = { ...user, parentId: "t1" }; await writeFile(join(sessions, `${header.id}.jsonl`), jsonl(model, thinking, linkedUser, assistant));
-  const reads = new SessionReadData([{ agentId: "fixture", sessionsRoot: sessions }], data, new ConservativeContextBudget(10_000));
+  const reads = readData([{ agentId: "fixture", sessionsRoot: sessions }], data, new ConservativeContextBudget(10_000));
   const record = (await reads.sessions("fixture"))[0]!, source = await reads.memorySource(record.recordId);
   assert.deepEqual(source?.overrides, { modelOverride: "fixture-provider/fixture-model", thinkingLevel: "high" });
 });
@@ -102,7 +108,7 @@ test("panel fork 与 edit-and-fork 原子发布目标实际引用的附件且不
   const sourceIndexPath = join(data, "sessions", "fixture", source.recordId, "attachments.json");
   const sourceTranscriptPath = join(data, "sessions", "fixture", source.recordId, "transcript.jsonl");
   const before = { index: await readFile(sourceIndexPath), transcript: await readFile(sourceTranscriptPath) };
-  const reads = new SessionReadData([{ agentId: "fixture", sessionsRoot: sessions }], data);
+  const reads = readData([{ agentId: "fixture", sessionsRoot: sessions }], data);
   const forked = await reads.fork(source.recordId, "a1") as { recordId: string };
   const edited = await reads.editAndFork(source.recordId, "u2", "replacement") as { recordId: string };
   for (const target of [forked.recordId, edited.recordId]) {
@@ -129,7 +135,7 @@ test("损坏的源附件索引在 fork staging 创建前以脱敏错误失败", 
     { type: "message", id: "u2", parentId: "u1", message: { role: "user", content: "fixture" } }
   ] });
   await writeFile(join(data, "sessions", "fixture", source.recordId, "attachments.json"), "{private fixture index body");
-  const reads = new SessionReadData([{ agentId: "fixture", sessionsRoot: sessions }], data);
+  const reads = readData([{ agentId: "fixture", sessionsRoot: sessions }], data);
   const invalid = (error: unknown) => {
     assert.equal((error as Error).message, "FORK_ATTACHMENT_SOURCE_INVALID");
     assert.equal(String(error).includes(root), false); assert.doesNotMatch(String(error), /private fixture index body/); return true;
@@ -142,7 +148,7 @@ test("损坏的源附件索引在 fork staging 创建前以脱敏错误失败", 
 
 test("面板会话要求显式确认并先归档才可永久删除", async t => {
   const root = await tempFixture(t, "panel-read-delete-"), sessions = join(root, "source"), data = join(root, "data");
-  await mkdir(sessions); await mkdir(data, { mode: 0o700 }); const reads = new SessionReadData([{ agentId: "fixture", sessionsRoot: sessions }], data);
+  await mkdir(sessions); await mkdir(data, { mode: 0o700 }); const reads = readData([{ agentId: "fixture", sessionsRoot: sessions }], data);
   const created = await reads.createPanel("fixture") as { recordId: string };
   assert.equal((await reads.conversation(created.recordId) as { memoryDisposition: string }).memoryDisposition, "scratch");
   await reads.updateSession(created.recordId, { memoryDisposition: "eligible" });
@@ -156,7 +162,7 @@ test("面板会话要求显式确认并先归档才可永久删除", async t => 
 
 test("面板会话状态只把绑定当前 tip 的 OpenClaw fresh 用量作为主上下文", async t => {
   const root = await tempFixture(t, "panel-read-status-"), sessions = join(root, "source"), data = join(root, "data");
-  await mkdir(sessions); await mkdir(data, { mode: 0o700 }); const reads = new SessionReadData([{ agentId: "fixture", sessionsRoot: sessions }], data, new ConservativeContextBudget(1_024));
+  await mkdir(sessions); await mkdir(data, { mode: 0o700 }); const reads = readData([{ agentId: "fixture", sessionsRoot: sessions }], data, new ConservativeContextBudget(1_024));
   const created = await reads.createPanel("fixture", "status") as { recordId: string };
   await updatePanelMetadata(data, "fixture", created.recordId, current => ({ ...current, modelOverride: "provider/model", thinkingLevel: "high", reasoningLevel: "stream" }));
   const loaded = await loadPanelSession(data, "fixture", created.recordId);
@@ -180,7 +186,7 @@ test("面板会话状态只把绑定当前 tip 的 OpenClaw fresh 用量作为�
 
 test("conversation DTO 仅返回规范化 current branch 与 compaction 安全字段", async t => {
   const root=await tempFixture(t, "panel-read-compact-"),sessions=join(root,"source"),data=join(root,"data");
-  await mkdir(sessions);await mkdir(data,{mode:0o700});const reads=new SessionReadData([{agentId:"fixture",sessionsRoot:sessions}],data);
+  await mkdir(sessions);await mkdir(data,{mode:0o700});const reads=readData([{agentId:"fixture",sessionsRoot:sessions}],data);
   const created=await reads.createPanel("fixture","compact") as {recordId:string},loaded=await loadPanelSession(data,"fixture",created.recordId);
   const document={...loaded.document,entries:[
     {type:"message",id:"u",parentId:null,timestamp:"2026-07-24T00:00:00Z",message:{role:"user",content:"visible"}},
@@ -200,7 +206,7 @@ test("project 目录汇总正常与归档会话、忽略大小写重复和隐藏
   const activeId = "33333333-3333-4333-8333-333333333333";
   await writeFile(join(sessions, `${activeId}.jsonl`), jsonl(user));
   await writeFile(join(sessions, `${activeId}.jsonl.reset.2026-07-10T00-00-00Z`), jsonl(user));
-  const reads = new SessionReadData([{ agentId: "fixture", sessionsRoot: sessions }], data);
+  const reads = readData([{ agentId: "fixture", sessionsRoot: sessions }], data);
   const records = await reads.sessions("fixture"); const active = records.find(item => item.sourceKind === "active")!, reset = records.find(item => item.sourceKind === "reset")!;
   await reads.updateSession(active.recordId, { project: "Project Alpha" });
   await reads.updateSession(reset.recordId, { project: "project alpha", archived: true });
@@ -213,14 +219,14 @@ test("project 目录汇总正常与归档会话、忽略大小写重复和隐藏
 test("sessions 根目录本身是符号链接时拒绝读取", async t => {
   const root = await tempFixture(t, "panel-read-link-"), actual = join(root, "actual"), link = join(root, "link"), data = join(root, "data");
   await mkdir(actual); await mkdir(data, { mode: 0o700 }); await symlink(actual, link);
-  const reads = new SessionReadData([{ agentId: "fixture", sessionsRoot: link }], data);
+  const reads = readData([{ agentId: "fixture", sessionsRoot: link }], data);
   await assert.rejects(reads.sessions(), /根目录不安全/);
 });
 
 test("panel data 根缺失时列表、读取与搜索返回稳定脱敏错误", async t => {
   const root = await tempFixture(t, "panel-read-data-root-error-"), sessions = join(root, "source"); await mkdir(sessions);
   await writeFile(join(sessions, `${header.id}.jsonl`), jsonl(user));
-  const missing = join(root, "private-missing-data"), reads = new SessionReadData([{ agentId: "fixture", sessionsRoot: sessions }], missing);
+  const missing = join(root, "private-missing-data"), reads = readData([{ agentId: "fixture", sessionsRoot: sessions }], missing);
   const unavailable = (error: unknown) => {
     assert.equal((error as Error).message, "PANEL_SESSION_STORAGE_UNAVAILABLE");
     assert.equal(String(error).includes(root), false); assert.equal(String(error).includes("private-missing-data"), false); return true;
@@ -238,7 +244,7 @@ test("单条残缺 panel 记录不会拖垮健康会话的列表、读取或搜�
   ] }, { recordId: "healthy" });
   const broken = join(data, "sessions", "fixture", "broken"); await mkdir(broken, { mode: 0o700 });
   await writeFile(join(broken, "metadata.json"), "{private broken body", { mode: 0o600 });
-  const reads = new SessionReadData([{ agentId: "fixture", sessionsRoot: sessions }], data);
+  const reads = readData([{ agentId: "fixture", sessionsRoot: sessions }], data);
   assert.deepEqual((await reads.sessions("fixture")).map(item => item.recordId), [healthy.recordId]);
   assert.equal((await reads.conversation(healthy.recordId) as { recordId: string }).recordId, healthy.recordId);
   assert.deepEqual((await reads.search("searchable", "fixture") as Array<{ recordId: string }>).map(item => item.recordId), [healthy.recordId]);

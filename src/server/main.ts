@@ -4,6 +4,7 @@ import { FileBridgeMaterializer } from "../gateway/materializer.js";
 import { BridgeService } from "../gateway/bridge-service.js";
 import { PanelGenerationApi } from "./generation-api.js";
 import { SessionReadData } from "./read-data.js";
+import { mergeSessionIndexAgents, SessionReadIndex } from "../storage/index.js";
 import { parsePanelConfig, validateAndInitializeConfig } from "./config.js";
 import { ConservativeContextBudget } from "../domain/context-budget.js";
 import { PanelCommandApi } from "./command-api.js";
@@ -18,8 +19,12 @@ import { MemoryConsolidationStore } from "../storage/memory-consolidation.js";
 
 const config = parsePanelConfig(process.env, import.meta.url); await validateAndInitializeConfig(config);
 const contextBudget = new ConservativeContextBudget(config.contextHistoryBudgetTokens);
-const readApi = config.dataRoot && config.readAgents.length ? new SessionReadData(config.readAgents, config.dataRoot, contextBudget) : undefined;
-await readApi?.initialize();
+const sessionIndexAgents = mergeSessionIndexAgents(config.readAgents, config.runtimes.keys());
+const sessionReadIndex = config.dataRoot && sessionIndexAgents.length ?
+  new SessionReadIndex(sessionIndexAgents, config.dataRoot) : undefined;
+await sessionReadIndex?.initialize();
+const readApi = config.dataRoot && config.readAgents.length && sessionReadIndex ?
+  new SessionReadData(config.readAgents, config.dataRoot, sessionReadIndex, contextBudget) : undefined;
 const roots = new Map<string, string>();
 for (const value of config.runtimes.values()) roots.set(value.runtimeAgentId, value.sessionsRoot);
 for (const value of config.memoryRuntimes.values()) roots.set(value.runtimeAgentId, value.sessionsRoot);
@@ -67,9 +72,8 @@ const commandApi = config.dataRoot && readApi ? new PanelCommandApi(config.dataR
   } } : {})
 }, operations) : undefined;
 const allowedHosts = [`127.0.0.1:${config.port}`, `localhost:${config.port}`];
-const attachments = config.dataRoot && config.runtimes.size ?
-  new PanelAttachmentApi(config.dataRoot, [...config.runtimes.keys()], readApi?.sessionIndex()) : undefined;
-await attachments?.initialize();
+const attachments = config.dataRoot && config.runtimes.size && sessionReadIndex ?
+  new PanelAttachmentApi(config.dataRoot, [...config.runtimes.keys()], sessionReadIndex) : undefined;
 const memoryWorkspaces = new Map<string, string>();
 for (const [agentId, runtime] of config.runtimes) if (runtime.workspaceRoot) memoryWorkspaces.set(agentId, runtime.workspaceRoot);
 const memoryStore = config.dataRoot ? new MemoryConsolidationStore(config.dataRoot) : undefined;

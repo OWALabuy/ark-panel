@@ -125,12 +125,14 @@ gateway 连接凭证：读 `~/.openclaw/openclaw.json` 的 `gateway.auth.token`�
 
 gateway 的 `sessions.json` 面板不碰。面板维护单一的进程内派生读取索引，用于侧边栏列表、单条定位和搜索。
 
-**索引只作可重建缓存，不作第二份权威数据，也没有持久化 schema。** 权威信息（如 fork 来源）写进 transcript 头部或独立 metadata；进程重启或清空派生状态后，从安全扫描 transcript 与 metadata 全量重建。历史 `index.json` 不参与读取，可以删除。索引按安全 locator 和 stat 指纹缓存已验证 document：列表或搜索先取得一次一致请求快照，只重读新增或变更记录；已定位的单条读取只校验目标；并发冷启动共享同一次重建。坏记录按自身指纹隔离，不能污染其他记录或把根级存储错误解释为空库。
+**索引只作可重建缓存，不作第二份权威数据，也没有持久化 schema。** 权威信息（如 fork 来源）写进 transcript 头部或独立 metadata；进程重启或清空派生状态后，从安全扫描 transcript 与 metadata 全量重建。历史 `index.json` 不参与读取，可以删除。索引按 `agentId + sourceKind + stable source identity` 主键和 `recordId -> ordered candidate keys` 二级 locator 缓存已验证 document，不能假设磁盘上的 recordId 永不碰撞；列表和搜索保留各条复合记录，record-only 调用发现多个候选时沿用相应 API 既有的 not-found/null 语义失败关闭，其中 mutation 使用 `SESSION_NOT_FOUND`，附件 owner 使用 `PANEL_SESSION_NOT_FOUND`。列表或搜索先取得一次一致请求快照，只重读新增或变更记录；唯一定位的单条读取只校验目标 source root；并发冷启动共享同一次重建。clear、定点失效和删除通过 epoch 门禁使在途旧扫描作废并重试，不能复活已删除记录。坏记录按自身指纹隔离，不能污染其他记录或把根级存储错误解释为空库。
+
+create、metadata update、fork 或 edit-and-fork 的权威提交先于派生索引维护；提交后的索引刷新失败只能标脏 locator 并由后台或下次读取重建，API 仍返回已提交结果，不能伪装成权威写失败而诱发重复创建。create 响应所需 revision/fingerprint 在 staging 文件 fsync 后、原子发布前取得，发布成功后不得再依赖一次可能失败的扫描才能返回。生产进程只构造一个覆盖 read agent 与附件 runtime agent 并集的索引，并显式注入读取和附件 API；API 构造器不得私自创建第二实例。两个 consumer 必须分别按 read-agent allowlist 与 runtime-agent allowlist 限定 snapshot 和 record locator，不能因为共享索引而扩大读取或写入范围。
 
 #### 4.1 会话记录的字段（修正：`id` 不能等于会话 uuid）
 一个会话 uuid 不足以唯一标识一条记录：`/reset` 会让同一个 uuid 先后产生 `<uuid>.jsonl`、`<uuid>.jsonl.reset.<时间1>`、`<uuid>.jsonl.reset.<时间2>`，它们很可能共享同一个 session uuid；不同 agent 之间也需要命名空间。因此每条记录用一组字段标识：
 
-- `recordId`：**面板内部全局唯一 ID**（自己生成，不等于会话 uuid）。
+- `recordId`：**面板内部按契约应全局唯一的 ID**（自己生成，不等于会话 uuid）；读取不信任历史或手工数据满足该约束，碰撞时按上节失败关闭。
 - `agentId`：来自哪个 agent（`claude` / `main` / `paneltest`）。
 - `sourceSessionId`：源会话 uuid（可能多条记录共享）。
 - `sourceKind`：`active`（活会话）｜`reset`（reset 归档）｜`panel`（面板自建）。
@@ -153,6 +155,10 @@ gateway 的 `sessions.json` 面板不碰。面板维护单一的进程内派生�
 - 索引能列出面板自建 + 各 agent 导入的会话，包括 reset 归档；同一 uuid 的活会话与多个 reset 归档各占独立记录，不互相覆盖。
 - 清空进程内索引或重启后能从扫描 transcript/metadata 全量重建，结果一致；任何遗留 `index.json` 都不影响结果。
 - N 条候选的搜索至多读取、解析 N 份 transcript；同一请求不为每条命中再次全量扫描。暖缓存的单条读取不枚举所有会话，源/sidecar 变化后只使相应记录失效。
+- 跨 agent 相同 recordId、同 agent 跨 source kind 相同 recordId 不丢列表/搜索记录；record-only 读取、写入与附件 owner 查询不按刷新完成顺序选择 winner。
+- revision 轮询 DTO 与浏览器比较同样携带 `agentId/sourceKind/sourceKey/recordId` 复合 identity，不能把碰撞记录压回单值 recordId 而造成永久误判刷新。
+- clear 与 full/targeted refresh、delete 与在途 full refresh 交错时，当前快照重试并且旧扫描不能重新发布已作废或已删除记录；并发 agent refresh 的完成顺序不改变 DTO 排序。
+- create/update/fork/edit-and-fork 已完成权威提交后，即使可注入的索引刷新失败也返回提交结果；后续读取从标脏 locator 或全量快照自愈。
 - 搜索：按标题和消息内容关键词能查到会话。
 - 活会话源文件被追加新行后，轮询刷新能读到新消息，且不会因读到半行而解析出错。
 
