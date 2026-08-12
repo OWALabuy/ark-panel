@@ -11,7 +11,8 @@ test("frontend renders untrusted metadata with DOM text nodes", async () => {
   assert.match(source,/t\("message\.copy"\)/);
   assert.match(zh,/"message\.copy":"复制消息"/);
   assert.match(source,/command:"commands",args:\[\]/);
-  assert.match(source,/result\?\.data\?\.commands/);
+  assert.match(source,/result\.command==="commands"/);
+  assert.match(source,/result\.data\.commands/);
   assert.match(i18n,/Intl\.DateTimeFormat/);
   assert.match(source,/className="message-body"/);
   assert.match(source,/className="message-meta"/);
