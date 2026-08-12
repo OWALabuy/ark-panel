@@ -228,11 +228,11 @@ test("权威 create/update/fork/edit 提交后索引刷新失败不反转成功�
   [created.recordId, edited.recordId, forked.recordId].sort(), "下次全量快照重建所有已提交记录");
 });
 
-test("global/per-agent epoch 使 clear 和 delete 作废在途 full/targeted 发布", async t => {
+test("global/per-agent epoch 使 clear 和 delete 作废在途 full/panel/targeted 发布", async t => {
   const root = await tempFixture(t, "panel-index-epoch-"), sessions = join(root, "source"), data = join(root, "data");
   await mkdir(sessions); await mkdir(data, { mode: 0o700 });
   await createPanelSession(data, "fixture", panelDocument("epoch", "epoch fixture"), { recordId: "epoch-record" });
-  let block: { type: "full" | "targeted"; reached: ReturnType<typeof deferred>; release: ReturnType<typeof deferred>; used: boolean } | undefined;
+  let block: { type: "full" | "panel" | "targeted"; reached: ReturnType<typeof deferred>; release: ReturnType<typeof deferred>; used: boolean } | undefined;
   const index = new SessionReadIndex([{ agentId: "fixture", sessionsRoot: sessions }], data, {
     beforePublish: async probe => {
       if (block && !block.used && probe.type === block.type) {
@@ -240,7 +240,7 @@ test("global/per-agent epoch 使 clear 和 delete 作废在途 full/targeted 发
       }
     }
   });
-  const arm = (type: "full" | "targeted") => block = { type, reached: deferred(), release: deferred(), used: false };
+  const arm = (type: "full" | "panel" | "targeted") => block = { type, reached: deferred(), release: deferred(), used: false };
 
   arm("full"); const coldSnapshot = index.snapshot();
   await withTimeout(block!.reached.promise, "cold full publish gate"); index.clear(); block!.release.resolve();
@@ -259,6 +259,21 @@ test("global/per-agent epoch 使 clear 和 delete 作废在途 full/targeted 发
   await deletePanelSession(data, "fixture", "epoch-record"); index.forgetPanel("fixture", "epoch-record");
   block!.release.resolve();
   assert.deepEqual(await deletingSnapshot, [], "delete tombstone/epoch 必须使旧 full scan 重试且不能复活记录");
+
+  await createPanelSession(data, "fixture", panelDocument("panel-epoch", "panel epoch fixture"),
+    { recordId: "panel-epoch-record" });
+  arm("panel"); const coldPanelSnapshot = index.snapshotPanelSessions(["fixture"]);
+  await withTimeout(block!.reached.promise, "cold panel publish gate"); index.clear(); block!.release.resolve();
+  assert.deepEqual((await coldPanelSnapshot).map(item => item.recordId), ["panel-epoch-record"],
+    "被 clear 作废的 panel-only snapshot 必须重试而不是返回空库");
+
+  arm("panel"); const deletingPanelSnapshot = index.snapshotPanelSessions(["fixture"]);
+  await withTimeout(block!.reached.promise, "deleting panel publish gate");
+  await updatePanelMetadata(data, "fixture", "panel-epoch-record", current => ({ ...current, archived: true }));
+  await deletePanelSession(data, "fixture", "panel-epoch-record"); index.forgetPanel("fixture", "panel-epoch-record");
+  block!.release.resolve();
+  assert.deepEqual(await deletingPanelSnapshot, [],
+    "delete tombstone/epoch 必须使旧 panel-only scan 重试且不能复活记录");
 });
 
 test("warm direct lookup 仅探测 exact source root，统计真实 lstat/readdir/open/read 调用", async t => {

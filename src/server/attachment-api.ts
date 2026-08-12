@@ -44,16 +44,14 @@ export class PanelAttachmentApi {
   }
 
   async download(attachmentId: string): Promise<{ fileName: string; mimeType: string; bytes: Buffer } | undefined> {
-    for (const session of await this.readIndex.snapshotAgents(this.agentIds)) {
-      if (session.sourceKind === "panel" && this.agentIds.includes(session.agentId)) {
-        try {
-          const stored = await getSessionAttachment(this.dataRoot, session.agentId, session.recordId, attachmentId);
-          return { fileName: stored.manifest.fileName, mimeType: stored.manifest.mimeType,
-            bytes: await readSessionAttachmentBytes(this.dataRoot, session.agentId, session.recordId, attachmentId) };
-        } catch (error) {
-          if (error instanceof Error && error.message === "ATTACHMENT_NOT_OWNED_BY_SESSION") continue;
-          throw error;
-        }
+    for (const session of await this.readIndex.snapshotPanelSessions(this.agentIds)) {
+      try {
+        const stored = await getSessionAttachment(this.dataRoot, session.agentId, session.recordId, attachmentId);
+        return { fileName: stored.manifest.fileName, mimeType: stored.manifest.mimeType,
+          bytes: await readSessionAttachmentBytes(this.dataRoot, session.agentId, session.recordId, attachmentId) };
+      } catch (error) {
+        if (error instanceof Error && error.message === "ATTACHMENT_NOT_OWNED_BY_SESSION") continue;
+        throw error;
       }
     }
     return undefined;

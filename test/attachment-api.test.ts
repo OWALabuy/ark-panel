@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import sharp from "sharp";
 import { PanelAttachmentApi } from "../src/server/attachment-api.js";
+import { SessionReadData } from "../src/server/read-data.js";
 import { createPanelSession } from "../src/storage/panel-sessions.js";
 import { SessionReadIndex, type SessionReadIndexEvent } from "../src/storage/index.js";
 import { tempFixture } from "./test-helpers.js";
@@ -95,4 +96,36 @@ test("附件 owner 查询复用会话 locator 而不重新枚举或解析所有 
   await api.upload(records[7]!.recordId, { fileName: "fixture.txt", mimeType: "text/plain", bytes: Buffer.from("fixture") });
   assert.equal(events.filter(event => event.type === "agent_scanned").length, scans);
   assert.equal(events.filter(event => event.type === "transcript_loaded").length, loads);
+});
+
+test("附件 panel-only owner 快照不受同 agent external root 离线影响", async t => {
+  const root = await tempFixture(t, "panel-attachment-panel-index-"), sessions = join(root, "source"),
+    movedSessions = join(root, "source-away"), data = join(root, "data");
+  await mkdir(sessions); await mkdir(data, { mode: 0o700 });
+  const externalId = "77777777-7777-4777-8777-777777777777";
+  await writeFile(join(sessions, `${externalId}.jsonl`), [
+    { type: "session", version: 3, id: externalId, timestamp: "2026-07-11T00:00:00Z" },
+    { type: "message", id: "external-user", parentId: null, message: { role: "user", content: "external fixture" } }
+  ].map(value => JSON.stringify(value)).join("\n") + "\n");
+  const panel = await createPanelSession(data, "agent", emptyDocument, { recordId: "panel-owner" });
+  let panelPublishes = 0;
+  const readIndex = new SessionReadIndex([{ agentId: "agent", sessionsRoot: sessions }], data, {
+    beforePublish: probe => { if (probe.type === "panel") panelPublishes++; }
+  });
+  const reads = new SessionReadData([{ agentId: "agent", sessionsRoot: sessions }], data, readIndex);
+  const api = new PanelAttachmentApi(data, ["agent"], readIndex);
+  assert.equal(reads.sessionIndex(), readIndex, "read 与 attachment 必须注入同一个生产索引实例");
+  assert.equal((await reads.sessions("agent")).length, 2, "先暖起同 agent 的 external 与 panel 来源");
+  await rename(sessions, movedSessions);
+
+  const image = await sharp({ create: { width: 8, height: 8, channels: 3, background: "#336699" } }).png().toBuffer();
+  const uploaded = await api.upload(panel.recordId, { fileName: "fixture.png", mimeType: "image/png", bytes: image });
+  const beforeDownload = panelPublishes, downloaded = await api.download(uploaded.id);
+  assert.equal(panelPublishes, beforeDownload + 1, "download 必须通过已注入索引的 panel-only publish 门禁");
+  assert.equal(downloaded?.fileName, "fixture.png"); assert.deepEqual(downloaded?.bytes, image);
+  const preview = await api.preview(uploaded.id);
+  assert.equal(panelPublishes, beforeDownload + 2, "preview 必须复用同一 panel-only 快照而不创建第二索引");
+  assert.equal(preview?.mimeType, "image/png"); assert.deepEqual(preview?.bytes, image);
+  await assert.rejects(reads.sessions("agent"), error =>
+    (error as NodeJS.ErrnoException).code === "ENOENT", "普通 read snapshot 仍须报告 external root 故障");
 });

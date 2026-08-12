@@ -225,7 +225,7 @@ gateway 的会话索引属于其内部状态：它仅使用进程内锁，也没
 - 文件由面板自己拥有，走 §5.3 的推理桥接，在固定 workspace 里跑推理。
 - 从活会话某条消息 fork，产出的就是这类会话。
 - 权威记录是同一 `sessions/<agentId>/<recordId>/` 下的 `metadata.json`、`transcript.jsonl` 与可选 `attachments.json`。新建时先在同父目录的保留 staging 名称空间写完并逐文件 `fsync`，再 `fsync` staging 目录，用单次目录 rename 发布并 `fsync` 父目录；发布前记录不得进入列表、读取、搜索或附件 GC。panel 会话 fork 会在附件存储互斥区内先校验源索引及目标分支实际引用的 manifest/blob，再把目标附件索引放入同一个 staging；源会话、源索引和内容寻址文件保持不变。扫描遇到历史半成品或单条损坏记录时只输出不含正文和私密绝对路径的结构化诊断并隔离该条，不自动删除，也不隐藏其他健康会话。
-- 服务端用同一个进程内读取索引覆盖 read agent 与附件 runtime agent 的 active/reset/panel，但读取 API 和附件 API 各自在自身 agent allowlist 内取快照、解析 recordId，不能借共享缓存扩大授权范围。主键包含 agent、source kind 和稳定 source identity，recordId 只作二级 locator，不能令跨 agent/source 的异常碰撞互相覆盖。列表与搜索保留各条复合 identity；record-only 调用遇到多个候选时以既有 not-found 语义失败关闭。目录清单和安全 stat 指纹只决定缓存失效，document 与 metadata 仍从权威文件验证；列表与搜索各取一次快照，新增/变更记录至多解析一次，recordId 唯一定位后只探测目标。权威 create/update/fork 已提交后，派生索引刷新失败只标脏并由后台或下次快照重建，不把已提交写入误报为失败。进程重启、缓存清空或坏缓存都从权威来源重建，不产生持久索引格式。
+- 服务端用同一个进程内读取索引覆盖 read agent 与附件 runtime agent 的 active/reset/panel，但读取 API 和附件 API 各自在自身 agent allowlist 内取快照、解析 recordId，不能借共享缓存扩大授权范围。附件引用只属于 panel 权威目录，因此下载与预览使用同一索引的 panel-source-only 快照，不枚举或验证 OpenClaw external transcript root。主键包含 agent、source kind 和稳定 source identity，recordId 只作二级 locator，不能令跨 agent/source 的异常碰撞互相覆盖。列表与搜索保留各条复合 identity；record-only 调用遇到多个候选时以既有 not-found 语义失败关闭。目录清单和安全 stat 指纹只决定缓存失效，document 与 metadata 仍从权威文件验证；列表与搜索各取一次快照，新增/变更记录至多解析一次，recordId 唯一定位后只探测目标。权威 create/update/fork 已提交后，派生索引刷新失败只标脏并由后台或下次快照重建，不把已提交写入误报为失败。进程重启、缓存清空或坏缓存都从权威来源重建，不产生持久索引格式。
 
 这个两层模型统一支撑了需求 1、3、4、6。
 

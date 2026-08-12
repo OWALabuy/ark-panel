@@ -32,6 +32,7 @@ interface IndexedSessionBase extends SessionIdentity {
 export type IndexedSession =
   | (IndexedSessionBase & { sourceKind: "active" | "reset"; identity: ReadonlySourceIdentity; metadata: ReadonlyMetadata })
   | (IndexedSessionBase & { sourceKind: "panel"; metadata: PanelMetadata });
+export type IndexedPanelSession = Extract<IndexedSession, { sourceKind: "panel" }>;
 
 export type SessionReadIndexEvent =
   | { type: "transcript_loaded" | "record_skipped"; agentId: string; recordId: string; sourceKind: SessionIndexSourceKind }
@@ -50,7 +51,7 @@ export interface SessionReadIndexFileSystem {
 }
 
 export interface SessionReadIndexPublishProbe {
-  type: "full" | "targeted"; agentId: string; identityKey?: string;
+  type: "full" | "panel" | "targeted"; agentId: string; identityKey?: string;
 }
 
 export interface SessionReadIndexOptions {
@@ -114,7 +115,9 @@ export class SessionReadIndex {
   private readonly dirty = new Set<string>();
   private readonly failed = new Map<string, string>();
   private readonly built = new Set<string>();
+  private readonly panelBuilt = new Set<string>();
   private readonly refreshing = new Map<string, Promise<boolean>>();
+  private readonly refreshingPanels = new Map<string, Promise<boolean>>();
   private readonly agentEpoch = new Map<string, number>();
   private globalEpoch = 0;
   private readonly dataRoot: string;
@@ -184,6 +187,13 @@ export class SessionReadIndex {
 
   private replaceAgent(agentId: string, next: ReadonlyMap<string, IndexedSession>): void {
     for (const key of [...(this.byAgent.get(agentId) ?? [])]) this.unregister(key);
+    for (const entry of [...next.values()].sort((left, right) => left.identityKey.localeCompare(right.identityKey))) this.store(entry);
+  }
+
+  private replaceAgentPanels(agentId: string, next: ReadonlyMap<string, IndexedPanelSession>): void {
+    for (const key of [...(this.byAgent.get(agentId) ?? [])]) {
+      if (this.known.get(key)?.sourceKind === "panel") this.unregister(key);
+    }
     for (const entry of [...next.values()].sort((left, right) => left.identityKey.localeCompare(right.identityKey))) this.store(entry);
   }
 
@@ -270,7 +280,7 @@ export class SessionReadIndex {
     }
   }
 
-  private async loadPanel(agentId: string, locator: PanelSessionLocator, token: EpochToken): Promise<IndexedSession | undefined> {
+  private async loadPanel(agentId: string, locator: PanelSessionLocator, token: EpochToken): Promise<IndexedPanelSession | undefined> {
     const identity = panelIdentity(agentId, locator.recordId), key = sessionIdentityKey(identity);
     if (this.failed.get(key) === locator.fingerprint) return undefined;
     const diagnostic = this.panelDiagnostic();
@@ -284,6 +294,19 @@ export class SessionReadIndex {
     this.event({ type: "transcript_loaded", agentId, recordId: locator.recordId, sourceKind: "panel" });
     return { ...identity, identityKey: key, revision: loaded.revision, updatedAt: loaded.updatedAt,
       fingerprint: loaded.fingerprint, document: loaded.document, metadata: loaded.metadata };
+  }
+
+  private async scanPanelEntries(agentId: string, token: EpochToken): Promise<Map<string, IndexedPanelSession>> {
+    const next = new Map<string, IndexedPanelSession>(), diagnostic = this.panelDiagnostic();
+    const locators = diagnostic === undefined ? await scanPanelSessionLocators(this.dataRoot, agentId) :
+      await scanPanelSessionLocators(this.dataRoot, agentId, diagnostic);
+    for (const locator of locators) {
+      const key = sessionIdentityKey(panelIdentity(agentId, locator.recordId)), cached = this.entries.get(key);
+      const entry = cached?.sourceKind === "panel" && cached.fingerprint === locator.fingerprint ?
+        cached : await this.loadPanel(agentId, locator, token);
+      if (entry) next.set(key, entry);
+    }
+    return next;
   }
 
   private async refreshAgentAttempt(agentId: string): Promise<boolean> {
@@ -302,18 +325,10 @@ export class SessionReadIndex {
         if (entry) next.set(key, entry);
       }
     }
-    const diagnostic = this.panelDiagnostic();
-    const panelLocators = diagnostic === undefined ? await scanPanelSessionLocators(this.dataRoot, agentId) :
-      await scanPanelSessionLocators(this.dataRoot, agentId, diagnostic);
-    for (const locator of panelLocators) {
-      const key = sessionIdentityKey(panelIdentity(agentId, locator.recordId)), cached = this.entries.get(key);
-      const entry = cached?.sourceKind === "panel" && cached.fingerprint === locator.fingerprint ?
-        cached : await this.loadPanel(agentId, locator, token);
-      if (entry) next.set(key, entry);
-    }
+    for (const [key, entry] of await this.scanPanelEntries(agentId, token)) next.set(key, entry);
     await this.options.beforePublish?.({ type: "full", agentId });
     if (!this.tokenCurrent(agentId, token)) return false;
-    this.replaceAgent(agentId, next); this.bumpAgent(agentId); this.built.add(agentId); return true;
+    this.replaceAgent(agentId, next); this.bumpAgent(agentId); this.built.add(agentId); this.panelBuilt.add(agentId); return true;
   }
 
   private async refreshAgent(agentId: string): Promise<void> {
@@ -323,6 +338,25 @@ export class SessionReadIndex {
       const promise = this.refreshAgentAttempt(agentId); this.refreshing.set(agentId, promise);
       try { if (await promise) return; }
       finally { if (this.refreshing.get(agentId) === promise) this.refreshing.delete(agentId); }
+    }
+  }
+
+  private async refreshPanelSourcesAttempt(agentId: string): Promise<boolean> {
+    if (!this.agents.has(agentId)) return true;
+    await assertPanelSessionDataRoot(this.dataRoot);
+    const token = this.token(agentId), next = await this.scanPanelEntries(agentId, token);
+    await this.options.beforePublish?.({ type: "panel", agentId });
+    if (!this.tokenCurrent(agentId, token)) return false;
+    this.replaceAgentPanels(agentId, next); this.bumpAgent(agentId); this.panelBuilt.add(agentId); return true;
+  }
+
+  private async refreshPanelSources(agentId: string): Promise<void> {
+    while (true) {
+      const current = this.refreshingPanels.get(agentId);
+      if (current) { if (await current) return; continue; }
+      const promise = this.refreshPanelSourcesAttempt(agentId); this.refreshingPanels.set(agentId, promise);
+      try { if (await promise) return; }
+      finally { if (this.refreshingPanels.get(agentId) === promise) this.refreshingPanels.delete(agentId); }
     }
   }
 
@@ -394,6 +428,18 @@ export class SessionReadIndex {
     return await this.snapshotSelected(selected);
   }
 
+  /** Panel-owned session directories are the only valid attachment owners. */
+  async snapshotPanelSessions(agentIds: Iterable<string>): Promise<readonly IndexedPanelSession[]> {
+    const selected = [...new Set(agentIds)].filter(agentId => this.agents.has(agentId)), allowed = new Set(selected);
+    while (true) {
+      await Promise.all(selected.map(agentId => this.refreshPanelSources(agentId)));
+      if (!selected.every(agentId => this.panelBuilt.has(agentId))) continue;
+      return [...this.entries.values()].filter((entry): entry is IndexedPanelSession =>
+        entry.sourceKind === "panel" && allowed.has(entry.agentId))
+        .sort((left, right) => this.compare(left, right));
+    }
+  }
+
   private async snapshotSelected(selected: readonly string[]): Promise<readonly IndexedSession[]> {
     const allowed = new Set(selected);
     while (true) {
@@ -456,6 +502,6 @@ export class SessionReadIndex {
 
   clear(): void {
     this.globalEpoch++; this.entries.clear(); this.known.clear(); this.byRecord.clear(); this.byAgent.clear();
-    this.dirty.clear(); this.failed.clear(); this.built.clear();
+    this.dirty.clear(); this.failed.clear(); this.built.clear(); this.panelBuilt.clear();
   }
 }
