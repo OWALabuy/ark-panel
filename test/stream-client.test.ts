@@ -1,8 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { GatewayControlError, loadGatewayStreamAuth, normalizeGatewayStreamEvent, OpenClawStreamObserver,
   resolveGatewayControlTransport, type GatewayControlMethod, type GatewayStreamEvent } from "../src/gateway/stream-client.js";
-import { deferred, withTimeout } from "./test-helpers.js";
+import { deferred, tempFixture, withTimeout } from "./test-helpers.js";
 
 test("stream parser accepts full text snapshots and tool lifecycle while rejecting malformed or oversized payloads", () => {
   assert.deepEqual(normalizeGatewayStreamEvent("chat", { runId: "run", sessionKey: "agent:a:s", seq: 2, state: "delta",
@@ -28,6 +30,29 @@ test("disabling preview does not disable the server control credential", async (
   });
 });
 
+test("server control auth requires an explicit non-blank secret and never accepts auth-none", async t => {
+  const root = await tempFixture(t, "gateway-auth-contract-"), configPath = join(root, "openclaw.json");
+  await writeFile(configPath, JSON.stringify({ gateway: { auth: { mode: "none" } } }));
+  const authNone = await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath }, true);
+  let sockets = 0;
+  const connection = authNone ? new OpenClawStreamObserver({ ...authNone, webSocketFactory: () => { sockets++; throw new Error("must not create an admin socket"); } }) : undefined;
+  assert.equal(authNone, undefined);
+  await assert.rejects(resolveGatewayControlTransport(connection).request("status", {}), error =>
+    error instanceof GatewayControlError && error.code === "GATEWAY_TRANSPORT_UNAVAILABLE");
+  assert.equal(sockets, 0);
+
+  await writeFile(configPath, JSON.stringify({ gateway: { auth: { mode: "token", token: "config-token", password: "config-password" } } }));
+  assert.deepEqual(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath }, true), {
+    url: "ws://127.0.0.1:18789", token: "config-token", password: "config-password"
+  });
+  assert.equal(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath,
+    PANEL_OPENCLAW_GATEWAY_TOKEN: "  ", PANEL_OPENCLAW_GATEWAY_PASSWORD: "\t" }, true), undefined);
+  assert.deepEqual(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath,
+    PANEL_OPENCLAW_GATEWAY_URL: "ws://127.0.0.1:19999", PANEL_OPENCLAW_GATEWAY_PASSWORD: "explicit-password" }, true), {
+    url: "ws://127.0.0.1:19999", password: "explicit-password"
+  });
+});
+
 test("missing server control credentials select a stable fail-closed transport", async () => {
   const transport = resolveGatewayControlTransport();
   await assert.rejects(transport.request("status", { privatePath: "/private/fixture", secret: "fixture-secret" }), error =>
@@ -37,15 +62,141 @@ test("missing server control credentials select a stable fail-closed transport",
 
 class FakeSocket {
   readyState = 1; sent: Record<string, unknown>[] = []; private listeners = new Map<string, Set<(event: never) => void>>();
+  private sendFailure: "throw" | "callback" | "ready" | "deferred-callback" | undefined;
+  private deferredSendCallback: ((error?: unknown) => void) | undefined;
   constructor(private readonly onRequest: (socket: FakeSocket, frame: Record<string, unknown>) => void) {}
   addEventListener(type: string, listener: (event: never) => void): void { const set = this.listeners.get(type) ?? new Set(); set.add(listener); this.listeners.set(type, set); }
-  send(data: string): void { const frame = JSON.parse(data) as Record<string, unknown>; this.sent.push(frame); this.onRequest(this, frame); }
+  send(data: string, callback?: (error?: unknown) => void): void {
+    const frame = JSON.parse(data) as Record<string, unknown>; this.sent.push(frame);
+    const failure = this.sendFailure; this.sendFailure = undefined;
+    if (failure === "throw") throw new Error("fixture-private-send-error");
+    if (failure === "callback") { queueMicrotask(() => callback?.(new Error("fixture-private-callback-error"))); return; }
+    if (failure === "deferred-callback") { this.deferredSendCallback = callback; return; }
+    if (failure === "ready") { this.readyState = 2; return; }
+    this.onRequest(this, frame);
+  }
+  failNextSend(failure: "throw" | "callback" | "ready" | "deferred-callback"): void { this.sendFailure = failure; }
+  releaseDeferredSendFailure(): void { const callback = this.deferredSendCallback; this.deferredSendCallback = undefined; callback?.(new Error("fixture-private-stale-send-error")); }
   close(code = 1000, reason = ""): void { this.readyState = 3; this.emit("close", { code, reason }); }
+  open(): void { this.emit("open", {}); }
   error(): void { this.emit("error", {}); }
   message(frame: unknown): void { this.emit("message", { data: JSON.stringify(frame) }); }
   challenge(): void { this.message({ type: "event", event: "connect.challenge", payload: { nonce: "nonce" } }); }
   private emit(type: string, event: unknown): void { for (const listener of this.listeners.get(type) ?? []) listener(event as never); }
 }
+
+test("observer ignores business events until the exact hello and subscriptions complete", async t => {
+  const sockets: FakeSocket[] = [], events: GatewayStreamEvent[] = [];
+  const observer = new OpenClawStreamObserver({ url: "ws://fixture", token: "fixture", requestTimeoutMs: 300,
+    webSocketFactory: () => {
+      const socket = new FakeSocket((current, frame) => queueMicrotask(() => current.message({ type: "res", id: frame.id, ok: true,
+        payload: frame.method === "connect" ? { type: "hello-ok", server: { version: "2026.6.11" },
+          auth: { role: "operator", scopes: ["operator.read", "operator.write", "operator.admin"] } } : { subscribed: true } })));
+      sockets.push(socket); return socket;
+    } });
+  t.after(() => observer.stop());
+  const observed = observer.observe("agent:a:pre-hello", event => events.push(event));
+  sockets[0]!.message({ type: "event", event: "chat", payload: { runId: "stale-run", sessionKey: "agent:a:pre-hello",
+    state: "delta", message: { content: "must-not-deliver" } } });
+  sockets[0]!.message({ type: "event", event: "session.tool", payload: { runId: "stale-run", sessionKey: "agent:a:pre-hello",
+    stream: "tool", data: { phase: "start", callId: "pre-hello", name: "exec" } } });
+  assert.equal(events.some(event => event.type === "assistant_text" || event.type === "tool"), false);
+  sockets[0]!.challenge();
+  const unobserve = await withTimeout(observed, "exact hello after ignored pre-hello events");
+  sockets[0]!.message({ type: "event", event: "chat", payload: { runId: "accepted-run", sessionKey: "agent:a:pre-hello",
+    state: "delta", message: { content: "accepted" } } });
+  assert.equal(events.some(event => event.type === "assistant_text" && event.text === "accepted"), true);
+  assert.equal(events.some(event => event.type === "assistant_text" && event.text === "must-not-deliver"), false);
+  unobserve(); observer.stop();
+});
+
+test("stale socket callbacks, challenge, hello, and data cannot mutate a replacement generation", async t => {
+  const sockets: FakeSocket[] = [], reconnected = deferred();
+  let staleConnectId: unknown;
+  const observer = new OpenClawStreamObserver({ url: "ws://fixture", token: "fixture", requestTimeoutMs: 300,
+    reconnectMinMs: 1, reconnectMaxMs: 2, webSocketFactory: () => {
+      const index = sockets.length;
+      const socket = new FakeSocket((current, frame) => {
+        if (index === 0 && frame.method === "connect") { staleConnectId = frame.id; return; }
+        queueMicrotask(() => current.message({ type: "res", id: frame.id, ok: true,
+          payload: frame.method === "connect" ? { type: "hello-ok", server: { version: "2026.6.11" },
+            auth: { role: "operator", scopes: ["operator.read", "operator.write", "operator.admin"] } } : { ok: true } }));
+      });
+      sockets.push(socket); if (index === 1) reconnected.resolve(); queueMicrotask(() => socket.challenge()); return socket;
+    } });
+  t.after(() => observer.stop());
+  const firstRequest = observer.request("status", {});
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.ok(staleConnectId); sockets[0]!.error();
+  await withTimeout(reconnected.promise, "replacement socket creation");
+  assert.deepEqual(await firstRequest, { ok: true });
+  const events: GatewayStreamEvent[] = [], unobserve = await observer.observe("agent:a:generation", event => events.push(event));
+  const staleSentCount = sockets[0]!.sent.length;
+  sockets[0]!.message({ type: "res", id: staleConnectId, ok: true, payload: { type: "hello-ok", server: { version: "2026.6.11" },
+    auth: { role: "operator", scopes: ["operator.read", "operator.write", "operator.admin"] } } });
+  sockets[0]!.message({ type: "event", event: "chat", payload: { runId: "stale-run", sessionKey: "agent:a:generation",
+    state: "delta", message: { content: "stale" } } });
+  sockets[0]!.message({ type: "event", event: "session.tool", payload: { runId: "stale-run", sessionKey: "agent:a:generation",
+    stream: "tool", data: { phase: "start", callId: "stale", name: "exec" } } });
+  sockets[0]!.challenge(); sockets[0]!.open(); sockets[0]!.error(); sockets[0]!.close(1008, "fixture-private-stale-close");
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(sockets[0]!.sent.length, staleSentCount);
+  assert.equal(sockets.length, 2); assert.equal(sockets[1]!.readyState, 1);
+  assert.equal(events.some(event => event.type === "assistant_text" || event.type === "tool"), false);
+  sockets[1]!.message({ type: "event", event: "chat", payload: { runId: "fresh-run", sessionKey: "agent:a:generation",
+    state: "delta", message: { content: "fresh" } } });
+  assert.equal(events.some(event => event.type === "assistant_text" && event.text === "fresh"), true);
+  assert.deepEqual(await observer.request("status", {}), { ok: true });
+  unobserve(); observer.stop();
+});
+
+test("send failures retire the owned socket and recover on one replacement generation", async t => {
+  for (const failure of ["throw", "callback", "ready"] as const) {
+    const sockets: FakeSocket[] = [], reconnected = deferred(), diagnostics: string[] = [];
+    const observer = new OpenClawStreamObserver({ url: "ws://fixture", token: "fixture", requestTimeoutMs: 300,
+      reconnectMinMs: 1, reconnectMaxMs: 2, onDiagnostic: message => diagnostics.push(message), webSocketFactory: () => {
+        const socket = new FakeSocket((current, frame) => queueMicrotask(() => current.message({ type: "res", id: frame.id, ok: true,
+          payload: frame.method === "connect" ? { type: "hello-ok", server: { version: "2026.6.11" },
+            auth: { role: "operator", scopes: ["operator.read", "operator.write", "operator.admin"] } } : { ok: true } })));
+        sockets.push(socket); if (sockets.length === 2) reconnected.resolve(); queueMicrotask(() => socket.challenge()); return socket;
+      } });
+    t.after(() => observer.stop());
+    assert.deepEqual(await observer.request("status", {}), { ok: true });
+    sockets[0]!.failNextSend(failure);
+    await assert.rejects(observer.request("status", {}), error => error instanceof GatewayControlError &&
+      error.code === "GATEWAY_TRANSPORT_UNAVAILABLE" && !error.message.includes("fixture-private"));
+    await withTimeout(reconnected.promise, `${failure} send failure replacement`);
+    assert.equal(sockets[0]!.readyState, 3); assert.equal(sockets.length, 2);
+    assert.deepEqual(await observer.request("status", {}), { ok: true });
+    assert.equal(diagnostics.some(message => message.includes("fixture-private")), false);
+    observer.stop();
+  }
+});
+
+test("a stale send callback cannot invalidate the current generation", async t => {
+  const sockets: FakeSocket[] = [], reconnected = deferred();
+  const observer = new OpenClawStreamObserver({ url: "ws://fixture", token: "fixture", requestTimeoutMs: 300,
+    reconnectMinMs: 1, reconnectMaxMs: 2, webSocketFactory: () => {
+      const socket = new FakeSocket((current, frame) => queueMicrotask(() => current.message({ type: "res", id: frame.id, ok: true,
+        payload: frame.method === "connect" ? { type: "hello-ok", server: { version: "2026.6.11" },
+          auth: { role: "operator", scopes: ["operator.read", "operator.write", "operator.admin"] } } : { ok: true } })));
+      sockets.push(socket); if (sockets.length === 2) reconnected.resolve(); queueMicrotask(() => socket.challenge()); return socket;
+    } });
+  t.after(() => observer.stop());
+  assert.deepEqual(await observer.request("status", {}), { ok: true });
+  sockets[0]!.failNextSend("deferred-callback");
+  const staleRequest = observer.request("status", {});
+  await new Promise<void>(resolve => setImmediate(resolve));
+  sockets[0]!.error();
+  await assert.rejects(staleRequest, /GATEWAY_TRANSPORT_UNAVAILABLE/);
+  await withTimeout(reconnected.promise, "replacement before stale send callback");
+  assert.deepEqual(await observer.request("status", {}), { ok: true });
+  sockets[0]!.releaseDeferredSendFailure();
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(sockets.length, 2); assert.equal(sockets[1]!.readyState, 1);
+  assert.deepEqual(await observer.request("status", {}), { ok: true });
+  observer.stop();
+});
 
 test("observer uses backend identity, routes sessions independently, and resubscribes after reconnect", async t => {
   const sockets: FakeSocket[] = [], methods: string[] = [];

@@ -140,7 +140,7 @@ OpenClaw 中 write 能满足 read、admin 能满足全部 `operator.*`，但面�
 ### 4.4 鉴权方式（修正旧版结论）
 - OpenClaw `2026.6.11` 对 direct-loopback 的 `gateway-client/backend` + 共享 token/password 提供本机 backend self-pairing 分支，因此面板服务端不需要伪造浏览器设备身份，也不启用 `dangerouslyDisableDeviceAuth`。远程、浏览器或显式 device-token 身份不在这条保证内。
 - 连接角色固定为 `operator`，请求并核验精确的 read/write/admin scope 集合。scope 是同一个受信 Gateway operator 域内的纵深 guardrail，不是 hostile multi-tenant 隔离；共享 token/password 必须视为 owner 级 secret。真正跨用户/机器的隔离需要独立 Gateway/OS 用户，而不是只拆 scope 字符串。
-- token 使用常量时间算法与 `gateway.auth.token` 比较。应配置长期、可轮换的 secret；只存于 Gateway 配置或面板环境，不下发浏览器、不写日志。轮换时同步更新两端并重启，回滚也同步恢复两端。本次 scope 契约不要求重新签发既有凭据。
+- token 使用常量时间算法与 `gateway.auth.token` 比较。应配置长期、可轮换的 secret；只存于 Gateway 配置或面板环境，不下发浏览器、不写日志。虽然上游可允许 direct-loopback 的 `auth.mode=none`，面板的 admin 控制连接必须解析出非空 token/password，否则不建 socket；显式空白覆盖项也不回落到配置文件。轮换时同步更新两端并重启，回滚也同步恢复两端。本次 scope 契约不要求重新签发既有凭据。
 
 ---
 

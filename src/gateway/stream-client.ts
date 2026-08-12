@@ -78,7 +78,7 @@ interface WebSocketMessageEvent { data: unknown }
 interface WebSocketCloseEvent { code: number; reason: string }
 interface WebSocketLike {
   readonly readyState: number;
-  send(data: string): void;
+  send(data: string, callback?: (error?: unknown) => void): void;
   close(code?: number, reason?: string): void;
   addEventListener(type: "open", listener: () => void): void;
   addEventListener(type: "message", listener: (event: WebSocketMessageEvent) => void): void;
@@ -97,7 +97,14 @@ interface ObserverOptions {
   onDiagnostic?: (message: string) => void;
 }
 
-interface PendingRequest { method: string; resolve: (value: unknown) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }
+interface PendingRequest {
+  source: WebSocketLike;
+  generation: number;
+  method: string;
+  resolve: (value: unknown) => void;
+  reject: (error: Error) => void;
+  timer: NodeJS.Timeout;
+}
 
 function object(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
@@ -166,8 +173,12 @@ export function normalizeGatewayStreamEvent(eventName: string, rawPayload: unkno
 
 export class OpenClawStreamObserver implements GatewayControlTransport {
   private socket: WebSocketLike | undefined;
+  private socketGeneration = 0;
+  private nextSocketGeneration = 0;
   private stopped = true;
   private connected = false;
+  private connectedGeneration: number | undefined;
+  private handshakeGeneration: number | undefined;
   private reconnectDelay: number;
   private reconnectTimer: NodeJS.Timeout | undefined;
   private readonly pending = new Map<string, PendingRequest>();
@@ -178,6 +189,8 @@ export class OpenClawStreamObserver implements GatewayControlTransport {
   private readonly reconnectMaxMs: number;
   private readonly factory: (url: string) => WebSocketLike;
   private grantedScopes: ReadonlySet<GatewayOperatorScope> | undefined;
+  private grantedSource: WebSocketLike | undefined;
+  private grantedGeneration: number | undefined;
   private connectionFailure: GatewayControlError | undefined;
 
   constructor(private readonly options: ObserverOptions) {
@@ -193,19 +206,20 @@ export class OpenClawStreamObserver implements GatewayControlTransport {
   stop(): void {
     this.stopped = true; if (this.reconnectTimer) clearTimeout(this.reconnectTimer); this.reconnectTimer = undefined;
     const error = new GatewayControlError("GATEWAY_TRANSPORT_UNAVAILABLE");
-    this.connectionFailure = error; this.grantedScopes = undefined;
-    this.rejectPending(error); this.socket?.close(1000, "stopped"); this.socket = undefined; this.connected = false;
+    const source = this.socket;
+    this.socket = undefined; this.connectionFailure = error; this.clearConnectionState(); this.rejectPending(error);
+    try { source?.close(1000, "stopped"); } catch { /* the connection is already unusable */ }
   }
 
   async observe(sessionKey: string, listener: GatewayStreamListener): Promise<() => void> {
     const values = this.listeners.get(sessionKey) ?? new Set<GatewayStreamListener>(); values.add(listener); this.listeners.set(sessionKey, values);
-    listener({ type: "connection", state: this.connected ? "connected" : "disconnected" });
+    listener({ type: "connection", state: this.currentConnection() ? "connected" : "disconnected" });
     this.start();
     try { await this.waitUntilConnected(); await this.subscribe(sessionKey); }
     catch (error) { values.delete(listener); if (!values.size) this.listeners.delete(sessionKey); throw error; }
     return () => {
       values.delete(listener); if (values.size) return; this.listeners.delete(sessionKey); this.subscribed.delete(sessionKey);
-      if (this.connected) void this.request("sessions.messages.unsubscribe", { key: sessionKey }).catch(() => undefined);
+      if (this.currentConnection()) void this.request("sessions.messages.unsubscribe", { key: sessionKey }).catch(() => undefined);
     };
   }
 
@@ -219,7 +233,7 @@ export class OpenClawStreamObserver implements GatewayControlTransport {
 
   private async waitUntilConnected(): Promise<void> {
     const deadline = Date.now() + this.requestTimeoutMs;
-    while (!this.connected) {
+    while (!this.currentConnection()) {
       if (this.connectionFailure) throw this.connectionFailure;
       if (this.stopped) throw new GatewayControlError("GATEWAY_TRANSPORT_UNAVAILABLE");
       if (Date.now() >= deadline) throw new GatewayControlError("GATEWAY_REQUEST_TIMEOUT", "connect");
@@ -236,16 +250,46 @@ export class OpenClawStreamObserver implements GatewayControlTransport {
       const error = new GatewayControlError("GATEWAY_TRANSPORT_UNAVAILABLE");
       this.connectionFailure = error; this.diagnostic(`gateway control connect failed (${error.code})`); this.scheduleReconnect(); return;
     }
-    this.socket = socket;
-    socket.addEventListener("message", event => this.handleMessage(event.data));
-    socket.addEventListener("close", event => this.handleClose(socket, event));
-    socket.addEventListener("error", () => {
-      this.diagnostic("gateway stream websocket error");
-      this.invalidateSocket(socket, new Error("gateway stream websocket error"), 1011, "websocket error");
-    });
+    const generation = ++this.nextSocketGeneration;
+    this.socket = socket; this.socketGeneration = generation;
+    socket.addEventListener("open", () => this.handleOpen(socket, generation));
+    socket.addEventListener("message", event => this.handleMessage(socket, generation, event.data));
+    socket.addEventListener("close", event => this.handleClose(socket, generation, event));
+    socket.addEventListener("error", () => this.handleError(socket, generation));
   }
 
-  private handleMessage(value: unknown): void {
+  private ownsSocket(source: WebSocketLike, generation: number): boolean {
+    return this.socket === source && this.socketGeneration === generation;
+  }
+
+  private currentGrant(source: WebSocketLike, generation: number): ReadonlySet<GatewayOperatorScope> | undefined {
+    if (!this.ownsSocket(source, generation) || this.grantedSource !== source || this.grantedGeneration !== generation) return undefined;
+    return this.grantedScopes;
+  }
+
+  private isCurrentConnection(source: WebSocketLike, generation: number): boolean {
+    return this.ownsSocket(source, generation) && this.connected && this.connectedGeneration === generation && Boolean(this.currentGrant(source, generation));
+  }
+
+  private currentConnection(): { source: WebSocketLike; generation: number; scopes: ReadonlySet<GatewayOperatorScope> } | undefined {
+    const source = this.socket, generation = this.socketGeneration;
+    if (!source || !this.isCurrentConnection(source, generation)) return undefined;
+    const scopes = this.currentGrant(source, generation); return scopes ? { source, generation, scopes } : undefined;
+  }
+
+  private handleOpen(source: WebSocketLike, generation: number): void {
+    if (!this.ownsSocket(source, generation)) return;
+    // OpenClaw drives the authenticated handshake with connect.challenge.
+  }
+
+  private handleError(source: WebSocketLike, generation: number): void {
+    if (!this.ownsSocket(source, generation)) return;
+    this.diagnostic("gateway stream websocket error");
+    this.invalidateSocket(source, generation, new GatewayControlError("GATEWAY_TRANSPORT_UNAVAILABLE"), 1011, "websocket error");
+  }
+
+  private handleMessage(source: WebSocketLike, generation: number, value: unknown): void {
+    if (!this.ownsSocket(source, generation)) return;
     let frame: Record<string, unknown> | undefined;
     try {
       const raw = typeof value === "string" ? value : value instanceof ArrayBuffer ? Buffer.from(value).toString("utf8") : String(value);
@@ -256,46 +300,56 @@ export class OpenClawStreamObserver implements GatewayControlTransport {
     if (!frame) return;
     if (frame.type === "event") {
       const eventName = nonEmpty(frame.event);
-      if (eventName === "connect.challenge") { const nonce = nonEmpty(object(frame.payload)?.nonce); if (nonce) void this.connectHandshake(nonce); return; }
+      if (eventName === "connect.challenge") { const nonce = nonEmpty(object(frame.payload)?.nonce); if (nonce) this.handleChallenge(source, generation, nonce); return; }
       if (!eventName) return;
+      if (!this.isCurrentConnection(source, generation)) return;
       const normalized = normalizeGatewayStreamEvent(eventName, frame.payload); if (!normalized) return;
       for (const listener of this.listeners.get(normalized.sessionKey) ?? []) listener(normalized);
       return;
     }
     if (frame.type !== "res" || typeof frame.id !== "string") return;
-    const pending = this.pending.get(frame.id); if (!pending) return; this.pending.delete(frame.id); clearTimeout(pending.timer);
+    const pending = this.pending.get(frame.id);
+    if (!pending || pending.source !== source || pending.generation !== generation) return;
+    this.pending.delete(frame.id); clearTimeout(pending.timer);
     if (frame.ok === true) pending.resolve(frame.payload);
     else pending.reject(new GatewayControlError(pending.method === "connect" ? "GATEWAY_HANDSHAKE_DENIED" : "GATEWAY_REQUEST_DENIED"));
   }
 
-  private async connectHandshake(_nonce: string): Promise<void> {
-    const socket = this.socket;
-    if (!socket) return;
+  private handleChallenge(source: WebSocketLike, generation: number, nonce: string): void {
+    if (!this.ownsSocket(source, generation) || this.handshakeGeneration === generation || this.connectedGeneration === generation) return;
+    this.handshakeGeneration = generation; void this.connectHandshake(source, generation, nonce);
+  }
+
+  private async connectHandshake(source: WebSocketLike, generation: number, _nonce: string): Promise<void> {
+    if (!this.ownsSocket(source, generation)) return;
     try {
       const auth = this.options.token || this.options.password ? { ...(this.options.token ? { token: this.options.token } : {}), ...(this.options.password ? { password: this.options.password } : {}) } : undefined;
-      const hello = await this.rawRequest("connect", { minProtocol: 4, maxProtocol: 4,
+      const hello = await this.rawRequest(source, generation, "connect", { minProtocol: 4, maxProtocol: 4,
         client: { id: "gateway-client", displayName: "ark-panel-stream", version: "0.1.0", platform: process.platform, mode: "backend", instanceId: randomUUID() },
         caps: ["tool-events"], ...(auth ? { auth } : {}), role: GATEWAY_OPERATOR_ROLE, scopes: [...GATEWAY_OPERATOR_SCOPES] });
-      if (this.socket !== socket) throw new GatewayControlError("GATEWAY_CONNECTION_CLOSED");
+      if (!this.ownsSocket(source, generation)) return;
       const grantedScopes = validateGatewayHello(hello);
-      this.grantedScopes = grantedScopes;
-      await this.rawRequest("sessions.subscribe", {});
-      if (this.socket !== socket) throw new GatewayControlError("GATEWAY_CONNECTION_CLOSED");
+      this.grantedScopes = grantedScopes; this.grantedSource = source; this.grantedGeneration = generation;
+      await this.rawRequest(source, generation, "sessions.subscribe", {});
+      if (!this.ownsSocket(source, generation) || !this.currentGrant(source, generation)) return;
       this.connectionFailure = undefined;
-      this.connected = true; this.reconnectDelay = this.reconnectMinMs; this.subscribed.clear(); this.broadcastConnection("connected");
+      this.connected = true; this.connectedGeneration = generation; this.handshakeGeneration = undefined;
+      this.reconnectDelay = this.reconnectMinMs; this.subscribed.clear(); this.broadcastConnection("connected");
       this.diagnostic(`gateway control connected (${GATEWAY_OPERATOR_SCOPES.join(",")})`);
       for (const key of this.listeners.keys()) await this.subscribe(key);
     } catch (error) {
+      if (!this.ownsSocket(source, generation)) return;
       const normalized = normalizedControlError(error, "GATEWAY_HANDSHAKE_DENIED");
-      this.connectionFailure = normalized; this.grantedScopes = undefined;
       this.diagnostic(`gateway control handshake failed (${normalized.code})`);
-      if (this.socket === socket) this.invalidateSocket(socket, normalized, 4001, "handshake failed");
+      this.invalidateSocket(source, generation, normalized, 4001, "handshake failed");
     }
   }
 
   private async subscribe(sessionKey: string): Promise<void> {
-    if (!this.connected || this.subscribed.has(sessionKey)) return;
-    await this.request("sessions.messages.subscribe", { key: sessionKey }); this.subscribed.add(sessionKey);
+    const connection = this.currentConnection();
+    if (!connection || this.subscribed.has(sessionKey)) return;
+    await this.rawRequest(connection.source, connection.generation, "sessions.messages.subscribe", { key: sessionKey });
+    if (this.isCurrentConnection(connection.source, connection.generation)) this.subscribed.add(sessionKey);
   }
 
   request(method: GatewayControlMethod, params: unknown, timeoutMs?: number): Promise<unknown> {
@@ -307,50 +361,78 @@ export class OpenClawStreamObserver implements GatewayControlTransport {
 
   private async requestConnected(method: string, requiredScope: GatewayOperatorScope, params: unknown, timeoutMs?: number): Promise<unknown> {
     await this.waitUntilConnected();
-    if (!this.grantedScopes?.has(requiredScope)) throw new GatewayControlError("GATEWAY_SCOPE_CONTRACT_VIOLATION");
-    return await this.rawRequest(method, params, timeoutMs);
+    const connection = this.currentConnection();
+    if (!connection) throw new GatewayControlError("GATEWAY_CONNECTION_CLOSED");
+    if (!connection.scopes.has(requiredScope)) throw new GatewayControlError("GATEWAY_SCOPE_CONTRACT_VIOLATION");
+    return await this.rawRequest(connection.source, connection.generation, method, params, timeoutMs);
   }
 
-  private rawRequest(method: string, params: unknown, timeoutMs = this.requestTimeoutMs): Promise<unknown> {
+  private rawRequest(source: WebSocketLike, generation: number, method: string, params: unknown, timeoutMs = this.requestTimeoutMs): Promise<unknown> {
+    if (!this.ownsSocket(source, generation)) return Promise.reject(new GatewayControlError("GATEWAY_CONNECTION_CLOSED"));
     if (method !== "connect") {
       const requiredScope = controlMethodScope(method);
       if (!requiredScope) return Promise.reject(new GatewayControlError("GATEWAY_RPC_METHOD_NOT_ALLOWED"));
-      if (!this.grantedScopes?.has(requiredScope)) {
+      if (!this.currentGrant(source, generation)?.has(requiredScope)) {
         return Promise.reject(new GatewayControlError("GATEWAY_SCOPE_CONTRACT_VIOLATION"));
       }
     }
-    const socket = this.socket;
-    if (!socket || socket.readyState !== 1) return Promise.reject(new GatewayControlError("GATEWAY_TRANSPORT_UNAVAILABLE"));
+    if (source.readyState !== 1) {
+      const error = new GatewayControlError("GATEWAY_TRANSPORT_UNAVAILABLE");
+      this.invalidateSocket(source, generation, error, 1011, "socket not ready"); return Promise.reject(error);
+    }
     const id = randomUUID();
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
-        if (!this.pending.has(id)) return;
+        const pending = this.pending.get(id); if (!pending || pending.source !== source || pending.generation !== generation) return;
         const error = new GatewayControlError("GATEWAY_REQUEST_TIMEOUT", method);
         this.diagnostic(error.message);
-        this.invalidateSocket(socket, error, 1011, "request timeout");
+        if (this.ownsSocket(source, generation)) this.invalidateSocket(source, generation, error, 1011, "request timeout");
+        else { this.pending.delete(id); clearTimeout(timer); reject(new GatewayControlError("GATEWAY_CONNECTION_CLOSED")); }
       }, timeoutMs); timer.unref();
-      this.pending.set(id, { method, resolve, reject, timer });
-      try { socket.send(JSON.stringify({ type: "req", id, method, params })); }
-      catch { clearTimeout(timer); this.pending.delete(id); reject(new GatewayControlError("GATEWAY_TRANSPORT_UNAVAILABLE")); }
+      this.pending.set(id, { source, generation, method, resolve, reject, timer });
+      const failSend = () => this.handleSendFailure(source, generation, id);
+      try {
+        const encoded = JSON.stringify({ type: "req", id, method, params });
+        if (source.send.length >= 2) source.send(encoded, error => { if (error) failSend(); }); else source.send(encoded);
+        if (source.readyState !== 1) failSend();
+      } catch { failSend(); }
     });
   }
 
-  private handleClose(socket: WebSocketLike, _event: WebSocketCloseEvent): void {
-    if (this.socket !== socket) return; this.socket = undefined;
+  private handleSendFailure(source: WebSocketLike, generation: number, id: string): void {
+    const pending = this.pending.get(id);
+    if (!pending || pending.source !== source || pending.generation !== generation) return;
+    const error = new GatewayControlError("GATEWAY_TRANSPORT_UNAVAILABLE");
+    if (this.ownsSocket(source, generation)) this.invalidateSocket(source, generation, error, 1011, "send failed");
+    else { this.pending.delete(id); clearTimeout(pending.timer); pending.reject(new GatewayControlError("GATEWAY_CONNECTION_CLOSED")); }
+  }
+
+  private handleClose(source: WebSocketLike, generation: number, _event: WebSocketCloseEvent): void {
+    if (!this.ownsSocket(source, generation)) return;
     const error = this.connectionFailure ?? new GatewayControlError("GATEWAY_CONNECTION_CLOSED");
-    this.connectionFailure = error; this.grantedScopes = undefined; this.rejectPending(error);
-    if (this.connected) { this.connected = false; this.subscribed.clear(); this.broadcastConnection("disconnected"); }
+    this.invalidateSocket(source, generation, error);
+  }
+
+  private invalidateSocket(source: WebSocketLike, generation: number, error: Error, code?: number, reason?: string): void {
+    if (!this.ownsSocket(source, generation)) return;
+    this.socket = undefined;
+    const normalized = normalizedControlError(error, "GATEWAY_TRANSPORT_UNAVAILABLE");
+    const wasConnected = this.connected && this.connectedGeneration === generation;
+    this.connectionFailure = normalized; this.clearConnectionState(); this.rejectPendingFor(source, generation, normalized);
+    if (wasConnected) this.broadcastConnection("disconnected");
+    if (code !== undefined) try { source.close(code, reason); } catch { /* the connection is already unusable */ }
     if (!this.stopped) this.scheduleReconnect();
   }
 
-  private invalidateSocket(socket: WebSocketLike, error: Error, code: number, reason: string): void {
-    if (this.socket !== socket) return;
-    this.socket = undefined;
-    const normalized = normalizedControlError(error, "GATEWAY_TRANSPORT_UNAVAILABLE");
-    this.connectionFailure = normalized; this.grantedScopes = undefined; this.rejectPending(normalized);
-    if (this.connected) { this.connected = false; this.subscribed.clear(); this.broadcastConnection("disconnected"); }
-    try { socket.close(code, reason); } catch { /* the connection is already unusable */ }
-    if (!this.stopped) this.scheduleReconnect();
+  private clearConnectionState(): void {
+    this.connected = false; this.connectedGeneration = undefined; this.handshakeGeneration = undefined;
+    this.grantedScopes = undefined; this.grantedSource = undefined; this.grantedGeneration = undefined; this.subscribed.clear();
+  }
+
+  private rejectPendingFor(source: WebSocketLike, generation: number, error: Error): void {
+    for (const [id, value] of this.pending) if (value.source === source && value.generation === generation) {
+      clearTimeout(value.timer); this.pending.delete(id); value.reject(error);
+    }
   }
 
   private rejectPending(error: Error): void { for (const value of this.pending.values()) { clearTimeout(value.timer); value.reject(error); } this.pending.clear(); }
@@ -364,13 +446,17 @@ interface GatewayAuth { url: string; token?: string; password?: string }
 export async function loadGatewayStreamAuth(env: NodeJS.ProcessEnv = process.env, allowWhenStreamingDisabled = false): Promise<GatewayAuth | undefined> {
   if (!allowWhenStreamingDisabled && env.PANEL_OPENCLAW_STREAMING === "0") return undefined;
   const explicitUrl = nonEmpty(env.PANEL_OPENCLAW_GATEWAY_URL), explicitToken = nonEmpty(env.PANEL_OPENCLAW_GATEWAY_TOKEN), explicitPassword = nonEmpty(env.PANEL_OPENCLAW_GATEWAY_PASSWORD);
-  if (explicitToken || explicitPassword) return { url: explicitUrl ?? DEFAULT_URL, ...(explicitToken ? { token: explicitToken } : {}), ...(explicitPassword ? { password: explicitPassword } : {}) };
+  const hasExplicitCredential = env.PANEL_OPENCLAW_GATEWAY_TOKEN !== undefined || env.PANEL_OPENCLAW_GATEWAY_PASSWORD !== undefined;
+  if (hasExplicitCredential) {
+    if (!explicitToken && !explicitPassword) return undefined;
+    return { url: explicitUrl ?? DEFAULT_URL, ...(explicitToken ? { token: explicitToken } : {}), ...(explicitPassword ? { password: explicitPassword } : {}) };
+  }
   const path = resolve(env.OPENCLAW_CONFIG_PATH ?? env.OPENCLAW_CONFIG ?? `${env.HOME ?? homedir()}/.openclaw/openclaw.json`);
   try {
     const config = object(JSON.parse(await readFile(path, "utf8"))), gateway = object(config?.gateway), remote = object(gateway?.remote), auth = object(gateway?.auth);
     const remoteMode = gateway?.mode === "remote", url = explicitUrl ?? (remoteMode ? nonEmpty(remote?.url) : undefined) ?? DEFAULT_URL;
     const token = nonEmpty(remoteMode ? remote?.token : auth?.token), password = nonEmpty(remoteMode ? remote?.password : auth?.password);
-    if (!token && !password && auth?.mode !== "none") return undefined;
+    if (!token && !password) return undefined;
     return { url, ...(token ? { token } : {}), ...(password ? { password } : {}) };
   } catch { return undefined; }
 }

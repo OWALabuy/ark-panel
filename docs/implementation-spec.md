@@ -316,17 +316,20 @@ fork 和编辑重发共用底层（见 §5.0）：都是「从目标 entry 回�
 - 通过 localhost WebSocket 连 `127.0.0.1:18789`。
 - 固定 OpenClaw `2026.6.11` 的握手身份为 `client.id=gateway-client`、`client.mode=backend`、`role=operator`，使用共享 token/password。direct-loopback backend self-pairing 不需要伪造浏览器设备身份；远程或浏览器身份不继承该保证。
 - 请求 scope 必须恰好是 `operator.read`、`operator.write`、`operator.admin`；`hello` 必须是 `hello-ok`、版本仍为 `2026.6.11`、角色仍为 operator，且授权 scope 集合逐项精确相同。缺项、额外/未知项、重复项或错误角色一律 fail closed，不能利用 admin 蕴含关系放宽 `hello` 校验。
+- 每条 socket 分配独立 source/generation。open、message、challenge、hello、error、close 和 send callback 处理前都必须确认仍是当前 generation；业务 chat/tool 事件只有在当前 generation 完成精确 hello、全局订阅且授权绑定仍有效后才投递。pre-hello 与旧 socket 事件忽略；当前 socket 的 send throw、错误 callback 或非 OPEN ready 状态统一注销该 generation、稳定拒绝 pending、关闭并重新握手，旧 callback 不得注销新连接。
 - RPC 采用版本化 default-deny 允许列表：read 仅有 `status`、`commands.list`、`tools.catalog`、`tools.effective`、`sessions.list`、`sessions.subscribe`、`sessions.messages.subscribe` / `unsubscribe`、`artifacts.list` / `download`；write 仅有 `sessions.create` / `send` / `abort`；admin 仅有 `sessions.patch` / `compact` / `delete`。任何未登记方法都必须在建立连接或发帧前返回 `GATEWAY_RPC_METHOD_NOT_ALLOWED`。
 - scope/role/hello 违反契约返回 `GATEWAY_SCOPE_CONTRACT_VIOLATION`（版本不符仍用 `OPENCLAW_VERSION_UNSUPPORTED`）；上游握手拒绝与 RPC 拒绝分别归一为 `GATEWAY_HANDSHAKE_DENIED` / `GATEWAY_REQUEST_DENIED`。错误、close reason 与诊断日志不得带 token/password、上游原始 payload、消息正文、prompt 或私有路径。
 - `PANEL_OPENCLAW_STREAMING=0` 只关闭临时文本/工具预览；同一控制连接与 read/write/admin scope 仍用于生成、typed 命令、附件和临时 session 生命周期。连接断开后，已接受 run 的终态继续由 trajectory watcher 判定；新的控制 RPC 不自动改走不同凭据或扩大 scope。
-- 共享 secret 是单一 trusted-local operator 的 owner 级凭据，不是多租户隔离。轮换时同步更新 Gateway 与面板并重启两端，回滚时也同步恢复；本次 scope 契约不要求重新签发凭据或迁移存储。生产无法解析固定凭据时保留只读面板，并让所有 Gateway 控制调用稳定返回 `GATEWAY_TRANSPORT_UNAVAILABLE`；不能把缺凭据解释为允许逐请求 CLI RPC。拆分观察/写入/admin 连接需要独立身份模型、部署迁移/回滚与版本门禁验收，另立工作项。
+- 共享 secret 是单一 trusted-local operator 的 owner 级凭据，不是多租户隔离。生产控制连接必须有至少一个非空 token/password；即使上游 direct-loopback 支持 `gateway.auth.mode=none`，面板也不得为这条 admin 连接采用无 secret 模式。显式 token/password 环境项优先于配置文件，若均为空白则直接视为不可用，不能静默回落。轮换时同步更新 Gateway 与面板并重启两端，回滚时也同步恢复；本次 scope 契约不要求重新签发凭据或迁移存储。生产无法解析固定凭据时保留只读面板，并让所有 Gateway 控制调用稳定返回 `GATEWAY_TRANSPORT_UNAVAILABLE`；不能把缺凭据解释为允许逐请求 CLI RPC。拆分观察/写入/admin 连接需要独立身份模型、部署迁移/回滚与版本门禁验收，另立工作项。
 
 确定性契约验收（fake WebSocket，不接真实 runtime）：
 - 精确的 role/scope `hello` 可连接；缺项、额外/未知项、重复项和错误角色均在任何业务 RPC 前拒绝。
 - read/write/admin 三组现用方法都在允许列表；未登记方法不创建 socket、不发送帧。
 - 握手拒绝、权限不足、恶意上游 message/details 与 close reason 只产生上述稳定错误和脱敏诊断。
 - 重连后重新做同一精确握手并恢复订阅，不能沿用旧连接的授权状态。
+- pre-hello 数据不投递；旧 generation 的迟到 challenge/hello/data/open/error/close/send callback 不改变新连接。同步 send throw、callback error 和 ready failure 都关闭坏 socket、拒绝该代 pending，并只创建一个可恢复的新 generation。
 - `PANEL_OPENCLAW_STREAMING=0` 仍装配控制 transport；缺失凭据装配稳定拒绝 transport，二者均不得触发逐请求 CLI fallback。
+- `gateway.auth.mode=none`、显式空白 token/password 和不可读配置都不创建 admin socket；显式非空 token/password 仍优先，并且任何解析失败都不泄露配置正文或路径。
 
 真实 runtime 的消息、IM 隔离和清理验收仍只在无渠道绑定的测试 agent 上显式执行，不属于每次普通单元测试，也不由本次文档宣称已复验。
 

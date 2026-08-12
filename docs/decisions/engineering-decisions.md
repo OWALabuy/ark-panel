@@ -60,7 +60,7 @@ API 统一位于 `/api/v1`。成功响应是 `{ "data": ... }`；失败响应是
 
 **决定：接受一条带管理权限的本机控制连接。** 面板服务端复用一条持久 Gateway WebSocket 承担观察、生成控制、结构化命令和临时 session 生命周期；本批不拆成多条连接或多份凭据。该决定只适用于版本门禁固定的 OpenClaw `2026.6.11`。
 
-握手身份固定为 `client.id=gateway-client`、`client.mode=backend`、`role=operator`，并且请求的 scope 集合必须恰好是 `operator.read`、`operator.write`、`operator.admin`。Gateway `hello.auth.scopes` 也必须与该集合完全相同：缺少任一项或返回额外项都拒绝连接，不尝试动态加权、降权或扩大权限。握手失败和 RPC 拒绝只向面板上层返回稳定、归一化、脱敏的错误；token、password、原始上游 payload、消息正文和 prompt 不得进入错误或日志。
+握手身份固定为 `client.id=gateway-client`、`client.mode=backend`、`role=operator`，并且请求的 scope 集合必须恰好是 `operator.read`、`operator.write`、`operator.admin`。Gateway `hello.auth.scopes` 也必须与该集合完全相同：缺少任一项或返回额外项都拒绝连接，不尝试动态加权、降权或扩大权限。每次 socket 都有独立 generation；只有当前 source 在该 generation 完成精确 hello 和订阅后才能投递事件，旧 socket 的迟到 open/message/challenge/hello/error/close/send callback 全部忽略。当前 socket 发送失败或 ready 状态失效则清空该 generation 的授权与 pending、关闭 socket 并重新握手。握手失败和 RPC 拒绝只向面板上层返回稳定、归一化、脱敏的错误；token、password、原始上游 payload、消息正文和 prompt 不得进入错误或日志。
 
 当前生产调用面固定为：
 
@@ -74,7 +74,7 @@ API 统一位于 `/api/v1`。成功响应是 `{ "data": ... }`；失败响应是
 
 scope 集合只描述 Gateway 连接具备的上游能力，不替代面板自己的 typed API、登录、CSRF 和 default-deny allowlist。尤其是持有 `operator.admin` 会令内部命令满足 owner 判定，因此普通消息路径继续拒绝所有 `/` 文本，D 类管理命令也不因连接有 admin scope 而获得面板入口。
 
-这是 trusted-local、single-operator 部署中的纵深 guardrail，不是强多租户隔离边界。共享 token/password 按 owner 级 secret 管理，只能存在于服务端环境或 OpenClaw 配置中，不下发浏览器；Gateway 默认只经 loopback 访问，显式远程配置也只能指向同一所有者控制的可信私网，不得直接暴露到公网。远程端点不继承 direct-loopback self-pairing，必须另行完成上游配对与隔离验收。当前凭据已经服务于同一 owner 连接，scope 是握手契约而非本次需要迁移的面板数据，因此本批无需重新签发凭据。
+这是 trusted-local、single-operator 部署中的纵深 guardrail，不是强多租户隔离边界。共享 token/password 按 owner 级 secret 管理，只能存在于服务端环境或 OpenClaw 配置中，不下发浏览器；Gateway 默认只经 loopback 访问，显式远程配置也只能指向同一所有者控制的可信私网，不得直接暴露到公网。上游即使允许 direct-loopback `auth.mode=none`，面板也不以无 secret 身份建立这条 admin 连接：生产必须解析出至少一个非空 token/password，显式空白环境覆盖项不得回落到磁盘配置。远程端点不继承 direct-loopback self-pairing，必须另行完成上游配对与隔离验收。当前凭据已经服务于同一 owner 连接，scope 是握手契约而非本次需要迁移的面板数据，因此本批无需重新签发凭据。
 
 凭据轮换必须把 Gateway 与面板视为同一个发布单元：先准备新 secret，同步更新两端，再重启 Gateway 与面板并确认精确 scope 握手；不得让新旧 secret 长期并存。若轮换需回滚，则在两端恢复受保护的上一份 secret 并再次同步重启。部署本批代码只需正常重启面板以启用握手强制；不改存储格式、不改 OpenClaw pin。若精确 scope 校验与既有部署不兼容，回滚到上一版面板即可，凭据与 OpenClaw 配置无需转换，同时保留版本门禁，不能以接受未知或额外 scope 作为临时绕过。
 
