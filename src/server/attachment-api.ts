@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { listPanelSessions } from "../storage/panel-sessions.js";
 import { getSessionAttachment, readSessionAttachmentBytes, storeSessionAttachment,
   type AttachmentManifest } from "../storage/attachments.js";
+import { SessionReadIndex } from "../storage/index.js";
 import { sharp, type Metadata } from "./safe-raster.js";
 
 export interface PublicAttachment {
@@ -16,12 +16,17 @@ const MAX_PREVIEW_DIMENSION = 8192;
 const MAX_PREVIEW_PIXELS = 40_000_000;
 
 export class PanelAttachmentApi {
-  constructor(private readonly dataRoot: string, private readonly agentIds: readonly string[]) {}
+  private readonly readIndex: SessionReadIndex;
+  constructor(private readonly dataRoot: string, private readonly agentIds: readonly string[], readIndex?: SessionReadIndex) {
+    this.readIndex = readIndex && agentIds.every(agentId => readIndex.hasAgent(agentId)) ? readIndex :
+      new SessionReadIndex(agentIds.map(agentId => ({ agentId })), dataRoot);
+  }
+
+  async initialize(): Promise<void> { await this.readIndex.initialize(); }
 
   private async owner(recordId: string): Promise<string> {
-    for (const agentId of this.agentIds) {
-      if ((await listPanelSessions(this.dataRoot, agentId)).some((item) => item.recordId === recordId)) return agentId;
-    }
+    const entry = await this.readIndex.lookup(recordId);
+    if (entry?.sourceKind === "panel" && this.agentIds.includes(entry.agentId)) return entry.agentId;
     throw new Error("PANEL_SESSION_NOT_FOUND");
   }
 
@@ -38,12 +43,12 @@ export class PanelAttachmentApi {
   }
 
   async download(attachmentId: string): Promise<{ fileName: string; mimeType: string; bytes: Buffer } | undefined> {
-    for (const agentId of this.agentIds) {
-      for (const session of await listPanelSessions(this.dataRoot, agentId)) {
+    for (const session of await this.readIndex.snapshot()) {
+      if (session.sourceKind === "panel" && this.agentIds.includes(session.agentId)) {
         try {
-          const stored = await getSessionAttachment(this.dataRoot, agentId, session.recordId, attachmentId);
+          const stored = await getSessionAttachment(this.dataRoot, session.agentId, session.recordId, attachmentId);
           return { fileName: stored.manifest.fileName, mimeType: stored.manifest.mimeType,
-            bytes: await readSessionAttachmentBytes(this.dataRoot, agentId, session.recordId, attachmentId) };
+            bytes: await readSessionAttachmentBytes(this.dataRoot, session.agentId, session.recordId, attachmentId) };
         } catch (error) {
           if (error instanceof Error && error.message === "ATTACHMENT_NOT_OWNED_BY_SESSION") continue;
           throw error;

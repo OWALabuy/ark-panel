@@ -19,6 +19,7 @@ import { MemoryConsolidationStore } from "../storage/memory-consolidation.js";
 const config = parsePanelConfig(process.env, import.meta.url); await validateAndInitializeConfig(config);
 const contextBudget = new ConservativeContextBudget(config.contextHistoryBudgetTokens);
 const readApi = config.dataRoot && config.readAgents.length ? new SessionReadData(config.readAgents, config.dataRoot, contextBudget) : undefined;
+await readApi?.initialize();
 const roots = new Map<string, string>();
 for (const value of config.runtimes.values()) roots.set(value.runtimeAgentId, value.sessionsRoot);
 for (const value of config.memoryRuntimes.values()) roots.set(value.runtimeAgentId, value.sessionsRoot);
@@ -66,7 +67,9 @@ const commandApi = config.dataRoot && readApi ? new PanelCommandApi(config.dataR
   } } : {})
 }, operations) : undefined;
 const allowedHosts = [`127.0.0.1:${config.port}`, `localhost:${config.port}`];
-const attachments = config.dataRoot && config.runtimes.size ? new PanelAttachmentApi(config.dataRoot, [...config.runtimes.keys()]) : undefined;
+const attachments = config.dataRoot && config.runtimes.size ?
+  new PanelAttachmentApi(config.dataRoot, [...config.runtimes.keys()], readApi?.sessionIndex()) : undefined;
+await attachments?.initialize();
 const memoryWorkspaces = new Map<string, string>();
 for (const [agentId, runtime] of config.runtimes) if (runtime.workspaceRoot) memoryWorkspaces.set(agentId, runtime.workspaceRoot);
 const memoryStore = config.dataRoot ? new MemoryConsolidationStore(config.dataRoot) : undefined;

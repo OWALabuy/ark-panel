@@ -34,7 +34,11 @@ export interface PanelSessionDiagnostic {
 export type PanelSessionDiagnosticSink = (event: PanelSessionDiagnostic) => void;
 
 export interface ScannedPanelSession {
-  metadata: PanelMetadata; document: TranscriptDocument; revision: string; updatedAt: string;
+  metadata: PanelMetadata; document: TranscriptDocument; revision: string; updatedAt: string; fingerprint: string;
+}
+
+export interface PanelSessionLocator {
+  recordId: string; revision: string; updatedAt: string; fingerprint: string;
 }
 
 class PanelSessionScanError extends Error {
@@ -70,6 +74,8 @@ async function validatedDataRoot(dataRoot: string): Promise<string> {
   if (!stat.isDirectory() || stat.isSymbolicLink() || wrongOwner || (stat.mode & 0o777) !== 0o700) throw storageUnavailable();
   return root;
 }
+
+export async function assertPanelSessionDataRoot(dataRoot: string): Promise<void> { await validatedDataRoot(dataRoot); }
 
 function assertPrivateDirectory(stat: Stats, label: string): void {
   if (!stat.isDirectory() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0) throw new Error(`${label}目录不安全`);
@@ -148,12 +154,16 @@ async function readRegular(path: string): Promise<{ text: string; stat: Stats }>
   } finally { await handle.close(); }
 }
 
+function statFingerprint(stat: Stats): string {
+  return [stat.dev, stat.ino, stat.size, stat.mtimeMs, stat.ctimeMs, stat.mode, stat.nlink].join(":");
+}
+
 async function scanRecord(directory: string, agentId: string, recordId: string): Promise<ScannedPanelSession> {
-  let metadataText: string;
-  try { metadataText = (await readRegular(join(directory, "metadata.json"))).text; }
+  let metadataFile: { text: string; stat: Stats };
+  try { metadataFile = await readRegular(join(directory, "metadata.json")); }
   catch (error) { throw new PanelSessionScanError(isMissing(error) ? "METADATA_MISSING" : "METADATA_UNSAFE"); }
   let rawMetadata: unknown;
-  try { rawMetadata = JSON.parse(metadataText); }
+  try { rawMetadata = JSON.parse(metadataFile.text); }
   catch { throw new PanelSessionScanError("METADATA_INVALID_JSON"); }
   let metadata: PanelMetadata;
   try { metadata = validateMetadata(rawMetadata, agentId, recordId); }
@@ -164,7 +174,35 @@ async function scanRecord(directory: string, agentId: string, recordId: string):
   let document: TranscriptDocument;
   try { document = parseTranscript(transcript.text); }
   catch { throw new PanelSessionScanError("TRANSCRIPT_INVALID"); }
-  return { metadata, document, revision: `${transcript.stat.size}:${transcript.stat.mtimeMs}`, updatedAt: transcript.stat.mtime.toISOString() };
+  return { metadata, document, revision: `${transcript.stat.size}:${transcript.stat.mtimeMs}`,
+    updatedAt: transcript.stat.mtime.toISOString(), fingerprint: `${statFingerprint(metadataFile.stat)}|${statFingerprint(transcript.stat)}` };
+}
+
+async function inspectPublishedRecord(root: string, agentId: string, recordId: string,
+  onDiagnostic: PanelSessionDiagnosticSink): Promise<PanelSessionLocator | undefined> {
+  try { opaqueComponent(recordId, "recordId"); }
+  catch { diagnostic(onDiagnostic, agentId, recordId, "ENTRY_UNSAFE"); return undefined; }
+  const directory = assertWithin(root, join(root, recordId));
+  let directoryStat: Stats;
+  try { directoryStat = await lstat(directory); }
+  catch { diagnostic(onDiagnostic, agentId, recordId, "ENTRY_UNSAFE"); return undefined; }
+  if (!directoryStat.isDirectory() || directoryStat.isSymbolicLink() || (directoryStat.mode & 0o077) !== 0) {
+    diagnostic(onDiagnostic, agentId, recordId, "ENTRY_UNSAFE"); return undefined;
+  }
+  let metadata: Stats;
+  try { metadata = await lstat(join(directory, "metadata.json")); }
+  catch (error) { diagnostic(onDiagnostic, agentId, recordId, isMissing(error) ? "METADATA_MISSING" : "METADATA_UNSAFE"); return undefined; }
+  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1 || (metadata.mode & 0o077) !== 0) {
+    diagnostic(onDiagnostic, agentId, recordId, "METADATA_UNSAFE"); return undefined;
+  }
+  let transcript: Stats;
+  try { transcript = await lstat(join(directory, "transcript.jsonl")); }
+  catch (error) { diagnostic(onDiagnostic, agentId, recordId, isMissing(error) ? "TRANSCRIPT_MISSING" : "TRANSCRIPT_UNSAFE"); return undefined; }
+  if (!transcript.isFile() || transcript.isSymbolicLink() || transcript.nlink !== 1 || (transcript.mode & 0o077) !== 0) {
+    diagnostic(onDiagnostic, agentId, recordId, "TRANSCRIPT_UNSAFE"); return undefined;
+  }
+  return { recordId, revision: `${transcript.size}:${transcript.mtimeMs}`, updatedAt: transcript.mtime.toISOString(),
+    fingerprint: `${statFingerprint(metadata)}|${statFingerprint(transcript)}` };
 }
 
 async function publishPanelSession(dataRoot: string, agentId: string, document: TranscriptDocument,
@@ -225,23 +263,45 @@ export async function createPanelSessionFork(dataRoot: string, agentId: string, 
 
 export async function scanPanelSessions(dataRoot: string, agentId: string,
   onDiagnostic: PanelSessionDiagnosticSink = defaultDiagnostic): Promise<ScannedPanelSession[]> {
-  const root = await existingAgentRoot(dataRoot, agentId); if (!root) return [];
-  const records: ScannedPanelSession[] = []; let names: string[];
-  try { names = (await readdir(root)).sort(); }
-  catch { throw storageUnavailable(); }
-  for (const name of names) {
-    if (name.startsWith(PANEL_SESSION_STAGING_PREFIX)) { diagnostic(onDiagnostic, agentId, name, "STAGING_DIRECTORY"); continue; }
-    try { opaqueComponent(name, "recordId"); }
-    catch { diagnostic(onDiagnostic, agentId, name, "ENTRY_UNSAFE"); continue; }
-    const directory = assertWithin(root, join(root, name));
-    let stat: Stats;
-    try { stat = await lstat(directory); }
-    catch { diagnostic(onDiagnostic, agentId, name, "ENTRY_UNSAFE"); continue; }
-    if (!stat.isDirectory() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0) { diagnostic(onDiagnostic, agentId, name, "ENTRY_UNSAFE"); continue; }
-    try { records.push(await scanRecord(directory, agentId, name)); }
-    catch (error) { diagnostic(onDiagnostic, agentId, name, error instanceof PanelSessionScanError ? error.reason : "ENTRY_UNSAFE"); }
+  const records: ScannedPanelSession[] = [];
+  for (const locator of await scanPanelSessionLocators(dataRoot, agentId, onDiagnostic)) {
+    const loaded = await loadIndexedPanelSession(dataRoot, agentId, locator.recordId, onDiagnostic);
+    if (loaded) records.push(loaded);
   }
   return records.sort((a, b) => a.metadata.recordId.localeCompare(b.metadata.recordId));
+}
+
+export async function inspectPanelSession(dataRoot: string, agentId: string, recordId: string,
+  onDiagnostic: PanelSessionDiagnosticSink = defaultDiagnostic): Promise<PanelSessionLocator | undefined> {
+  const root = await existingAgentRoot(dataRoot, agentId); if (!root) return undefined;
+  return inspectPublishedRecord(root, agentId, recordId, onDiagnostic);
+}
+
+export async function scanPanelSessionLocators(dataRoot: string, agentId: string,
+  onDiagnostic: PanelSessionDiagnosticSink = defaultDiagnostic): Promise<PanelSessionLocator[]> {
+  const root = await existingAgentRoot(dataRoot, agentId); if (!root) return [];
+  let names: string[];
+  try { names = (await readdir(root)).sort(); }
+  catch { throw storageUnavailable(); }
+  const locators: PanelSessionLocator[] = [];
+  for (const name of names) {
+    if (name.startsWith(PANEL_SESSION_STAGING_PREFIX)) { diagnostic(onDiagnostic, agentId, name, "STAGING_DIRECTORY"); continue; }
+    const locator = await inspectPublishedRecord(root, agentId, name, onDiagnostic);
+    if (locator) locators.push(locator);
+  }
+  return locators;
+}
+
+export async function loadIndexedPanelSession(dataRoot: string, agentId: string, recordId: string,
+  onDiagnostic: PanelSessionDiagnosticSink = defaultDiagnostic): Promise<ScannedPanelSession | undefined> {
+  const root = await existingAgentRoot(dataRoot, agentId); if (!root) return undefined;
+  const locator = await inspectPublishedRecord(root, agentId, recordId, onDiagnostic); if (!locator) return undefined;
+  const directory = assertWithin(root, join(root, recordId));
+  try { return await scanRecord(directory, agentId, recordId); }
+  catch (error) {
+    diagnostic(onDiagnostic, agentId, recordId, error instanceof PanelSessionScanError ? error.reason : "ENTRY_UNSAFE");
+    return undefined;
+  }
 }
 
 export async function listPanelSessions(dataRoot: string, agentId: string,

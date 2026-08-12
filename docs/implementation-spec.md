@@ -123,9 +123,9 @@ gateway 连接凭证：读 `~/.openclaw/openclaw.json` 的 `gateway.auth.token`�
 
 ## 4. 面板自己的会话索引
 
-gateway 的 `sessions.json` 面板不碰。面板维护自己的索引 `index.json`，用于侧边栏列表和搜索。
+gateway 的 `sessions.json` 面板不碰。面板维护单一的进程内派生读取索引，用于侧边栏列表、单条定位和搜索。
 
-**索引只作可重建缓存，不作第二份权威数据。** 权威信息（如 fork 来源）应写进 transcript 头部或独立的、同样可从磁盘重建的元数据文件；`index.json` 随时可以删掉，从扫描 transcript 全量重建。写入采用「临时文件 + fsync + 原子改名」，避免崩溃时留下半个索引。
+**索引只作可重建缓存，不作第二份权威数据，也没有持久化 schema。** 权威信息（如 fork 来源）写进 transcript 头部或独立 metadata；进程重启或清空派生状态后，从安全扫描 transcript 与 metadata 全量重建。历史 `index.json` 不参与读取，可以删除。索引按安全 locator 和 stat 指纹缓存已验证 document：列表或搜索先取得一次一致请求快照，只重读新增或变更记录；已定位的单条读取只校验目标；并发冷启动共享同一次重建。坏记录按自身指纹隔离，不能污染其他记录或把根级存储错误解释为空库。
 
 #### 4.1 会话记录的字段（修正：`id` 不能等于会话 uuid）
 一个会话 uuid 不足以唯一标识一条记录：`/reset` 会让同一个 uuid 先后产生 `<uuid>.jsonl`、`<uuid>.jsonl.reset.<时间1>`、`<uuid>.jsonl.reset.<时间2>`，它们很可能共享同一个 session uuid；不同 agent 之间也需要命名空间。因此每条记录用一组字段标识：
@@ -144,20 +144,21 @@ gateway 的 `sessions.json` 面板不碰。面板维护自己的索引 `index.js
 
 - **活会话**（`<uuid>.jsonl`，gateway 在管）：**只读源文件 + 建立派生索引，不拷成权威副本。** 轮询刷新时按 `sourceRevision` 判断源文件是否变了，变了就重读。这样才能看到 IM 刚追加的新消息（对应方案 §6.1）。
   - 读正在被追加的文件时，要处理「读到半行」：按完整行解析，最后不完整的一行丢弃、下次再读。
-- **reset 归档**（`<uuid>.jsonl.reset.<ts>`）：内容不再变化，**首次发现时导入为不可变快照**，之后不必重读。
+- **reset 归档**（`<uuid>.jsonl.reset.<ts>`）：保持 OpenClaw 源文件只读；由派生索引缓存已验证 document，源 locator 变化时重建，不复制或改写为另一份权威数据。
 - **面板自建 / fork**（`sourceKind: panel`）：文件本就由面板拥有，直接是权威数据。
 
 **导入范围**：扫描 `~/.openclaw/agents/<agent>/sessions/`（测试期 `paneltest`），识别活会话和 reset 归档；只要求现行格式，早期 `-topic-N` 可跳过。多 agent 分别扫描、分别登记。
 
 验收：
 - 索引能列出面板自建 + 各 agent 导入的会话，包括 reset 归档；同一 uuid 的活会话与多个 reset 归档各占独立记录，不互相覆盖。
-- 删掉 `index.json` 后能从扫描 transcript 全量重建，结果一致。
+- 清空进程内索引或重启后能从扫描 transcript/metadata 全量重建，结果一致；任何遗留 `index.json` 都不影响结果。
+- N 条候选的搜索至多读取、解析 N 份 transcript；同一请求不为每条命中再次全量扫描。暖缓存的单条读取不枚举所有会话，源/sidecar 变化后只使相应记录失效。
 - 搜索：按标题和消息内容关键词能查到会话。
 - 活会话源文件被追加新行后，轮询刷新能读到新消息，且不会因读到半行而解析出错。
 
 #### 4.3 会话管理字段（重命名 / 归档 / 删除 / 记忆处置）
 
-以下都是**面板侧 metadata**，是可从磁盘重建之外的用户意图状态，必须持久化，且**对只读会话绝不写回源文件**。放在面板 metadata（transcript 头或独立元数据文件），不能只放 `index.json`（索引可删可重建）。
+以下都是**面板侧 metadata**，是可从 transcript 重建之外的用户意图状态，必须持久化，且**对只读会话绝不写回源文件**。放在面板 metadata（transcript 头或独立元数据文件），不能只放派生索引（索引可清空重建）。
 
 - `title`：用户可改的标题。重命名任何会话（含活会话、reset 归档）只改这里。未设置时展示用截取首条用户消息，不落库为 `title`。
 - **`archived` 与 `hidden` 是两个独立状态，不能用一个布尔表达**（否则「归档页可见」和「彻底隐藏」区分不出）：
@@ -180,7 +181,7 @@ gateway 的 `sessions.json` 面板不碰。面板维护自己的索引 `index.js
 
 验收：
 - 重命名活会话与 reset 归档：面板 sidecar 记录的 `title` 改变，**源文件字节逐字未变**（改动前后对源文件做 diff 应为空）。
-- 归档某会话后，它从主列表消失、出现在归档列表；取消归档后回到主列表。删除 `index.json` 重建后，归档 / 隐藏状态保持一致（说明状态存 sidecar / panel metadata，不只存索引）。
+- 归档某会话后，它从主列表消失、出现在归档列表；取消归档后回到主列表。清空索引重建后，归档 / 隐藏状态保持一致（说明状态存 sidecar / panel metadata，不只存派生索引）。
 - 只读会话执行“删除”（置 `hidden=true`）：源文件仍在原处、内容未变；主列表与归档列表都不再默认展示它。
 - `archived` 与 `hidden` 正交可验：一条会话 `archived=true` 时在归档列表可见；再置 `hidden=true` 后从归档列表也消失；两状态可独立切换。
 - reset 源文件被 rescan 重新发现后，此前设的 `title` / `archived` / `hidden` 仍挂在同一逻辑会话上（source identity 稳定，不因文件重新扫描而丢关联）。
@@ -199,7 +200,7 @@ gateway 的 `sessions.json` 面板不碰。面板维护自己的索引 `index.js
 | 功能 | 实现方式 | 连 gateway？ |
 |---|---|---|
 | 查看会话历史 | 读 transcript（自建会话读面板存储；活会话只读其真实会话文件） | 否 |
-| 侧边栏列表 / 搜索 | 读面板 `index.json` | 否 |
+| 侧边栏列表 / 搜索 | 读可清空重建的进程内索引；按 locator 指纹增量刷新 | 否 |
 | 多 agent 切换（联系人页） | 按 agent 分别扫描 `~/.openclaw/agents/<agent>/sessions/`、分别索引 | 否 |
 | 多设备同步 | 完整正文按 revision 同步；运行中预览由可重连 SSE 快照同步 | 否（预览由服务端连 Gateway） |
 | 看记忆 | 低优先级，MVP 不做（见 §6） | — |
@@ -560,7 +561,7 @@ fork 和编辑重发共用底层（见 §5.0）：都是「从目标 entry 回�
 - API 路由风格；流式用 SSE，约定事件格式。
 - 数据目录的配置方式（环境变量 / 配置文件）。
 - 错误码和错误响应格式。
-- **`index.json` 只作可重建缓存**：写入用「临时文件 + fsync + 原子改名」；能从扫描 transcript 全量重建；fork 来源等权威元数据进 transcript 头或独立可重建的元数据文件，不只存索引。
+- **读取索引只作进程内可重建缓存**：不定义持久格式；能从扫描 transcript/metadata 全量重建；fork 来源等权威元数据进 transcript 头或独立 metadata，不只存索引。
 - OpenClaw 版本兼容范围，启动时做版本检查（打包源码路径、RPC 名称都可能随版本变）。
 - 备份、恢复、迁移怎么验收。
 

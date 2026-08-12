@@ -219,6 +219,7 @@ test("sessions 根目录本身是符号链接时拒绝读取", async t => {
 
 test("panel data 根缺失时列表、读取与搜索返回稳定脱敏错误", async t => {
   const root = await tempFixture(t, "panel-read-data-root-error-"), sessions = join(root, "source"); await mkdir(sessions);
+  await writeFile(join(sessions, `${header.id}.jsonl`), jsonl(user));
   const missing = join(root, "private-missing-data"), reads = new SessionReadData([{ agentId: "fixture", sessionsRoot: sessions }], missing);
   const unavailable = (error: unknown) => {
     assert.equal((error as Error).message, "PANEL_SESSION_STORAGE_UNAVAILABLE");

@@ -1,18 +1,16 @@
-import { lstat, readFile, readdir } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { deriveFork } from "../domain/fork.js";
-import { externalRecordId } from "../domain/record-id.js";
-import { parseTranscript, TranscriptError, type JsonObject, type TranscriptDocument } from "../domain/transcript.js";
-import { assertWithin } from "../storage/atomic.js";
-import { createPanelSession, createPanelSessionFork, deletePanelSession, loadPanelSession, scanPanelSessions } from "../storage/panel-sessions.js";
-import { loadReadonlyMetadata, updateReadonlyMetadata, type ReadonlySourceIdentity } from "../storage/readonly-metadata.js";
+import { type JsonObject, type TranscriptDocument } from "../domain/transcript.js";
+import { createPanelSession, createPanelSessionFork, deletePanelSession } from "../storage/panel-sessions.js";
+import { updateReadonlyMetadata, type ReadonlySourceIdentity } from "../storage/readonly-metadata.js";
 import { updatePanelMetadata } from "../storage/panel-sessions.js";
 import { currentTranscriptBranch } from "../domain/branch.js";
 import { exportTranscriptMarkdown, markdownFilename } from "../domain/markdown-export.js";
 import { ConservativeContextBudget, type ContextBudgetEstimator } from "../domain/context-budget.js";
 import { contextUsageAtCurrentTip, type OpenClawContextUsage } from "../domain/context-usage.js";
 import { garbageCollectAttachments } from "../storage/attachments.js";
+import { SessionReadIndex, type IndexedSession } from "../storage/index.js";
 
 export interface ReadAgentConfig { agentId: string; sessionsRoot: string; label?: string }
 export interface ConversationRecord {
@@ -46,18 +44,7 @@ function nativeOverrides(document: TranscriptDocument): MemoryConversationSource
   return overrides;
 }
 
-const ACTIVE = /^([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.jsonl$/i;
 const RESET = /^([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.jsonl\.reset\.(.+)$/i;
-
-function parseActive(input: string): TranscriptDocument {
-  try { return parseTranscript(input); }
-  catch (error) {
-    if (!(error instanceof TranscriptError) || input.endsWith("\n")) throw error;
-    const boundary = input.lastIndexOf("\n");
-    if (boundary < 0) throw error;
-    return parseTranscript(input.slice(0, boundary + 1));
-  }
-}
 
 function text(entry: JsonObject): string {
   const message = entry.message;
@@ -81,69 +68,49 @@ function documentTitle(document: TranscriptDocument): string {
 
 export class SessionReadData {
   private readonly agentsById: ReadonlyMap<string, ReadAgentConfig>;
+  private readonly readIndex: SessionReadIndex;
   constructor(readonly agentsConfig: readonly ReadAgentConfig[], readonly dataRoot: string,
-    private readonly contextBudget: ContextBudgetEstimator = new ConservativeContextBudget()) {
+    private readonly contextBudget: ContextBudgetEstimator = new ConservativeContextBudget(), readIndex?: SessionReadIndex) {
     const entries = agentsConfig.map(agent => {
       if (!/^[A-Za-z0-9_-]+$/.test(agent.agentId)) throw new Error("agentId 格式无效");
       return [agent.agentId, { ...agent, sessionsRoot: resolve(agent.sessionsRoot) }] as const;
     });
     if (new Set(entries.map(([id]) => id)).size !== entries.length) throw new Error("agentId 重复");
     this.agentsById = new Map(entries); this.dataRoot = resolve(dataRoot);
+    this.readIndex = readIndex ?? new SessionReadIndex(entries.map(([, agent]) => agent), this.dataRoot);
   }
 
-  private async assertRoot(agent: ReadAgentConfig): Promise<void> {
-    const stat = await lstat(agent.sessionsRoot);
-    if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("sessions 根目录不安全");
+  sessionIndex(): SessionReadIndex { return this.readIndex; }
+  async initialize(): Promise<void> { await this.readIndex.initialize(); }
+
+  private record(entry: IndexedSession): ConversationRecord {
+    const metadata = entry.metadata;
+    return { recordId: entry.recordId, agentId: entry.agentId, sourceKind: entry.sourceKind, sourceKey: entry.sourceKey,
+      revision: entry.revision, updatedAt: entry.updatedAt,
+      messageCount: entry.document.entries.filter(item => item.type === "message").length,
+      title: metadata.title ?? documentTitle(entry.document), archived: metadata.archived ?? false,
+      hidden: metadata.hidden ?? false, pinned: metadata.pinned ?? false,
+      memoryDisposition: metadata.memoryDisposition ?? "scratch",
+      ...(metadata.project ? { project: metadata.project } : {}) };
+  }
+
+  private async indexedSessions(agentId?: string, archived: boolean | null = false,
+    includeHidden = false): Promise<Array<{ entry: IndexedSession; record: ConversationRecord }>> {
+    const pairs = (await this.readIndex.snapshot(agentId)).map(entry => ({ entry, record: this.record(entry) }));
+    return pairs.filter(({ record }) => (includeHidden || !record.hidden) && (archived === null || record.archived === archived))
+      .sort((a, b) => Number(b.record.pinned) - Number(a.record.pinned) || b.record.updatedAt.localeCompare(a.record.updatedAt));
   }
 
   async agents(): Promise<unknown[]> {
     return Promise.all([...this.agentsById.values()].map(async agent => {
-      await this.assertRoot(agent);
       const sessions = await this.sessions(agent.agentId);
       return { id: agent.agentId, label: agent.label ?? agent.agentId, sessionCount: sessions.length };
     }));
   }
 
-  private async externalRecords(agent: ReadAgentConfig): Promise<ConversationRecord[]> {
-    await this.assertRoot(agent); const records: ConversationRecord[] = [];
-    for (const name of (await readdir(agent.sessionsRoot)).sort()) {
-      const active = ACTIVE.exec(name), reset = RESET.exec(name); if (!active && !reset) continue;
-      const path = assertWithin(agent.sessionsRoot, join(agent.sessionsRoot, name)); const stat = await lstat(path);
-      if (!stat.isFile() || stat.isSymbolicLink()) continue;
-      let document: TranscriptDocument;
-      try { document = (active ? parseActive : parseTranscript)(await readFile(path, "utf8")); }
-      catch (error) { if (active && (error instanceof TranscriptError)) continue; throw error; }
-      const sourceKind = active ? "active" as const : "reset" as const; const sourceKey = active ? active[1]! : name;
-      const identity: ReadonlySourceIdentity = { sourceKind, agentId: agent.agentId, sourceSessionId: (active ?? reset)![1]!, ...(reset ? { resetTimestamp: reset[2]! } : {}) };
-      const metadata = await loadReadonlyMetadata(this.dataRoot, identity);
-      records.push({ recordId: externalRecordId(agent.agentId, sourceKind, sourceKey), agentId: agent.agentId, sourceKind, sourceKey,
-        revision: `${stat.size}:${stat.mtimeMs}`, updatedAt: stat.mtime.toISOString(), messageCount: document.entries.filter(entry => entry.type === "message").length,
-        title: metadata.title ?? documentTitle(document), archived: metadata.archived, hidden: metadata.hidden,
-        pinned: metadata.pinned ?? false, memoryDisposition: metadata.memoryDisposition,
-        ...(metadata.project ? { project: metadata.project } : {}) });
-    }
-    return records;
-  }
-
-  private async panelRecords(agentId: string): Promise<ConversationRecord[]> {
-    const result: ConversationRecord[] = [];
-    for (const loaded of await scanPanelSessions(this.dataRoot, agentId)) {
-      const metadata = loaded.metadata;
-      result.push({ recordId: metadata.recordId, agentId, sourceKind: "panel", sourceKey: metadata.recordId,
-        revision: loaded.revision, updatedAt: loaded.updatedAt, messageCount: loaded.document.entries.filter(entry => entry.type === "message").length,
-        title: metadata.title ?? documentTitle(loaded.document), archived: metadata.archived ?? false, hidden: metadata.hidden ?? false,
-        pinned: metadata.pinned ?? false, memoryDisposition: metadata.memoryDisposition ?? "scratch",
-        ...(metadata.project ? { project: metadata.project } : {}) });
-    }
-    return result;
-  }
-
   async sessions(agentId?: string, archived: boolean | null = false, includeHidden = false): Promise<ConversationRecord[]> {
-    const agents = agentId ? [this.agentsById.get(agentId)].filter((item): item is ReadAgentConfig => !!item) : [...this.agentsById.values()];
-    if (agentId && agents.length === 0) return [];
-    const records = (await Promise.all(agents.map(async agent => [...await this.externalRecords(agent), ...await this.panelRecords(agent.agentId)]))).flat();
-    return records.filter(record => (includeHidden || !record.hidden) && (archived === null || record.archived === archived))
-      .sort((a, b) => Number(b.pinned) - Number(a.pinned) || b.updatedAt.localeCompare(a.updatedAt));
+    if (agentId && !this.agentsById.has(agentId)) return [];
+    return (await this.indexedSessions(agentId, archived, includeHidden)).map(({ record }) => record);
   }
 
   async projects(agentId: string): Promise<string[]> {
@@ -159,14 +126,9 @@ export class SessionReadData {
     return [...canonical.values()].sort((left, right) => left.localeCompare(right, undefined, { sensitivity: "base" }));
   }
 
-  private async load(recordId: string): Promise<{ record: ConversationRecord; document: TranscriptDocument } | undefined> {
-    const record = (await this.sessions(undefined, null, true)).find(item => item.recordId === recordId); if (!record) return undefined;
-    if (record.sourceKind === "panel") return { record, document: (await loadPanelSession(this.dataRoot, record.agentId, record.recordId)).document };
-    const agent = this.agentsById.get(record.agentId)!; await this.assertRoot(agent);
-    const name = record.sourceKind === "active" ? `${record.sourceKey}.jsonl` : record.sourceKey;
-    const path = assertWithin(agent.sessionsRoot, join(agent.sessionsRoot, name)); const stat = await lstat(path);
-    if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("会话来源不安全");
-    return { record, document: (record.sourceKind === "active" ? parseActive : parseTranscript)(await readFile(path, "utf8")) };
+  private async load(recordId: string): Promise<{ record: ConversationRecord; document: TranscriptDocument; entry: IndexedSession } | undefined> {
+    const entry = await this.readIndex.lookup(recordId); if (!entry) return undefined;
+    return { record: this.record(entry), document: entry.document, entry };
   }
 
   async conversation(recordId: string): Promise<unknown | null> {
@@ -187,8 +149,8 @@ export class SessionReadData {
     const estimate = this.contextBudget.estimate(currentTranscriptBranch(loaded.document), "");
     const nativeUsage = loaded.record.sourceKind === "panel" ? contextUsageAtCurrentTip(loaded.document) : null;
     let modelOverride: string | null = null, thinkingLevel: string | null = null, reasoningLevel: string | null = null;
-    if (loaded.record.sourceKind === "panel") {
-      const metadata = (await loadPanelSession(this.dataRoot, loaded.record.agentId, loaded.record.recordId)).metadata;
+    if (loaded.entry.sourceKind === "panel") {
+      const metadata = loaded.entry.metadata;
       modelOverride = metadata.modelOverride ?? null; thinkingLevel = metadata.thinkingLevel ?? null; reasoningLevel = metadata.reasoningLevel ?? null;
     }
     const status: ConversationStatus = { modelOverride, thinkingLevel, reasoningLevel,
@@ -204,8 +166,8 @@ export class SessionReadData {
   async memorySource(recordId: string): Promise<MemoryConversationSource | undefined> {
     const loaded = await this.load(recordId); if (!loaded) return undefined;
     const document = currentTranscriptBranch(loaded.document), overrides: MemoryConversationSource["overrides"] = loaded.record.sourceKind === "panel" ? {} : nativeOverrides(document);
-    if (loaded.record.sourceKind === "panel") {
-      const metadata = (await loadPanelSession(this.dataRoot, loaded.record.agentId, loaded.record.recordId)).metadata;
+    if (loaded.entry.sourceKind === "panel") {
+      const metadata = loaded.entry.metadata;
       if (metadata.modelOverride) overrides.modelOverride = metadata.modelOverride;
       if (metadata.thinkingLevel) overrides.thinkingLevel = metadata.thinkingLevel;
       if (metadata.reasoningLevel) overrides.reasoningLevel = metadata.reasoningLevel;
@@ -223,16 +185,15 @@ export class SessionReadData {
     const now = new Date().toISOString(), recordId = randomUUID();
     const safeTitle = title?.slice(0, 120);
     const metadata = await createPanelSession(this.dataRoot, agentId, { header: { type: "session", version: 3, id: randomUUID(), timestamp: now, cwd: ".", panel: { recordId, createdAt: now, ...(safeTitle ? { title: safeTitle } : {}) } }, entries: [] }, { recordId, createdAt: now, ...(safeTitle ? { title: safeTitle } : {}) });
-    const record = (await this.panelRecords(agentId)).find(item => item.recordId === metadata.recordId);
-    if (!record) throw new Error("PANEL_SESSION_CREATE_FAILED"); return record;
+    const entry = await this.readIndex.refreshPanel(agentId, metadata.recordId);
+    if (!entry) throw new Error("PANEL_SESSION_CREATE_FAILED"); return this.record(entry);
   }
 
   async search(query: string, agentId?: string): Promise<unknown[]> {
     const needle = query.trim().toLocaleLowerCase(); if (!needle) return [];
-    const records = await this.sessions(agentId, null); const matches: unknown[] = [];
-    for (const record of records) {
-      const loaded = await this.load(record.recordId); if (!loaded) continue;
-      const hits = loaded.document.entries.flatMap(entry => {
+    const sessions = await this.indexedSessions(agentId, null); const matches: unknown[] = [];
+    for (const { entry: indexed, record } of sessions) {
+      const hits = indexed.document.entries.flatMap(entry => {
         const value = text(entry); const at = value.toLocaleLowerCase().indexOf(needle);
         return at < 0 ? [] : [{ entryId: typeof entry.id === "string" ? entry.id : null, role: role(entry) ?? null, snippet: value.slice(Math.max(0, at - 40), at + needle.length + 80) }];
       });
@@ -254,7 +215,7 @@ export class SessionReadData {
       const identity: ReadonlySourceIdentity = { sourceKind: loaded.record.sourceKind, agentId: loaded.record.agentId, sourceSessionId: match[0], ...(match[1] ? { resetTimestamp: match[1] } : {}) };
       await updateReadonlyMetadata(this.dataRoot, identity, current => { const next = { ...current, ...(title ? { title } : {}), ...(patch.archived !== undefined ? { archived: patch.archived } : {}), ...(patch.pinned !== undefined ? { pinned: patch.pinned } : {}), ...(patch.memoryDisposition ? { memoryDisposition: patch.memoryDisposition } : {}), ...(project ? { project } : {}) }; if (patch.project === null) delete next.project; return next; });
     }
-    const updated = (await this.sessions(undefined, null, true)).find(item => item.recordId === recordId); if (!updated) throw new Error("SESSION_NOT_FOUND"); return updated;
+    const updated = await this.readIndex.lookup(recordId); if (!updated) throw new Error("SESSION_NOT_FOUND"); return this.record(updated);
   }
 
   async deleteSession(recordId: string, confirmed: boolean): Promise<{ action: "deleted" | "hidden" }> {
@@ -263,6 +224,7 @@ export class SessionReadData {
     if (loaded.record.sourceKind === "panel") {
       if (!loaded.record.archived) throw new Error("SESSION_NOT_ARCHIVED");
       await deletePanelSession(this.dataRoot, loaded.record.agentId, recordId);
+      this.readIndex.forget(recordId);
       await garbageCollectAttachments(this.dataRoot);
       return { action: "deleted" };
     }
@@ -280,6 +242,7 @@ export class SessionReadData {
     const metadata = await createPanelSessionFork(this.dataRoot, loaded.record.agentId, document,
       { parentRecordId: recordId, forkedFromMessageId: messageId, recordId: newId, createdAt, ...inherited },
       loaded.record.sourceKind === "panel" ? { agentId: loaded.record.agentId, recordId } : undefined);
+    await this.readIndex.refreshPanel(metadata.agentId, metadata.recordId);
     return { recordId: metadata.recordId, agentId: metadata.agentId, sourceKind: "panel" };
   }
 
@@ -296,6 +259,7 @@ export class SessionReadData {
     const metadata = await createPanelSessionFork(this.dataRoot, loaded.record.agentId, base,
       { parentRecordId: recordId, forkedFromMessageId: messageId, recordId: newId, createdAt, ...inherited },
       loaded.record.sourceKind === "panel" ? { agentId: loaded.record.agentId, recordId } : undefined);
+    await this.readIndex.refreshPanel(metadata.agentId, metadata.recordId);
     return { recordId: metadata.recordId, agentId: metadata.agentId, sourceKind: "panel" };
   }
 }

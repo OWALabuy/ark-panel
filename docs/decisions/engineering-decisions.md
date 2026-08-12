@@ -31,12 +31,12 @@ API 统一位于 `/api/v1`。成功响应是 `{ "data": ... }`；失败响应是
 
 ## 存储
 
-- panel 会话的 transcript 与 metadata 是权威数据；`index.json` 只是可删除并重建的缓存。
-- active 会话只读源文件；reset 会话导入为不可变快照；panel 会话只写面板数据目录。
+- panel 会话的 transcript 与 metadata 是权威数据；会话读取索引只存在于进程内，可随时清空并从权威文件重建。遗留 `index.json` 不参与读取。
+- active/reset 会话保持 OpenClaw 源文件只读；panel 会话只写面板数据目录。索引可缓存已验证 document，但不复制出另一份权威 transcript。
 - active/reset 的 `recordId` 由 agent、类型及稳定来源标识计算；panel 的 UUID 写入 metadata。重建索引不会改变 ID。
 - metadata 记录 fork 来源，不能只放在索引里。
 - 新建 panel 会话时，`metadata.json`、`transcript.jsonl` 与可选 `attachments.json` 先在同父目录的保留 staging 目录中完整写入并逐层 `fsync`，只用单次目录 rename 发布为可见记录。fork 在同一附件存储互斥区内完成源引用/manifest/blob 预检和目标发布，只复制目标 transcript 实际引用的 owner 记录，不修改源索引或内容寻址文件。staging 和单条残缺/损坏记录只作脱敏诊断与隔离，不自动删除，也不得影响其他健康会话或附件 GC。
-- 完整 run 使用同目录临时文件、`fsync`、原子改名提交；索引也采用同样方式。不会把多行 append 当作事务。
+- 完整 run 使用同目录临时文件、`fsync`、原子改名提交；不会把多行 append 当作事务。进程内读取索引没有持久写入步骤。
 - 读写时拒绝符号链接，规范化路径后必须仍位于配置的根目录。
 
 ## OpenClaw 兼容与推理 runtime
@@ -49,7 +49,7 @@ API 统一位于 `/api/v1`。成功响应是 `{ "data": ... }`；失败响应是
 
 ## 版本控制与升级维护（2026-07-12）
 
-面板核心数据（transcript JSONL、metadata、index）是自主的、可迁移的，不绑定 OpenClaw。但 2a′ 混合架构对 OpenClaw 保留了一层**软耦合**：更换或升级 OpenClaw 时，这层是唯一需要重新验证/适配的面。集中记录，避免升级时到处找。
+面板核心数据（transcript JSONL、metadata）是自主的、可迁移的，不绑定 OpenClaw；读取索引由这些数据重建。但 2a′ 混合架构对 OpenClaw 保留了一层**软耦合**：更换或升级 OpenClaw 时，这层是唯一需要重新验证/适配的面。集中记录，避免升级时到处找。
 
 ### 软耦合面（升级后逐项复核）
 1. **版本门禁**：第一版固定 `2026.6.11`。启动推理前核对 CLI/gateway 版本；不匹配返回 `OPENCLAW_VERSION_UNSUPPORTED`，拒绝推理与清理。升级 = 抬高这个 pin，且必须在抬高前跑完下面的复核。
@@ -68,7 +68,7 @@ API 统一位于 `/api/v1`。成功响应是 `{ "data": ... }`；失败响应是
 5. 面板自身依赖（npm 包）用锁文件固定版本；升级依赖后跑 `npm test` 与部署 smoke 再发布。
 
 ### 面板自身版本
-- 面板遵循语义化版本；破坏 transcript / metadata / index 存储格式的改动记为不兼容变更，并附带迁移步骤（存储是权威数据，格式变更必须可迁移、可回滚）。
+- 面板遵循语义化版本；破坏 transcript / metadata 存储格式的改动记为不兼容变更，并附带迁移步骤（存储是权威数据，格式变更必须可迁移、可回滚）。进程内读取索引没有迁移格式。
 - 支持的 OpenClaw 版本范围在 README 与本文各记一处，发布说明里点明。
 
 ## 长上下文保护（第一版）

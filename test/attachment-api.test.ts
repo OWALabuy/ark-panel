@@ -6,6 +6,8 @@ import test from "node:test";
 import sharp from "sharp";
 import { PanelAttachmentApi } from "../src/server/attachment-api.js";
 import { createPanelSession } from "../src/storage/panel-sessions.js";
+import { SessionReadIndex, type SessionReadIndexEvent } from "../src/storage/index.js";
+import { tempFixture } from "./test-helpers.js";
 
 const emptyDocument = { header: { type: "session", version: 3 }, entries: [] };
 
@@ -75,4 +77,21 @@ test("图片预览拒绝单边合规但总像素超过 40M 的图片", async t =
   const { root, session, api } = await fixture(); t.after(() => rm(root, { recursive: true, force: true }));
   const oversized = await sharp({ create: { width: 8000, height: 6000, channels: 3, background: "#336699" } }).png().toBuffer();
   await assertUnsupported(api, session.recordId, oversized);
+});
+
+test("附件 owner 查询复用会话 locator 而不重新枚举或解析所有 panel transcript", async t => {
+  const root = await tempFixture(t, "panel-attachment-owner-index-");
+  const records = [];
+  for (let index = 0; index < 12; index++) {
+    records.push(await createPanelSession(root, "agent", emptyDocument, { recordId: `record-${index}` }));
+  }
+  const events: SessionReadIndexEvent[] = [];
+  const readIndex = new SessionReadIndex([{ agentId: "agent" }], root, { onEvent: event => events.push(event) });
+  await readIndex.initialize();
+  const api = new PanelAttachmentApi(root, ["agent"], readIndex);
+  const scans = events.filter(event => event.type === "agent_scanned").length;
+  const loads = events.filter(event => event.type === "transcript_loaded").length;
+  await api.upload(records[7]!.recordId, { fileName: "fixture.txt", mimeType: "text/plain", bytes: Buffer.from("fixture") });
+  assert.equal(events.filter(event => event.type === "agent_scanned").length, scans);
+  assert.equal(events.filter(event => event.type === "transcript_loaded").length, loads);
 });
