@@ -444,7 +444,7 @@ test("composer uploads raw attachments and preserves their ids for idempotent ru
   assert.doesNotMatch(source,/FileReader|readAsText|arrayBuffer\(\).*docx|mammoth|officegen/);
   assert.match(source,/addEventListener\("paste"/);
   assert.match(source,/addEventListener\("drop"/);
-  assert.match(source,/attachmentIds:run\.submittedAttachmentIds\|\|\[\]/);
+  assert.match(source,/attachmentIds:run\.submittedAttachmentIds/);
   assert.match(source,/submittedAttachmentIds:run\.submittedAttachmentIds/);
   assert.match(source,/pendingAttachments\.delete\(`session:\$\{run\.recordId\}`\)/);
   assert.match(source,/if\(run\.status==="completed"\)/);
@@ -474,8 +474,12 @@ test("per-turn output intent is accessible, draft-scoped, and preserved until ru
   assert.match(source,/function outputIntentKey\(sessionId=activeSession,agentId=activeAgent\)\{return sessionId\?`\$\{OUTPUT_INTENT_PREFIX\}session:/);
   assert.match(source,/moveOutputIntent\(null,sourceAgent,createdId,sourceAgent\)/);
   assert.match(source,/submittedRequestOutputs:run\.submittedRequestOutputs/);
-  assert.match(source,/requestOutputs:run\.submittedRequestOutputs===true/);
-  assert.match(source,/clearAcceptedOutputIntent\(accepted\);const snapshot=rememberRun\(accepted\)/);
+  assert.match(source,/requestOutputs:run\.submittedRequestOutputs/);
+  assert.match(source,/clearAcceptedOutputIntent\(accepted\);if\(!await settleRun\(accepted\)\)/);
+  assert.match(source,/status:run\.status,createPhase:run\.createPhase/);
+  assert.match(source,/createPhase:"provisional",submittedDraft:message/);
+  assert.match(source,/recoverPersistedRun\(run,\{getRun:/);
+  assert.match(source,/if\(acknowledgedStorageAction\(run\)==="remove"\)forgetRun\(run\)/);
   assert.match(source,/\$\("#request-outputs"\)\.disabled=busy\|\|!writable\|\|command/);
   assert.match(source,/textContent=enabled\?"✓":"▧"/);
   assert.match(styles,/\.request-outputs\[aria-pressed="true"\]/);

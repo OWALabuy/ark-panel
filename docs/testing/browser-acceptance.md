@@ -3,14 +3,16 @@
 > **当前自动化与日期化证据元数据**
 >
 > - Date: `2026-08-12`（初始自动化）、`2026-08-13`（#43 网络边界复验、
->   #49 composer 状态迁移 characterization）
+>   #49 composer 状态迁移 characterization、browser run 刷新恢复回归）
 > - ark-panel commit: `3a29ee4`（初始自动化）、`cfe53d9`（外部图片边界）、
->   `61cc824`（#49 characterization 的基线；测试与本文件同 commit 提交）
+>   `61cc824`（#49 characterization 的基线）、`2e86ed8`（刷新恢复修复的
+>   集成基线；修复、测试与本文件随同一后续 commit 提交）
 > - OpenClaw version: 不适用（虚构本地 browser fixture）
 > - Status: runbook `current automated`；2026-08-12 result `historical pass`；
->   2026-08-13 #43 result `partial`；2026-08-13 #49 result `historical pass`
+>   2026-08-13 #43 result `partial`；2026-08-13 #49 result `historical pass`；
+>   browser run 刷新恢复 scope `current automated`
 > - Superseded/current applicability: 本文件仍是 Firefox 自动化 runbook；其中每次
->   运行结果只适用于自己的日期与 commit。2026-08-13 的三轮结果因两次
+>   运行结果只适用于自己的日期与 commit。2026-08-13 的 #43 三轮结果因两次
 >   `DRIVER_QUIT_FAILED` 记为 `partial`，详见
 >   [current acceptance matrix](README.md)。更早的 2026-07-11 手工结果已独立
 >   保存为[历史证据](browser-acceptance-2026-07-11.md)。
@@ -64,11 +66,47 @@ status 的 run 还原为 `accepted`，进而以相同 run ID 重放一次 create
 幂等边界避免重复执行，但“只恢复 watcher、不重放 create 请求”仍需独立产品修复；
 本 characterization 没有修改前端，也没有把该路径列入通过范围。
 
+上述段落保留当时的基线发现；该问题现由下述刷新恢复修复关闭，不倒写为 #49
+characterization 当时已通过。
+
+同日新增的刷新恢复回归固定 `ark-panel:run:v1:<recordId>` key，不迁移或重解释
+既有数据，只为持久值增加 `status` 与 `createPhase`。恢复总是先查询同一 `runId`；
+合法且归属匹配的 200 snapshot 只 settle/watch，不发 create，畸形或归属不匹配的
+200 snapshot 同样不会触发写请求。只有该查询精确返回 `404 RUN_NOT_FOUND` 后才查询
+该会话 active run：同会话的相同或不同 active run 都只 watch，且不同 run 不继承
+旧 submitted payload；跨会话或畸形 active snapshot 不触发 create。只有 active 精确为 null，
+且本地记录是完整合法的 `provisional` 或无 `createPhase` 旧格式，才用原
+idempotency key 补发一次 create。`acknowledged`、running、terminal、不完整和损坏
+记录均不补发；网络、5xx、存储失败也不能被当作 404。初次 provisional 写失败不阻止
+紧接着的原始 POST；若 POST 结果不确定且服务端仍无可观察 run，前端才放弃自动补发并
+恢复 composer，由用户显式重试，避免永久卡住。POST 已获服务端响应但 acknowledged
+写失败时，前端尽力移除旧 provisional key，继续以内存状态 watch，刷新后再从 active run
+恢复，不把旧 provisional 当成补发依据。
+同一 `runId` 若出现在多个 session key 下，预扫描会同时清除这些冲突记录，不启动
+查询、watcher 或 create；客户端不能猜测其归属。
+
+这不能消除 POST 已发出、但服务端尚无可观察 durable run 时进程恰好崩溃的极窄
+歧义；该窗口仍依赖服务端对同 idempotency key 的持久幂等语义。测试只证明浏览器
+按上述查询顺序恢复，不把客户端状态冒充服务端 durability。
+
+刷新恢复修复集成在 `2e86ed8` 基线上，使用 Node.js 22.22.0、Firefox 153.0.1 与
+geckodriver 0.37.0 有界执行三轮完整 suite，三轮均为 2/2 clean。每轮桌面场景都
+确认：可观察 durable run 刷新后增加 GET 而 create 计数不变，随后 terminal 正常
+替换预览；active-other 只 watch 服务端 run 且不继承旧 payload；仅确认缺失的
+provisional 用原 key 补建一次并同步 `acknowledged`；损坏值发出零次 run GET/create。
+无 `createPhase` 的完整旧格式补建矩阵，以及 acknowledged 写失败清除旧 key 的
+fail-closed 转换由无 DOM focused regressions 覆盖；Firefox 的刷新用例覆盖其后续
+active-run 恢复语义。
+补建路径还断言统一请求轨迹严格为 `GET run → GET active → POST`，跨 session 的
+重复 runId 同样发出零次恢复请求。
+三轮的移动场景也全部通过，结束后没有 fixture 目录、截图或 fixture 拥有的 listener。
+这是本修复的日期化 fixture 证据，不替代真实 runtime 或后续 CI 结果。
+
 ## 自动化矩阵
 
 | 视口 | 输入能力 | 覆盖 |
 | --- | --- | --- |
-| 桌面 | fine pointer、hover、键盘 | 登录/退出、Origin 与 CSRF 拒绝、会话选择、新建、发送、fork、编辑重发、只读来源、会话级运行锁、停止、上下文 `k` 展示、三点菜单边界；自动建会话的 composer scope 迁移，accepted/failed/aborted 状态消费与保留边界，附件重试复用；外部图片渲染前后零请求，只有跨主机显式链接可脱敏新标签导航，同主机异端口不可导航 |
+| 桌面 | fine pointer、hover、键盘 | 登录/退出、Origin 与 CSRF 拒绝、会话选择、新建、发送、fork、编辑重发、只读来源、会话级运行锁、停止、上下文 `k` 展示、三点菜单边界；自动建会话的 composer scope 迁移，accepted/failed/aborted 状态消费与保留边界，附件重试复用；运行中刷新只查询/恢复 durable run，不重复 create，active-other 不继承旧 payload，确认缺失的 provisional 只补建一次，损坏持久值不发请求；外部图片渲染前后零请求，只有跨主机显式链接可脱敏新标签导航，同主机异端口不可导航 |
 | 移动 | 500px 以内、coarse pointer、无 hover | Agent → 会话 → 对话导航、真实点击、44px “本轮需要文件”开关、Enter 换行不发送、三点菜单边界、Escape 关闭并恢复焦点、点击发送 |
 | 两者共享 | 真实 Firefox DOM、网络与 SSE | 安全 Markdown 不执行 HTML/`javascript:`，附件图片只走已认证同源预览，SSE 文本与工具阶段、终态替换、终态前断线后的查询恢复 |
 

@@ -397,6 +397,118 @@ test("desktop browser acceptance covers security and session lifecycle", { timeo
     await waitText(driver, "#messages", "虚构 SSE 回复：SSE 断线后终态验收", WAIT_MS);
     await waitEnabled(driver, "#message", true);
 
+    const reloadMessage = "刷新后只恢复持久任务";
+    await textarea.sendKeys(reloadMessage);
+    await (await visible(driver, "#send")).click();
+    await visible(driver, ".stream-preview");
+    const reloadRun = [...fixture.state.runs.values()].find(run => run.recordId === createdRecordId && !["completed", "failed", "aborted"].includes(run.status));
+    assert.ok(reloadRun);
+    const createsBeforeReload = fixture.state.calls.generationCreates.length;
+    const getsBeforeReload = fixture.state.calls.generationGets.filter(runId => runId === reloadRun.runId).length;
+    await driver.navigate().refresh();
+    await visible(driver, "#app");
+    await driver.wait(() => fixture.state.calls.generationGets.filter(runId => runId === reloadRun.runId).length > getsBeforeReload, WAIT_MS,
+      "Timed out waiting for reload recovery to query the durable run");
+    assert.equal(fixture.state.calls.generationCreates.length, createsBeforeReload,
+      "reload recovery must not recreate an observable durable run");
+    fixture.completeRun(createdRecordId);
+    await driver.wait(async () => await driver.executeScript(`
+      return localStorage.getItem('ark-panel:run:v1:' + encodeURIComponent(arguments[0])) === null
+    `, createdRecordId), WAIT_MS, "Timed out waiting for the recovered run to settle");
+    await openSession(driver, createdRecordId);
+    await waitText(driver, "#messages", `虚构 SSE 回复：${reloadMessage}`, WAIT_MS);
+
+    await openSession(driver, "fixture-2");
+    await (await visible(driver, "#message")).sendKeys("服务端已有的另一个任务");
+    await (await visible(driver, "#send")).click();
+    await visible(driver, ".stream-preview");
+    const serverRun = [...fixture.state.runs.values()].find(run => run.recordId === "fixture-2" && !["completed", "failed", "aborted"].includes(run.status));
+    assert.ok(serverRun);
+    const staleRunId = "33333333-3333-4333-8333-333333333333";
+    await driver.executeScript(`
+      localStorage.setItem('ark-panel:run:v1:' + encodeURIComponent(arguments[0]), JSON.stringify({
+        runId: arguments[1], recordId: arguments[0], status: 'accepted', createPhase: 'provisional',
+        submittedDraft: '不得绑定到服务端任务', submittedAttachmentIds: [], submittedRequestOutputs: false
+      }));
+    `, "fixture-2", staleRunId);
+    const createsBeforeActiveRecovery = fixture.state.calls.generationCreates.length;
+    await driver.navigate().refresh();
+    await visible(driver, "#app");
+    await driver.wait(() => fixture.state.calls.generationGets.includes(staleRunId), WAIT_MS,
+      "Timed out waiting for the stale persisted run lookup");
+    const recoveredServerRun = await driver.wait(async () => {
+      const value = await driver.executeScript(`
+        return JSON.parse(localStorage.getItem('ark-panel:run:v1:' + encodeURIComponent(arguments[0])) || 'null')
+      `, "fixture-2");
+      return value?.runId === serverRun.runId ? value : false;
+    }, WAIT_MS, "Timed out waiting for active-other recovery");
+    assert.equal(fixture.state.calls.generationCreates.length, createsBeforeActiveRecovery);
+    assert.equal(recoveredServerRun.createPhase, "acknowledged");
+    assert.equal(Object.hasOwn(recoveredServerRun, "submittedDraft"), false,
+      "a different active run must not inherit the stale submitted payload");
+    fixture.completeRun("fixture-2");
+    await driver.wait(async () => await driver.executeScript(`
+      return localStorage.getItem('ark-panel:run:v1:' + encodeURIComponent(arguments[0])) === null
+    `, "fixture-2"), WAIT_MS, "Timed out waiting for the active-other run to settle");
+
+    const provisionalRunId = "44444444-4444-4444-8444-444444444444";
+    await driver.executeScript(`
+      localStorage.setItem('ark-panel:run:v1:' + encodeURIComponent(arguments[0]), JSON.stringify({
+        runId: arguments[1], recordId: arguments[0], status: 'accepted', createPhase: 'provisional',
+        submittedDraft: '仅缺失时补建的任务', submittedAttachmentIds: [], submittedRequestOutputs: false
+      }));
+    `, "fixture-2", provisionalRunId);
+    const createsBeforeProvisional = fixture.state.calls.generationCreates.length;
+    const requestsBeforeProvisional = fixture.state.calls.generationRequests.length;
+    await driver.navigate().refresh();
+    await visible(driver, "#app");
+    await driver.wait(() => fixture.state.calls.generationCreates.some(call => call.runId === provisionalRunId), WAIT_MS,
+      "Timed out waiting for the confirmed-missing provisional create");
+    assert.equal(fixture.state.calls.generationCreates.length, createsBeforeProvisional + 1);
+    assert.deepEqual(fixture.state.calls.generationRequests.slice(requestsBeforeProvisional, requestsBeforeProvisional + 3), [
+      { method: "GET_RUN", runId: provisionalRunId },
+      { method: "GET_ACTIVE", recordId: "fixture-2" },
+      { method: "POST", recordId: "fixture-2", runId: provisionalRunId }
+    ]);
+    const acknowledgedProvisional = await driver.executeScript(`
+      return JSON.parse(localStorage.getItem('ark-panel:run:v1:' + encodeURIComponent(arguments[0])) || 'null')
+    `, "fixture-2");
+    assert.equal(acknowledgedProvisional?.runId, provisionalRunId);
+    assert.equal(acknowledgedProvisional?.createPhase, "acknowledged");
+    fixture.completeRun("fixture-2");
+    await driver.wait(async () => await driver.executeScript(`
+      return localStorage.getItem('ark-panel:run:v1:' + encodeURIComponent(arguments[0])) === null
+    `, "fixture-2"), WAIT_MS, "Timed out waiting for the provisional run to settle");
+
+    const getsBeforeCorrupt = fixture.state.calls.generationGets.length;
+    const createsBeforeCorrupt = fixture.state.calls.generationCreates.length;
+    await driver.executeScript(`
+      localStorage.setItem('ark-panel:run:v1:' + encodeURIComponent(arguments[0]), '{not-json');
+    `, "fixture-2");
+    await driver.navigate().refresh();
+    await visible(driver, "#app");
+    await waitScript(driver, `return localStorage.getItem('ark-panel:run:v1:' + encodeURIComponent(${JSON.stringify("fixture-2")})) === null`);
+    assert.equal(fixture.state.calls.generationGets.length, getsBeforeCorrupt);
+    assert.equal(fixture.state.calls.generationCreates.length, createsBeforeCorrupt);
+
+    const duplicateRunId = "55555555-5555-4555-8555-555555555555";
+    await driver.executeScript(`
+      const runId = arguments[0];
+      for (const recordId of ['fixture-1', 'fixture-2']) {
+        localStorage.setItem('ark-panel:run:v1:' + encodeURIComponent(recordId), JSON.stringify({
+          runId, recordId, status: 'accepted', createPhase: 'provisional',
+          submittedDraft: '冲突记录不得恢复', submittedAttachmentIds: [], submittedRequestOutputs: false
+        }));
+      }
+    `, duplicateRunId);
+    const requestsBeforeCollision = fixture.state.calls.generationRequests.length;
+    await driver.navigate().refresh();
+    await visible(driver, "#app");
+    await waitScript(driver, `return ['fixture-1','fixture-2'].every(recordId =>
+      localStorage.getItem('ark-panel:run:v1:' + encodeURIComponent(recordId)) === null)`);
+    assert.equal(fixture.state.calls.generationRequests.length, requestsBeforeCollision,
+      "a duplicated stored run id must start no recovery request");
+
     await (await visible(driver, '#agents .agent[data-id="fixture"]')).click();
     await waitScript(driver, "return !document.querySelector('.session-row.active')");
     const autoCreateFile = fixture.makeUploadFile("fictional-auto-create.txt");

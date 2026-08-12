@@ -84,7 +84,14 @@ function createFixtureState(externalImages) {
     runs: new Map(),
     listeners: new Map(),
     uploads: new Map(),
-    calls: { createPanels: [], generationCreates: [], uploads: [] },
+    calls: {
+      createPanels: [],
+      generationCreates: [],
+      generationGets: [],
+      activeRunGets: [],
+      generationRequests: [],
+      uploads: []
+    },
     nextRecord: 3,
     nextEntry: 1,
     nextTick: 1
@@ -262,6 +269,7 @@ export async function startBrowserFixture({ port = 0 } = {}) {
   const generation = {
     async create(recordId, message, runId = crypto.randomUUID(), expectedRevision, attachmentIds = [], requestOutputs = false) {
       const normalizedAttachments = [...attachmentIds];
+      state.calls.generationRequests.push({ method: "POST", recordId, runId });
       state.calls.generationCreates.push({ recordId, message, runId, expectedRevision,
         attachmentIds: normalizedAttachments, requestOutputs });
       await gates.generationCreate.wait();
@@ -280,7 +288,12 @@ export async function startBrowserFixture({ port = 0 } = {}) {
       queueMicrotask(() => startRun(run));
       return { ...publicRun(run), newlyCreated: true };
     },
-    async get(runId) { const run = state.runs.get(runId); return run ? publicRun(run) : undefined; },
+    async get(runId) {
+      state.calls.generationRequests.push({ method: "GET_RUN", runId });
+      state.calls.generationGets.push(runId);
+      const run = state.runs.get(runId);
+      return run ? publicRun(run) : undefined;
+    },
     async subscribe(runId, listener) {
       const run = state.runs.get(runId);
       if (!run) return undefined;
@@ -301,7 +314,12 @@ export async function startBrowserFixture({ port = 0 } = {}) {
       if (!terminal(run.status)) { run.status = "aborted"; run.finishedAt = stamp(); delete run.stream; publish(run); }
       return publicRun(run);
     },
-    async activeForRecord(recordId) { const run = activeRun(recordId); return run ? publicRun(run) : undefined; }
+    async activeForRecord(recordId) {
+      state.calls.generationRequests.push({ method: "GET_ACTIVE", recordId });
+      state.calls.activeRunGets.push(recordId);
+      const run = activeRun(recordId);
+      return run ? publicRun(run) : undefined;
+    }
   };
 
   let settings = { version: 1, locale: "zh-CN", appearance: { theme: "light", accent: "default" }, conversation: { showStatus: true } };
