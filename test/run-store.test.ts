@@ -4,8 +4,18 @@ import { mkdtemp, readFile, rename, rm, symlink, unlink, writeFile } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { atomicWrite } from "../src/storage/atomic.js";
-import { PanelRunStore, type PanelRunRecord, type PanelRunStatus, type PanelRunStoreWriter } from "../src/server/run-store.js";
+import { PanelRunStore, type PanelRunRecord, type PanelRunStatus } from "../src/server/run-store.js";
 import { deferred, withTimeout, writeThenFailBeforeDirectorySync } from "./test-helpers.js";
+
+interface RunStoreTestHooks {
+  onDirectoryScan?(): void;
+  onRecordRead?(runId: string): void;
+  beforeRecordRead?(runId: string): Promise<void>;
+  writeRunRecord?(path: string, data: string): Promise<void>;
+}
+// The runtime implementation accepts this test-only seam, while its exported overload keeps
+// production callers on the authoritative one-argument constructor.
+const TestPanelRunStore = PanelRunStore as unknown as new (dataRoot: string, hooks: RunStoreTestHooks) => PanelRunStore;
 
 function runId(index: number): string {
   return `00000000-0000-4000-8000-${index.toString(16).padStart(12, "0")}`;
@@ -25,7 +35,7 @@ test("active-run 索引只在首次访问扫描，并从权威 run 文件重建�
   const active = fixtureRun(100, "active-record", "accepted"); await seed.put(active);
 
   const observed = { scans: 0, reads: 0 };
-  const store = new PanelRunStore(root, {
+  const store = new TestPanelRunStore(root, {
     onDirectoryScan() { observed.scans++; },
     onRecordRead() { observed.reads++; }
   });
@@ -44,7 +54,7 @@ test("active-run 索引只在首次访问扫描，并从权威 run 文件重建�
   assert.equal(observed.scans, 1);
 
   const restartedObserved = { scans: 0, reads: 0 };
-  const restarted = new PanelRunStore(root, {
+  const restarted = new TestPanelRunStore(root, {
     onDirectoryScan() { restartedObserved.scans++; },
     onRecordRead() { restartedObserved.reads++; }
   });
@@ -91,11 +101,11 @@ test("rename 后目录 sync 失败会按磁盘可见状态重建非终态更新�
   const root = await mkdtemp(join(tmpdir(), "run-store-index-post-rename-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   let failNext = false, scans = 0;
-  const writer: PanelRunStoreWriter = async (path, data) => {
+  const writer = async (path: string, data: string): Promise<void> => {
     if (failNext) { failNext = false; return await writeThenFailBeforeDirectorySync(path, data); }
     await atomicWrite(path, data);
   };
-  const store = new PanelRunStore(root, { onDirectoryScan() { scans++; } }, writer);
+  const store = new TestPanelRunStore(root, { onDirectoryScan() { scans++; }, writeRunRecord: writer });
   const accepted = fixtureRun(400, "active-record", "accepted"); await store.put(accepted);
   assert.equal((await store.activeForRecord("active-record"))?.status, "accepted"); assert.equal(scans, 1);
 
@@ -116,13 +126,14 @@ test("失效前启动的 active 索引扫描不能晚到覆盖 post-rename 状�
   await new PanelRunStore(root).put(fixtureRun(500, "terminal-record", "completed"));
   const scanEntered = deferred(), releaseScan = deferred(); t.after(() => releaseScan.resolve());
   let blockFirstRead = true, scans = 0;
-  const store = new PanelRunStore(root, {
+  const store = new TestPanelRunStore(root, {
     onDirectoryScan() { scans++; },
     async beforeRecordRead() {
       if (!blockFirstRead) return;
       blockFirstRead = false; scanEntered.resolve(); await releaseScan.promise;
-    }
-  }, writeThenFailBeforeDirectorySync);
+    },
+    writeRunRecord: writeThenFailBeforeDirectorySync
+  });
 
   const rebuilding = store.activeRecordIds(); await withTimeout(scanEntered.promise, "stale active-index scan");
   const accepted = fixtureRun(501, "new-active-record", "accepted");

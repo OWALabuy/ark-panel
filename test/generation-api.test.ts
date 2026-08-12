@@ -12,6 +12,25 @@ import { listSessionAttachments, readSessionAttachmentBytes, storeSessionAttachm
 import { PanelRunStore, type PanelRunRecord } from "../src/server/run-store.js";
 import { deferred, tempFixture, waitFor, withTimeout, writeThenFailBeforeDirectorySync } from "./test-helpers.js";
 
+interface RunStoreTestHooks {
+  onDirectoryScan?(): void;
+  onRecordRead?(runId: string): void;
+  beforeRecordRead?(runId: string): Promise<void>;
+  writeRunRecord?(path: string, data: string): Promise<void>;
+}
+const TestPanelRunStore = PanelRunStore as unknown as new (dataRoot: string, hooks: RunStoreTestHooks) => PanelRunStore;
+// Like output capture's race hooks, these runtime-only seams are reached through a local structural
+// cast; the exported constructors and GenerationConfig intentionally do not expose them.
+const TestPanelGenerationApi = PanelGenerationApi as unknown as new (
+  bridge: ConstructorParameters<typeof PanelGenerationApi>[0], config: ConstructorParameters<typeof PanelGenerationApi>[1],
+  hooks: { createRunStore(dataRoot: string): PanelRunStore }
+) => PanelGenerationApi;
+
+function generationApiWithRunStoreHooks(bridge: ConstructorParameters<typeof PanelGenerationApi>[0],
+  config: ConstructorParameters<typeof PanelGenerationApi>[1], hooks: RunStoreTestHooks): PanelGenerationApi {
+  return new TestPanelGenerationApi(bridge, config, { createRunStore: dataRoot => new TestPanelRunStore(dataRoot, hooks) });
+}
+
 test("附件原样交给 OpenClaw，输入与本轮模型产出作为消息块持久化", async t => {
   const root = await mkdtemp(join(tmpdir(), "generation-attachments-")); t.after(() => rm(root, { recursive: true, force: true }));
   const workspace = await mkdtemp(join(tmpdir(), "generation-workspace-")); t.after(() => rm(workspace, { recursive: true, force: true }));
@@ -253,12 +272,12 @@ test("大量终态 run 不增加创建、活跃查询或附件维护的目录扫
     onRecordRead(id: string) { observed.reads++; observed.readRunIds.push(id); }
   };
   const started = deferred(), release = deferred(); t.after(() => release.resolve());
-  const api = new PanelGenerationApi({ async generate(request) {
+  const api = generationApiWithRunStoreHooks({ async generate(request) {
     started.resolve(); await release.promise;
     return { runId: request.idempotencyKey, sessionId: "temp", entries: [
       { type: "message", id: "answer", parentId: request.latestUserEntryId, message: { role: "assistant", content: "ok" } }
     ] };
-  } }, { dataRoot: root, runtimeByAgent: new Map([["claude", "runtime"]]), runStoreInstrumentation });
+  } }, { dataRoot: root, runtimeByAgent: new Map([["claude", "runtime"]]) }, runStoreInstrumentation);
 
   await api.initialize();
   assert.deepEqual({ scans: observed.scans, reads: observed.reads }, { scans: 1, reads: 96 });
@@ -288,11 +307,12 @@ test("accepted 已 rename 但目录 sync 失败后，下一 runId 仍由权威�
   const metadata = await createPanelSession(root, "claude", { header: { type: "session" }, entries: [] });
   let bridgeCalls = 0, writerCalls = 0, scans = 0;
   const firstRunId = "23232323-2323-4323-8323-232323232323";
-  const api = new PanelGenerationApi({ async generate() { bridgeCalls++; throw new Error("bridge must not run"); } }, {
-    dataRoot: root, runtimeByAgent: new Map([["claude", "runtime"]]),
-    runStoreInstrumentation: { onDirectoryScan() { scans++; } },
-    async runStoreWriter(path, data) { writerCalls++; await writeThenFailBeforeDirectorySync(path, data); }
-  });
+  const api = generationApiWithRunStoreHooks(
+    { async generate() { bridgeCalls++; throw new Error("bridge must not run"); } },
+    { dataRoot: root, runtimeByAgent: new Map([["claude", "runtime"]]) },
+    { onDirectoryScan() { scans++; },
+      async writeRunRecord(path, data) { writerCalls++; await writeThenFailBeforeDirectorySync(path, data); } }
+  );
 
   await assert.rejects(api.create(metadata.recordId, "private fixture prompt", firstRunId), /parent directory sync failed/);
   const visible = JSON.parse(await readFile(join(root, "runs", `${firstRunId}.json`), "utf8"));

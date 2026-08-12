@@ -39,13 +39,12 @@ export interface PublicRunTool { callId: string; name: string; phase: "started" 
 export interface PublicRunStream { revision: number; state: "connecting" | "streaming" | "degraded"; text: string; tools: PublicRunTool[] }
 export interface PublicPanelRun { runId: string; recordId: string; status: PanelRunStatus; sequence: number; createdAt: string; updatedAt: string; startedAt?: string; finishedAt?: string; revision?: string; error?: { code: string; message: string }; canAbort: boolean; stream?: PublicRunStream }
 
-export interface PanelRunStoreInstrumentation {
+interface PanelRunStoreTestHooks {
   onDirectoryScan?(): void;
   onRecordRead?(runId: string): void;
   beforeRecordRead?(runId: string): Promise<void>;
+  writeRunRecord?(path: string, data: string): Promise<void>;
 }
-
-export type PanelRunStoreWriter = (path: string, data: string) => Promise<void>;
 
 interface ActiveRunIndex {
   byRecordId: Map<string, Set<string>>;
@@ -67,12 +66,14 @@ function validate(value: unknown, expectedRunId?: string): PanelRunRecord {
 }
 
 export class PanelRunStore {
+  #testHooks: PanelRunStoreTestHooks;
   private readonly root: string;
   private activeIndex: ActiveRunIndex | undefined;
   private activeIndexBuild: ActiveIndexBuild | undefined;
   private activeIndexGeneration = 0;
-  constructor(dataRoot: string, private readonly instrumentation: PanelRunStoreInstrumentation = {},
-    private readonly writeRunRecord: PanelRunStoreWriter = atomicWrite) {
+  constructor(dataRoot: string);
+  constructor(dataRoot: string, testHooks: PanelRunStoreTestHooks = {}) {
+    this.#testHooks = testHooks;
     this.root = assertWithin(dataRoot, join(dataRoot, "runs"));
   }
   async initialize(): Promise<void> {
@@ -85,8 +86,8 @@ export class PanelRunStore {
   }
   async get(runId: string): Promise<PanelRunRecord | undefined> {
     try {
-      const path = this.path(runId); this.instrumentation.onRecordRead?.(runId);
-      const beforeRead = this.instrumentation.beforeRecordRead?.(runId); if (beforeRead) await beforeRead;
+      const path = this.path(runId); this.#testHooks.onRecordRead?.(runId);
+      const beforeRead = this.#testHooks.beforeRecordRead?.(runId); if (beforeRead) await beforeRead;
       const stat = await lstat(path);
       if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("run record 文件不安全");
       return validate(JSON.parse(await readFile(path, "utf8")), runId);
@@ -96,7 +97,7 @@ export class PanelRunStore {
     await this.initialize();
     const validated = validate(record, record.runId);
     const indexed = { runId: validated.runId, recordId: validated.recordId, status: validated.status };
-    try { await this.writeRunRecord(this.path(record.runId), JSON.stringify(validated, null, 2) + "\n"); }
+    try { await (this.#testHooks.writeRunRecord ?? atomicWrite)(this.path(record.runId), JSON.stringify(validated, null, 2) + "\n"); }
     catch (error) {
       // atomicWrite may reject after rename if the parent-directory fsync fails. The new bytes can
       // therefore already be visible even though durability is unknown; discard all derived state
@@ -143,7 +144,7 @@ export class PanelRunStore {
   }
 
   private async scanRecords(): Promise<PanelRunRecord[]> {
-    this.instrumentation.onDirectoryScan?.(); const result: PanelRunRecord[] = [];
+    this.#testHooks.onDirectoryScan?.(); const result: PanelRunRecord[] = [];
     for (const name of await readdir(this.root)) {
       if (!name.endsWith(".json")) continue;
       const runId = name.slice(0, -5); result.push((await this.get(runId))!);
