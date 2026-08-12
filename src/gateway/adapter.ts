@@ -171,42 +171,11 @@ export function assertSupportedVersion(actual: string): void {
   }
 }
 
-// 实际 RPC 和临时 transcript 物化由具体客户端实现。本接口明确规定顺序，
-// 使服务层不能绕过 create，也不能把最新用户消息提前写进历史。
+// 适配层只声明版本门禁、Gateway 协议和临时 transcript 物化类型。
+// 生产 generation 的调用顺序与清理责任唯一由 BridgeService.generate 编排。
 export interface BridgeMaterializer {
   replaceCreatedTranscript(created: CreatedSession, history: TranscriptDocument): Promise<number>;
   readNewEntries(created: CreatedSession, previousEntryCount: number): Promise<TranscriptDocument["entries"]>;
   verifyAndStripSubmittedUser(entries: TranscriptDocument["entries"], expectedMessage: string, panelUserEntryId: string): TranscriptDocument["entries"];
   readAndVerifyCompaction?(created: CreatedSession, history: TranscriptDocument): Promise<TranscriptDocument["entries"][number]>;
-}
-
-export async function runBridge(client: GatewayClient, materializer: BridgeMaterializer, request: BridgeRequest): Promise<BridgeResult> {
-  assertSupportedVersion(await client.version());
-  const created = await client.createSession(request.runtimeAgentId);
-  await request.lifecycle?.({ type: "temporary_session_created", runtimeAgentId: request.runtimeAgentId,
-    sessionId: created.sessionId, sessionKey: created.sessionKey, transcriptPath: created.transcriptPath });
-  const previousCount = await materializer.replaceCreatedTranscript(created, request.historyThroughPreviousRun);
-  await request.lifecycle?.({ type: "history_materialized", previousEntryCount: previousCount });
-  if (request.overrides && Object.keys(request.overrides).length > 0) {
-    if (!client.applySessionOverrides) throw new Error("GATEWAY_SESSION_OVERRIDES_UNSUPPORTED");
-    await client.applySessionOverrides(created.sessionKey, request.overrides);
-  }
-  const { runId } = await client.send(created.sessionKey, request.latestUserMessage, request.idempotencyKey, request.attachments);
-  await request.lifecycle?.({ type: "gateway_send_accepted", gatewayRunId: runId });
-  const abort = () => {
-    void client.abort(created.sessionKey, runId, created.sessionId).catch(() => undefined);
-  };
-  request.signal?.addEventListener("abort", abort, { once: true });
-  try {
-    if (request.signal?.aborted) throw new Error("BRIDGE_ABORTED");
-    await client.waitForCompletion(created.sessionId, runId, request.signal);
-    if (request.signal?.aborted) throw new Error("BRIDGE_ABORTED");
-  } finally { request.signal?.removeEventListener("abort", abort); }
-  const added = await materializer.readNewEntries(created, previousCount);
-  const entries = materializer.verifyAndStripSubmittedUser(added, request.latestUserMessage, request.latestUserEntryId);
-  let contextUsage: OpenClawContextUsage | undefined;
-  try { contextUsage = await client.sessionContextUsage?.(request.runtimeAgentId, created.sessionKey); }
-  catch { contextUsage = undefined; }
-  await request.lifecycle?.({ type: "entries_materialized", entries, ...(contextUsage ? { contextUsage } : {}) });
-  return { runId, sessionId: created.sessionId, entries, ...(contextUsage ? { contextUsage } : {}) };
 }

@@ -177,6 +177,8 @@ gateway 的会话索引属于其内部状态：它仅使用进程内锁，也没
 **选定方案 2a′（混合架构），核心桥接已于 2026-07-11 实测通过。** 责任划分如下：
 > **面板独占写入 panel transcript/metadata；gateway 独占写入 `sessions.json` 和 active/reset transcript。面板读取索引仅为进程内派生状态，不写共享文件。两个进程不写入同一权威文件，从架构上避免进程内锁无法协调跨进程写入的问题。**
 
+生产应用的 generation 编排只有 `BridgeService` 这一个责任边界，唯一入口是 `BridgeService.generate`；`src/gateway/adapter.ts` 只承载固定版本的协议、类型与 version gate，不编排 create/send、transcript 物化或清理。`runtime-acceptance` 与 `stream-probe` 只是需要显式开关才能运行的隔离探针：它们刻意直接验证下层边界，不是第二个生产入口，也不得成为生产回落路径。
+
 - 实测可行流程是：调用 `sessions.create` 取得 gateway 已登记的一次性 session；覆盖其 transcript，只物化到上一轮完整 run；用 `sessions.send` 提交尚未写入文件的最新用户消息；完成后从临时 transcript 取得新增的完整 entry 组。最新用户消息只出现一次。一次性 session 不复用。
 - 面板复用一条已认证的持久 Gateway WebSocket 执行生成控制 RPC 与接收流式事件，避免每个 `sessions.create/send/delete` 都启动 CLI、重新握手。连接固定请求并精确核验 `operator.read` / `operator.write` / `operator.admin`，且只允许 §4.2 的 RPC。CLI 仅保留给本地命令和显式隔离验收工具；生产无法解析凭据或控制连接断开时注入稳定拒绝 transport，保留面板只读访问，但绝不自动降级为逐次 Gateway CLI RPC。
 - 成功 run 在新增 entries 已写入可恢复的 run record、随后原子提交面板 transcript 后即可向浏览器完成；临时 session 注销与 artifact 清理由后台执行。run record 的 `cleanupPending` 是重启恢复依据，失败路径仍同步 abort/清理，不能把可能仍运行的 session 当作成功释放。
