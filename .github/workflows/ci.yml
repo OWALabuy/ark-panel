@@ -43,6 +43,9 @@ jobs:
       - name: Build and test
         run: npm test
 
+      - name: Run browser fixture acceptance
+        run: npm run test:browser
+
   coverage:
     name: Node 22 coverage baseline
     runs-on: ubuntu-latest

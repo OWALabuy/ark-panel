@@ -164,6 +164,13 @@ npm start
 npm run healthcheck
 ```
 
+运行确定性的 Firefox/WebDriver 浏览器验收（需要 `PATH` 中存在 Firefox
+和 geckodriver）：
+
+```sh
+npm run test:browser
+```
+
 通过 HTTPS 反向代理提供服务时，设置 `PANEL_SECURE_COOKIE=1`。首个版本固定适配 OpenClaw `2026.6.11`;升级 OpenClaw 前请重新运行集成验收。
 
 ## 文档

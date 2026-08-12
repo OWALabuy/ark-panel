@@ -164,6 +164,13 @@ Check the unauthenticated health endpoint:
 npm run healthcheck
 ```
 
+Run the deterministic Firefox/WebDriver acceptance suite (requires Firefox and
+geckodriver on `PATH`):
+
+```sh
+npm run test:browser
+```
+
 When serving through an HTTPS reverse proxy, set `PANEL_SECURE_COOKIE=1`. The first version is pinned to OpenClaw `2026.6.11`; rerun integration acceptance before upgrading OpenClaw.
 
 ## Documentation

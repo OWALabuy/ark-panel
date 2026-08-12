@@ -1,34 +1,45 @@
-# 浏览器验收记录
+# 浏览器自动化验收
 
-2026-07-11 使用 Firefox 152 + WebDriver，在 `test/browser-fixture.mjs` 提供的纯内存脱敏数据上完成验收。fixture 不读取 agent 目录，也不连接 gateway。
+2026-08-12 起，仓库通过 `npm run test:browser` 执行真实 Firefox/WebDriver
+交互验收。测试只使用 `test/browser-fixture.mjs` 中完全虚构的内存数据，监听
+`127.0.0.1` 的临时端口，不读取 agent、workspace 或用户目录，也不连接
+OpenClaw、Gateway、模型、IM 或其它外部服务。
 
-已验证：
+## 运行
 
-- 登录、Cookie 会话及三栏桌面布局；
-- 退出登录，以及 active/reset 只读状态（禁用输入并显示 fork 引导）；
-- 移动端 Agent → 会话 → 对话逐层导航及返回；
-- 服务端搜索与命中摘要；
-- 新建 panel 会话、fork、编辑重发；
-- 新建与编辑 modal 的初始焦点、必填校验、取消、Escape 关闭及焦点恢复；
-- SSE started/completed 状态、消息刷新；
-- 支持的斜杠命令由浏览器通过独立结构化接口派发，未支持命令灰显且不发请求；普通消息接口仍有 bridge 前拒绝 `/...` 的回归测试；
-- 生成按钮在运行中切换为可访问的“停止生成”，取消后保留输入以便重试；
-- 页面轮询轻量 revisions API，检测变化后才刷新完整会话列表；
-- 首次 `SESSION_BUSY` 后使用同一个幂等键重试成功；
-- thinking、tool use、tool result 默认折叠；
-- 所有动态内容使用 DOM text 节点，不解释为 HTML；
-- 主要导航、搜索、消息输入、发送和 live status 均具有可访问名称或 live region。
-
-截图：
-
-- [`ui-desktop.png`](../images/ui-desktop.png)
-- [`ui-mobile.png`](../images/ui-mobile.png)
-- [`ui-modal-desktop.png`](../images/ui-modal-desktop.png)
-- [`ui-modal-mobile.png`](../images/ui-modal-mobile.png)
-
-运行 fixture：
+先安装 Node.js 22、Firefox 和 geckodriver，然后执行：
 
 ```sh
-npm run build
-node test/browser-fixture.mjs
+npm ci
+npm run test:browser
 ```
+
+驱动默认从系统 `PATH` 查找 Firefox 和 geckodriver。本地安装位置特殊时可分别
+设置 `PANEL_FIREFOX_BINARY` 和 `PANEL_GECKODRIVER_BINARY`。依赖中的
+`selenium-webdriver` 不下载浏览器；CI 使用 runner 已安装的 Firefox 和
+geckodriver，并执行同一条 npm script。
+
+实现验收当天使用 Firefox 153.0.1 与 geckodriver 0.37.0 连续执行三次完整
+suite，三次均为 2/2 通过；结束后未留下监听进程、浏览器进程、截图或 fixture
+目录。这是本次变更的日期化证据，不替代后续 CI 结果。
+
+## 自动化矩阵
+
+| 视口 | 输入能力 | 覆盖 |
+| --- | --- | --- |
+| 桌面 | fine pointer、hover、键盘 | 登录/退出、Origin 与 CSRF 拒绝、会话选择、新建、发送、fork、编辑重发、只读来源、会话级运行锁、停止、上下文 `k` 展示、三点菜单边界 |
+| 移动 | 500px 以内、coarse pointer、无 hover | Agent → 会话 → 对话导航、真实点击、44px “本轮需要文件”开关、Enter 换行不发送、三点菜单边界、Escape 关闭并恢复焦点、点击发送 |
+| 两者共享 | 真实 Firefox DOM、网络与 SSE | 安全 Markdown 不执行 HTML/`javascript:`，附件图片只走已认证同源预览，SSE 文本与工具阶段、终态替换、终态前断线后的查询恢复 |
+
+fixture 的会话、消息、路径、附件和工具结果均为固定虚构值；服务端通过监听事件
+报告 readiness，测试不依赖固定端口或 readiness sleep。每个场景都会关闭
+WebDriver 和 HTTP server，运行中未启动真实 OpenClaw。失败时只在
+`browser-artifacts/` 保留包含上述脱敏 fixture 的截图；成功运行不产生截图或
+持久状态。
+
+## 验证边界
+
+自动化覆盖 Firefox 的桌面和 coarse-pointer 移动布局，但不声称等同于真实触屏
+硬件，也不证明 Chromium/WebKit 的渲染一致性。依赖真实软件键盘、缩放、刘海
+安全区或跨浏览器排版的变化仍需相应设备/浏览器验收。实机 OpenClaw 集成继续
+使用独立、显式授权的 runtime acceptance 流程，不能由此 fixture 替代。

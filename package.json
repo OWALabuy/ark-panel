@@ -15,6 +15,7 @@
     "password-hash": "node -e \"const c=require('node:crypto');const s=c.randomBytes(16).toString('hex');console.log('scrypt:'+s+':'+c.scryptSync(process.argv[1],s,32).toString('hex'))\"",
     "test": "npm run build && node --test dist/test/**/*.test.js",
     "test:coverage": "npm run build && node scripts/test-coverage.mjs",
+    "test:browser": "npm run build && node --test test/browser-acceptance.test.mjs",
     "test:paneltest": "npm run build && PANEL_ALLOW_PANELTEST_INTEGRATION=1 node dist/src/gateway/paneltest-smoke.js",
     "test:stream-probe": "npm run build && PANEL_ALLOW_STREAM_PROBE=1 node dist/src/gateway/stream-probe.js",
     "test:runtime-acceptance": "npm run build && PANEL_ALLOW_RUNTIME_ACCEPTANCE=1 node dist/src/gateway/runtime-acceptance-cli.js",
@@ -23,6 +24,6 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "check:frontend": "tsc -p tsconfig.frontend.json"
   },
-  "devDependencies": { "@types/node": "^22.15.0", "katex": "^0.16.47", "typescript": "^5.8.3" },
+  "devDependencies": { "@types/node": "^22.15.0", "katex": "^0.16.47", "selenium-webdriver": "^4.47.0", "typescript": "^5.8.3" },
   "dependencies": { "sharp": "^0.35.3" }
 }

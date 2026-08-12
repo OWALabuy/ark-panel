@@ -1,41 +1,291 @@
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { resolve } from "node:path";
 import { createPanelServer } from "../dist/src/server/app.js";
 import { passwordHash } from "../dist/src/server/auth.js";
 
-const port=Number(process.env.PANEL_BROWSER_PORT||"8899"),origin=`http://127.0.0.1:${port}`;
-const conversations=new Map([["fixture-1",{recordId:"fixture-1",agentId:"fixture",sourceKind:"panel",title:"脱敏浏览器验收",revision:"1",updatedAt:new Date().toISOString(),messageCount:2,document:{header:{type:"session"},entries:[
-  {type:"message",id:"u1",parentId:null,message:{role:"user",content:"请检查虚构项目。"}},
-  {type:"message",id:"a1",parentId:"u1",stopReason:"stop",message:{role:"assistant",content:[{type:"thinking",text:"这是完全虚构的思考。"},{type:"tool_use",name:"fixture_read",input:{path:"/fixture/demo"}},{type:"tool_result",content:"虚构工具结果"},{type:"text",text:"浏览器验收内容已准备好。"}]}}
-]}}],["fixture-active",{recordId:"fixture-active",agentId:"fixture",sourceKind:"active",title:"只读活会话示例",revision:"1",updatedAt:new Date().toISOString(),messageCount:1,document:{header:{type:"session"},entries:[{type:"message",id:"active-u1",message:{role:"user",content:"这是只读来源。"}}]}}]]);
-let counter=1;
-const failedOnce=new Set();
-const reads={
-  async agents(){return[{id:"fixture",label:"Fixture",sessionCount:conversations.size}]},
-  async sessions(agentId){return agentId&&agentId!=="fixture"?[]:[...conversations.values()].map(({document,...record})=>record)},
-  async conversation(recordId){return conversations.get(recordId)||null},
-  async search(query){const needle=query.toLowerCase();return[...conversations.values()].filter(value=>JSON.stringify(value.document).toLowerCase().includes(needle)).map(({document,...record})=>({...record,hits:[{snippet:"虚构搜索命中：浏览器验收内容"}]}))},
-  async createPanel(agentId,title){const id=`fixture-${++counter}`,now=new Date().toISOString(),value={recordId:id,agentId,sourceKind:"panel",title:title||"未命名会话",revision:"1",updatedAt:now,messageCount:0,document:{header:{type:"session"},entries:[]}};conversations.set(id,value);return value},
-  async fork(recordId,messageId){const source=conversations.get(recordId),id=`fixture-${++counter}`,now=new Date().toISOString(),value={...structuredClone(source),recordId:id,title:`${source.title} · fork`,revision:"1",updatedAt:now};value.document.entries=value.document.entries.slice(0,value.document.entries.findIndex(entry=>entry.id===messageId)+1);conversations.set(id,value);return{recordId:id,agentId:"fixture",sourceKind:"panel"}},
-  async editAndFork(recordId,messageId,replacement){const created=await this.fork(recordId,messageId),value=conversations.get(created.recordId),target=value.document.entries.find(entry=>entry.id===messageId);target.message.content=replacement;value.title="编辑重发分支";return created}
-};
-const runs=new Map(),listeners=new Map();
-function publicRun(run){const {message:_,...visible}=run;return{...visible,canAbort:["accepted","running","materializing"].includes(run.status)}}
-function publish(run){run.sequence++;run.updatedAt=new Date().toISOString();for(const listener of listeners.get(run.runId)||[])listener(publicRun(run));if(["completed","failed","aborted"].includes(run.status))listeners.delete(run.runId)}
-const generation={
-  async create(recordId,message,runId=crypto.randomUUID()){
-    const existing=runs.get(runId);if(existing){if(existing.recordId!==recordId||existing.message!==message)throw new Error("IDEMPOTENCY_KEY_REUSED");return{...publicRun(existing),newlyCreated:false}}
-    if(!conversations.has(recordId))throw new Error("PANEL_SESSION_NOT_FOUND");if([...runs.values()].some(run=>run.recordId===recordId&&!["completed","failed","aborted"].includes(run.status)))throw new Error("SESSION_BUSY");
-    const now=new Date().toISOString(),run={runId,recordId,message,status:"accepted",sequence:1,createdAt:now,updatedAt:now};runs.set(runId,run);
-    setTimeout(()=>{if(run.status==="aborted")return;run.status="running";publish(run);setTimeout(()=>{
-      if(run.status==="aborted")return;const retryKey=`${recordId}\0${message}`;
-      if(message==="请重试"&&!failedOnce.has(retryKey)){failedOnce.add(retryKey);run.status="failed";run.error={code:"RUN_FAILED",message:"虚构的首次生成失败，请重试。"};publish(run);return}
-      const value=conversations.get(recordId);value.document.entries.push({type:"message",id:`u-${Date.now()}`,message:{role:"user",content:message}},{type:"message",id:`a-${Date.now()}`,stopReason:"stop",message:{role:"assistant",content:[{type:"text",text:"虚构 SSE 回复"}]}});value.messageCount=value.document.entries.length;value.revision=String(Number(value.revision)+1);value.updatedAt=new Date().toISOString();run.status="completed";run.revision=value.revision;publish(run)
-    },120)},0);return{...publicRun(run),newlyCreated:true}
-  },
-  async get(runId){const run=runs.get(runId);return run?publicRun(run):undefined},
-  async subscribe(runId,listener){const run=runs.get(runId);if(!run)return undefined;listener(publicRun(run));if(["completed","failed","aborted"].includes(run.status))return()=>{};const set=listeners.get(runId)||new Set();set.add(listener);listeners.set(runId,set);return()=>{set.delete(listener);if(!set.size)listeners.delete(runId)}},
-  async abortRun(runId){const run=runs.get(runId);if(!run)return undefined;if(!["completed","failed","aborted"].includes(run.status)){run.status="aborted";publish(run)}return publicRun(run)},
-  async activeForRecord(recordId){const run=[...runs.values()].find(item=>item.recordId===recordId&&!["completed","failed","aborted"].includes(item.status));return run?publicRun(run):undefined}
-};
-const server=createPanelServer({auth:{username:"fixture",passwordHash:passwordHash("fixture-password","00112233445566778899aabbccddeeff"),sessionSecret:"fixture-session-secret-32-characters-long"},publicDir:new URL("../src/frontend",import.meta.url).pathname,reads,generation,allowedHosts:[`127.0.0.1:${port}`],publicOrigins:[origin]});
-server.listen(port,"127.0.0.1",()=>process.stdout.write(`${origin}\n`));
-for(const signal of ["SIGINT","SIGTERM"])process.once(signal,()=>server.close(()=>process.exit(0)));
+const FIXED_NOW = Date.parse("2030-01-02T03:04:05.000Z");
+const PREVIEW_PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
+const terminal = status => ["completed", "failed", "aborted"].includes(status);
+
+function initialConversation(recordId, sourceKind, title, entries) {
+  return {
+    recordId,
+    agentId: "fixture",
+    sourceKind,
+    title,
+    revision: "1",
+    updatedAt: "2030-01-02T03:04:05.000Z",
+    messageCount: entries.length,
+    archived: false,
+    memoryDisposition: "scratch",
+    status: {
+      modelOverride: null,
+      thinkingLevel: "medium",
+      reasoningLevel: null,
+      contextBudget: { estimatedTokens: 12000, budgetTokens: 200000, percentage: 6, method: "utf8-bytes-upper-bound-v3" },
+      contextUsage: { source: "openclaw-session", totalTokens: 12345, contextTokens: 200000, totalTokensFresh: true, percentage: 6 },
+      lastActiveAt: "2030-01-02T03:04:05.000Z"
+    },
+    document: { header: { type: "session" }, entries }
+  };
+}
+
+function createFixtureState() {
+  const conversations = new Map([
+    ["fixture-1", initialConversation("fixture-1", "panel", "脱敏浏览器验收", [
+      { type: "message", id: "u1", parentId: null, timestamp: "2030-01-02T03:03:00.000Z", message: { role: "user", content: "请检查完全虚构的项目。" } },
+      { type: "message", id: "a1", parentId: "u1", timestamp: "2030-01-02T03:04:00.000Z", stopReason: "stop", message: { role: "assistant", content: [
+        { type: "text", text: "## 脱敏安全正文\n\n<script>globalThis.__fixtureXss = true</script>\n\n[危险链接](javascript:globalThis.__fixtureXss=true)\n\n内联公式 $x^2$。" },
+        { type: "attachment", attachmentId: "fixture-image", fileName: "fictional-pixel.png", mimeType: "image/png", sizeBytes: PREVIEW_PNG.length, disposition: "input" }
+      ] } }
+    ])],
+    ["fixture-2", initialConversation("fixture-2", "panel", "独立可写会话", [
+      { type: "message", id: "fixture-2-u1", parentId: null, timestamp: "2030-01-02T03:02:00.000Z", message: { role: "user", content: "这个会话用于验证会话级运行锁。" } }
+    ])],
+    ["fixture-active", initialConversation("fixture-active", "active", "只读活会话示例", [
+      { type: "message", id: "active-u1", parentId: null, timestamp: "2030-01-02T03:01:00.000Z", message: { role: "user", content: "这是虚构且只读的上游来源。" } }
+    ])]
+  ]);
+  return { conversations, runs: new Map(), listeners: new Map(), uploads: new Map(), nextRecord: 3, nextEntry: 1, nextTick: 1 };
+}
+
+function snapshotConversation(value) {
+  return structuredClone(value);
+}
+
+export async function startBrowserFixture({ port = 0 } = {}) {
+  const state = createFixtureState();
+  const stamp = () => new Date(FIXED_NOW + state.nextTick++ * 1000).toISOString();
+  const sessionRef = value => ({ recordId: value.recordId, agentId: value.agentId, sourceKind: "panel", revision: value.revision });
+  const createPanel = (agentId, title) => {
+    if (agentId !== "fixture") throw new Error("AGENT_NOT_ALLOWED");
+    const id = `fixture-${state.nextRecord++}`;
+    const value = initialConversation(id, "panel", title || "未命名会话", []);
+    value.updatedAt = stamp();
+    state.conversations.set(id, value);
+    return value;
+  };
+  const fork = (recordId, messageId) => {
+    const source = state.conversations.get(recordId);
+    if (!source) throw new Error("PANEL_SESSION_NOT_FOUND");
+    const end = source.document.entries.findIndex(entry => entry.id === messageId);
+    if (end < 0) throw new Error("MESSAGE_NOT_FOUND");
+    const created = createPanel(source.agentId, `${source.title} · fork`);
+    created.document.entries = structuredClone(source.document.entries.slice(0, end + 1));
+    created.messageCount = created.document.entries.length;
+    created.revision = "1";
+    return sessionRef(created);
+  };
+  const reads = {
+    async agents() { return [{ id: "fixture", label: "Fixture", sessionCount: state.conversations.size }]; },
+    async sessions(agentId, archived = false) {
+      if (agentId && agentId !== "fixture") return [];
+      return [...state.conversations.values()]
+        .filter(value => Boolean(value.archived) === archived)
+        .map(({ document: _document, status: _status, ...record }) => structuredClone(record));
+    },
+    async conversation(recordId) {
+      const value = state.conversations.get(recordId);
+      return value ? snapshotConversation(value) : null;
+    },
+    async projects() { return ["虚构项目"]; },
+    async search(query) {
+      const needle = query.toLowerCase();
+      return [...state.conversations.values()]
+        .filter(value => JSON.stringify(value.document).toLowerCase().includes(needle))
+        .map(({ document: _document, status: _status, ...record }) => ({ ...structuredClone(record), hits: [{ entryId: "a1", role: "assistant", snippet: "虚构搜索命中：浏览器验收内容" }] }));
+    },
+    async createPanel(agentId, title) { return snapshotConversation(createPanel(agentId, title)); },
+    async fork(recordId, messageId) { return fork(recordId, messageId); },
+    async editAndFork(recordId, messageId, replacement) {
+      const created = fork(recordId, messageId);
+      const value = state.conversations.get(created.recordId);
+      const target = value.document.entries.find(entry => entry.id === messageId);
+      target.message.content = replacement;
+      value.title = "编辑重发分支";
+      return created;
+    },
+    async updateSession(recordId, patch) {
+      const value = state.conversations.get(recordId);
+      if (!value) throw new Error("PANEL_SESSION_NOT_FOUND");
+      Object.assign(value, patch, { updatedAt: stamp() });
+      return snapshotConversation(value);
+    },
+    async deleteSession(recordId) {
+      const value = state.conversations.get(recordId);
+      if (!value) throw new Error("PANEL_SESSION_NOT_FOUND");
+      if (value.sourceKind === "panel") { state.conversations.delete(recordId); return { action: "deleted" }; }
+      value.archived = true;
+      return { action: "hidden" };
+    },
+    async exportMarkdown(recordId) {
+      const value = state.conversations.get(recordId);
+      return value ? { filename: `${recordId}.md`, markdown: `# ${value.title}\n\nFictional browser fixture.\n` } : null;
+    }
+  };
+
+  function publicRun(run) {
+    const { message: _message, requestOutputs: _requestOutputs, droppedSubscription: _droppedSubscription, ...visible } = run;
+    return { ...structuredClone(visible), canAbort: !terminal(run.status) && ["accepted", "running", "materializing"].includes(run.status) };
+  }
+  function publish(run) {
+    run.sequence++;
+    run.updatedAt = stamp();
+    for (const listener of state.listeners.get(run.runId) || []) listener(publicRun(run));
+    if (terminal(run.status)) state.listeners.delete(run.runId);
+  }
+  function activeRun(recordId) {
+    return [...state.runs.values()].find(run => run.recordId === recordId && !terminal(run.status));
+  }
+  function startRun(run) {
+    if (terminal(run.status)) return;
+    run.status = "running";
+    run.startedAt = stamp();
+    run.stream = { revision: 1, state: "streaming", text: "第一段虚构实时预览", tools: [{ callId: "fixture-tool-1", name: "fixture_lookup", phase: "started", args: { query: "fictional-only" } }] };
+    publish(run);
+  }
+  function advanceRun(recordId) {
+    const run = activeRun(recordId);
+    if (!run) throw new Error(`No active fixture run for ${recordId}`);
+    run.stream = { revision: 2, state: "streaming", text: "第一段虚构实时预览\n\n第二段仍为脱敏内容", tools: [{ callId: "fixture-tool-1", name: "fixture_lookup", phase: "completed", args: { query: "fictional-only" } }] };
+    publish(run);
+    return publicRun(run);
+  }
+  function completeRun(recordId) {
+    const run = activeRun(recordId);
+    if (!run) throw new Error(`No active fixture run for ${recordId}`);
+    const value = state.conversations.get(recordId);
+    if (!value) throw new Error("PANEL_SESSION_NOT_FOUND");
+    const suffix = state.nextEntry++;
+    value.document.entries.push(
+      { type: "message", id: `fixture-user-${suffix}`, timestamp: stamp(), message: { role: "user", content: run.message } },
+      { type: "message", id: `fixture-assistant-${suffix}`, timestamp: stamp(), stopReason: "stop", message: { role: "assistant", content: [{ type: "text", text: `虚构 SSE 回复：${run.message}` }] } }
+    );
+    value.messageCount = value.document.entries.length;
+    value.revision = String(Number(value.revision) + 1);
+    value.updatedAt = stamp();
+    run.status = "completed";
+    run.finishedAt = stamp();
+    run.revision = value.revision;
+    delete run.stream;
+    publish(run);
+    return publicRun(run);
+  }
+  const generation = {
+    async create(recordId, message, runId = crypto.randomUUID(), _expectedRevision, _attachmentIds, requestOutputs = false) {
+      const existing = state.runs.get(runId);
+      if (existing) {
+        if (existing.recordId !== recordId || existing.message !== message || existing.requestOutputs !== requestOutputs) throw new Error("IDEMPOTENCY_KEY_REUSED");
+        return { ...publicRun(existing), newlyCreated: false };
+      }
+      if (!state.conversations.has(recordId)) throw new Error("PANEL_SESSION_NOT_FOUND");
+      if (activeRun(recordId)) throw new Error("SESSION_BUSY");
+      const now = stamp();
+      const run = { runId, recordId, message, requestOutputs, status: "accepted", sequence: 1, createdAt: now, updatedAt: now };
+      state.runs.set(runId, run);
+      queueMicrotask(() => startRun(run));
+      return { ...publicRun(run), newlyCreated: true };
+    },
+    async get(runId) { const run = state.runs.get(runId); return run ? publicRun(run) : undefined; },
+    async subscribe(runId, listener) {
+      const run = state.runs.get(runId);
+      if (!run) return undefined;
+      listener(publicRun(run));
+      if (terminal(run.status)) return () => {};
+      if (run.message === "SSE 断线后终态验收" && !run.droppedSubscription) {
+        run.droppedSubscription = true;
+        return undefined;
+      }
+      const set = state.listeners.get(runId) || new Set();
+      set.add(listener);
+      state.listeners.set(runId, set);
+      return () => { set.delete(listener); if (!set.size) state.listeners.delete(runId); };
+    },
+    async abortRun(runId) {
+      const run = state.runs.get(runId);
+      if (!run) return undefined;
+      if (!terminal(run.status)) { run.status = "aborted"; run.finishedAt = stamp(); delete run.stream; publish(run); }
+      return publicRun(run);
+    },
+    async activeForRecord(recordId) { const run = activeRun(recordId); return run ? publicRun(run) : undefined; }
+  };
+
+  let settings = { version: 1, locale: "zh-CN", appearance: { theme: "light", accent: "default" }, conversation: { showStatus: true } };
+  const experience = {
+    assertAgent(agentId) { if (agentId !== "fixture") throw new Error("AGENT_NOT_ALLOWED"); },
+    async settings() { return structuredClone(settings); },
+    async patchSettings(patch) {
+      settings = { version: 1, locale: patch.locale ?? settings.locale, appearance: { ...settings.appearance, ...patch.appearance }, conversation: { ...settings.conversation, ...patch.conversation } };
+      return structuredClone(settings);
+    },
+    async avatar() { return undefined; },
+    async putAvatar() { throw new Error("FIXTURE_AVATAR_DISABLED"); },
+    async deleteAvatar() { return false; }
+  };
+  const attachments = {
+    async upload(recordId, input) {
+      if (!state.conversations.has(recordId)) throw new Error("PANEL_SESSION_NOT_FOUND");
+      const id = `fixture-upload-${state.uploads.size + 1}`;
+      state.uploads.set(id, { recordId, fileName: input.fileName, mimeType: input.mimeType, bytes: Buffer.from(input.bytes) });
+      return { id, attachmentId: id, fileName: input.fileName, mimeType: input.mimeType, sizeBytes: input.bytes.length };
+    },
+    async download(attachmentId) {
+      if (attachmentId === "fixture-image") return { fileName: "fictional-pixel.png", mimeType: "image/png", bytes: PREVIEW_PNG };
+      const value = state.uploads.get(attachmentId);
+      return value ? { fileName: value.fileName, mimeType: value.mimeType, bytes: value.bytes } : undefined;
+    },
+    async preview(attachmentId) {
+      if (attachmentId === "fixture-image") return { mimeType: "image/png", bytes: PREVIEW_PNG };
+      const value = state.uploads.get(attachmentId);
+      return value?.mimeType === "image/png" ? { mimeType: value.mimeType, bytes: value.bytes } : undefined;
+    }
+  };
+
+  const allowedHosts = [];
+  const publicOrigins = [];
+  const server = createPanelServer({
+    auth: { username: "fixture", passwordHash: passwordHash("fixture-password", "00112233445566778899aabbccddeeff"), sessionSecret: "fixture-session-secret-32-characters-long" },
+    publicDir: fileURLToPath(new URL("../src/frontend/", import.meta.url)),
+    now: () => FIXED_NOW,
+    reads,
+    generation,
+    experience,
+    attachments,
+    allowedHosts,
+    publicOrigins
+  });
+  await new Promise((resolveListen, reject) => {
+    server.once("error", reject);
+    server.listen(port, "127.0.0.1", resolveListen);
+  });
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("Fixture server did not expose a TCP address");
+  const origin = `http://127.0.0.1:${address.port}`;
+  allowedHosts.push(`127.0.0.1:${address.port}`);
+  publicOrigins.push(origin);
+
+  let closing;
+  return {
+    origin,
+    state,
+    activeRun: recordId => { const run = activeRun(recordId); return run ? publicRun(run) : undefined; },
+    advanceRun,
+    completeRun,
+    close() {
+      if (closing) return closing;
+      closing = (async () => {
+        for (const run of state.runs.values()) if (!terminal(run.status)) await generation.abortRun(run.runId);
+        await new Promise((resolveClose, reject) => server.close(error => error ? reject(error) : resolveClose()));
+      })();
+      return closing;
+    }
+  };
+}
+
+const invokedPath = process.argv[1] ? pathToFileURL(resolve(process.argv[1])).href : "";
+if (import.meta.url === invokedPath) {
+  const requestedPort = Number(process.env.PANEL_BROWSER_PORT || "0");
+  const fixture = await startBrowserFixture({ port: requestedPort });
+  process.stdout.write(`${fixture.origin}\n`);
+  for (const signal of ["SIGINT", "SIGTERM"]) process.once(signal, () => void fixture.close());
+}
