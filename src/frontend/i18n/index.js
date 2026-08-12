@@ -15,10 +15,10 @@ export function formatNumber(value){return new Intl.NumberFormat(locale).format(
 export function formatDate(value,options){try{return new Intl.DateTimeFormat(locale,options).format(new Date(value))}catch{return""}}
 export function applyStaticTranslations(root=document){
   document.documentElement.lang=locale;
-  for(const element of root.querySelectorAll("[data-i18n]"))element.textContent=t(element.dataset.i18n);
-  for(const element of root.querySelectorAll("[data-i18n-aria-label]"))element.setAttribute("aria-label",t(element.dataset.i18nAriaLabel));
-  for(const element of root.querySelectorAll("[data-i18n-title]"))element.title=t(element.dataset.i18nTitle);
-  for(const element of root.querySelectorAll("[data-i18n-placeholder]"))element.placeholder=t(element.dataset.i18nPlaceholder);
+  for(const element of root.querySelectorAll("[data-i18n]"))element.textContent=t(element.getAttribute("data-i18n")||"");
+  for(const element of root.querySelectorAll("[data-i18n-aria-label]"))element.setAttribute("aria-label",t(element.getAttribute("data-i18n-aria-label")||""));
+  for(const element of root.querySelectorAll("[data-i18n-title]"))element.setAttribute("title",t(element.getAttribute("data-i18n-title")||""));
+  for(const element of root.querySelectorAll("[data-i18n-placeholder]"))element.setAttribute("placeholder",t(element.getAttribute("data-i18n-placeholder")||""));
 }
 export function setLocale(value,{cache=true,translate=true}={}){
   locale=normalizeLocale(value);

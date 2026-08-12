@@ -98,6 +98,7 @@ The appearance, sidebar, avatar, title, conversation-status, background-completi
 
 ```sh
 npm ci
+npm run check:frontend
 npm test
 ```
 

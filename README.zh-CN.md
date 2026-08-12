@@ -98,6 +98,7 @@ $$
 
 ```sh
 npm ci
+npm run check:frontend
 npm test
 ```
 
