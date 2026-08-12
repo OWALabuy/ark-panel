@@ -1,9 +1,9 @@
 import test, { type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { writeFile } from "node:fs/promises";
+import { appendFile, stat, utimes, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { completedRunStatus, GatewayRunError, OpenClawCliClient, parseSessionContextUsage, trajectoryRunState } from "../src/gateway/cli-client.js";
-import { deferred, tempFixture } from "./test-helpers.js";
+import { deferred, tempFixture, waitFor, withTimeout } from "./test-helpers.js";
 
 test("从 trajectory 中按 runId 识别 session.ended", () => {
   const lines = [
@@ -30,7 +30,6 @@ test("保留 terminal 的安全诊断字段并区分上游 timeout/interrupt", a
 
 interface ClientFixtureOptions {
   abortResponses?: Array<Record<string, unknown>>;
-  onAbort?: (context: { call: number; root: string; sessionId: string }) => Promise<void>;
 }
 
 async function clientFixture(t: TestContext, options: ClientFixtureOptions = {}) {
@@ -42,7 +41,7 @@ async function clientFixture(t: TestContext, options: ClientFixtureOptions = {})
       if (method === "sessions.create") return JSON.stringify({ key: `agent:runtime:${String(params.key)}`, sessionId });
       if (method === "sessions.send") { sentParams = params; return JSON.stringify({ runId: "run" }); }
       if (method === "sessions.abort") {
-        const call = abortCalls++; await options.onAbort?.({ call, root, sessionId });
+        const call = abortCalls++;
         const responses = options.abortResponses ?? [];
         return JSON.stringify(responses[Math.min(call, responses.length - 1)] ?? { ok: true, status: "no-active-run", abortedRunId: null });
       }
@@ -50,6 +49,16 @@ async function clientFixture(t: TestContext, options: ClientFixtureOptions = {})
     } });
   const created = await client.createSession("runtime");
   return { client, root, created, sessionId, sentParams: () => sentParams, abortCalls: () => abortCalls };
+}
+
+async function markFileUnread(path: string): Promise<number> {
+  // Make atime older than mtime so the next data read advances it under the CI filesystem's relatime policy.
+  await utimes(path, new Date(0), new Date());
+  return (await stat(path)).atimeMs;
+}
+
+async function waitForFileRead(path: string, previousAtimeMs: number, description: string): Promise<void> {
+  await waitFor(async () => (await stat(path)).atimeMs > previousAtimeMs, description);
 }
 
 test("gateway timeout 与 watcher grace 分离，并在 grace 内接住 terminal", async t => {
@@ -187,13 +196,15 @@ test("按本轮 runId 采集 OpenClaw 明确登记的内联 artifact", async t =
   assert.deepEqual(calls.map(call => call.params.runId), ["run-1", "run-1"]);
 });
 
-test("增量 trajectory 正确处理跨读取块的 UTF-8 字符", async t => {
+test("增量 trajectory 正确处理跨 poll 调用 append 的 UTF-8 半字符", async t => {
   const x = await clientFixture(t), path = join(x.root, `${x.sessionId}.trajectory.jsonl`);
-  const entry = (note: string) => Buffer.from(`${JSON.stringify({ type: "session.ended", runId: "run", data: { status: "success", note } })}\n`);
-  const initial = entry("中文"), marker = Buffer.from("中"), boundary = 64 * 1024 - 1;
-  const line = entry(`${"x".repeat(boundary - initial.indexOf(marker))}中文`);
-  assert.equal(line.indexOf(marker), boundary); await writeFile(path, line);
-  await x.client.waitForCompletion(x.sessionId, "run");
+  const runId="run-中文",line = Buffer.from(`${JSON.stringify({ type: "session.ended", runId, data: { status: "success" } })}\n`);
+  const marker = Buffer.from("中"), position = line.indexOf(marker);assert.ok(position>0);
+  await writeFile(path,line.subarray(0,position+1));const unreadAtime=await markFileUnread(path);
+  const waiting=x.client.waitForCompletion(x.sessionId,runId);waiting.catch(()=>undefined);
+  await waitForFileRead(path,unreadAtime,"first UTF-8 byte trajectory poll");
+  await appendFile(path,line.subarray(position+1));
+  await withTimeout(waiting,"cross-poll UTF-8 trajectory completion");
 });
 
 test("未观察到 trajectory 与真实上游 timeout 使用稳定错误码", async t => {
@@ -209,14 +220,18 @@ test("AbortSignal 立即打断 watcher", async t => {
   await assert.rejects(x.client.waitForCompletion(x.sessionId, "run", controller.signal), /BRIDGE_ABORTED/);
 });
 
-test("abort 等 terminal 后继续确认 no-active-run", async t => {
-  const x = await clientFixture(t, {
-    abortResponses: [{ ok: true, status: "aborted", abortedRunId: "run" }, { ok: true, status: "no-active-run", abortedRunId: null }],
-    onAbort: async ({ call, root, sessionId }) => {
-      if (call === 0) await writeFile(join(root, `${sessionId}.trajectory.jsonl`), `${JSON.stringify({ type: "session.ended", runId: "run", data: { status: "interrupted", aborted: true } })}\n`);
-    }
-  });
-  await x.client.abort(x.created.sessionKey, "run"); assert.equal(x.abortCalls(), 2);
+test("abort RPC 返回后轮询等待 terminal，再确认 no-active-run", async t => {
+  const x = await clientFixture(t, { abortResponses: [
+    { ok: true, status: "aborted", abortedRunId: "run" },
+    { ok: true, status: "no-active-run", abortedRunId: null }
+  ] }),path=join(x.root,`${x.sessionId}.trajectory.jsonl`);
+  const nonTerminal=`${JSON.stringify({type:"context.compiled",runId:"run"})}\n`;assert.equal(completedRunStatus(nonTerminal,"run"),undefined);
+  await writeFile(path,nonTerminal);const unreadAtime=await markFileUnread(path);
+  let settled=false;const aborting=x.client.abort(x.created.sessionKey,"run");void aborting.then(()=>{settled=true},()=>{settled=true});
+  await waitForFileRead(path,unreadAtime,"post-abort terminal release poll");
+  assert.equal(settled,false);assert.equal(x.abortCalls(),1);
+  await appendFile(path,`${JSON.stringify({type:"session.ended",runId:"run",data:{status:"interrupted",aborted:true}})}\n`);
+  await withTimeout(aborting,"abort terminal release and inactive confirmation");assert.equal(x.abortCalls(),2);
 });
 
 test("abort runId 不匹配会拒绝清理；no-active-run 无需 trajectory", async t => {
