@@ -23,13 +23,22 @@ export interface PreparedOutputCapture {
   maxFiles: number; maxTotalBytes: number;
 }
 
+const outputDirectoryIdentities = new WeakMap<PreparedOutputCapture, { device: bigint; inode: bigint }>();
+
 interface OutputCaptureReadHooks {
   /** Test synchronization seam; production callers must leave this unset. */
+  beforeFileOpen?: () => Promise<void>;
+  afterDirectoryRead?: (directory: string) => Promise<void>;
   afterFirstChunk?: () => Promise<void>;
 }
 
 function sameFile(left: BigIntStats, right: BigIntStats): boolean {
   return right.isFile() && right.nlink === 1n && right.dev === left.dev && right.ino === left.ino &&
+    right.size === left.size && right.mtimeNs === left.mtimeNs && right.ctimeNs === left.ctimeNs;
+}
+
+function sameDirectory(left: BigIntStats, right: BigIntStats): boolean {
+  return right.isDirectory() && right.nlink === left.nlink && right.dev === left.dev && right.ino === left.ino &&
     right.size === left.size && right.mtimeNs === left.mtimeNs && right.ctimeNs === left.ctimeNs;
 }
 
@@ -90,10 +99,15 @@ export async function prepareOutputCapture(request: OutputCaptureRequest, runUui
     const actual = await realpath(outputsRoot);
     if (actual !== outputsRoot) throw new Error("OUTPUT_CAPTURE_PATH_UNSAFE");
     const runStat = await lstat(runRoot);
-    if (!runStat.isDirectory() || runStat.isSymbolicLink()) throw new Error("OUTPUT_CAPTURE_PATH_UNSAFE");
-    return { runRoot, outputsRoot, cleanupRoot: configuredCleanupRoot, runDevice: runStat.dev, runInode: runStat.ino,
+    const outputsStat = await lstat(outputsRoot, { bigint: true });
+    if (!runStat.isDirectory() || runStat.isSymbolicLink() || !outputsStat.isDirectory() || outputsStat.isSymbolicLink()) {
+      throw new Error("OUTPUT_CAPTURE_PATH_UNSAFE");
+    }
+    const prepared = { runRoot, outputsRoot, cleanupRoot: configuredCleanupRoot, runDevice: runStat.dev, runInode: runStat.ino,
       maxFiles: limit(request.maxFiles, DEFAULT_MAX_FILES, "OUTPUT_CAPTURE_MAX_FILES"),
       maxTotalBytes: limit(request.maxTotalBytes, DEFAULT_MAX_TOTAL_BYTES, "OUTPUT_CAPTURE_MAX_BYTES") };
+    outputDirectoryIdentities.set(prepared, { device: outputsStat.dev, inode: outputsStat.ino });
+    return prepared;
   } catch (error) {
     // Refuse recursive cleanup from a model-writable path. A failed preparation may leave this
     // fresh UUID directory behind; maintenance can report/remove it out of band.
@@ -104,41 +118,71 @@ export async function prepareOutputCapture(request: OutputCaptureRequest, runUui
 export function collectOutputDirectory(prepared: PreparedOutputCapture): Promise<CollectedOutput[]>;
 export async function collectOutputDirectory(prepared: PreparedOutputCapture,
   hooks: OutputCaptureReadHooks = {}): Promise<CollectedOutput[]> {
+  const rootIdentity = outputDirectoryIdentities.get(prepared);
+  if (rootIdentity === undefined) throw new Error("OUTPUT_CAPTURE_FILE_RACE");
+  const { device: rootDevice, inode: rootInode } = rootIdentity;
   const outputs: CollectedOutput[] = []; let count = 0; let bytesUsed = 0;
   async function walk(directory: string): Promise<void> {
-    let entries;
-    try { entries = await readdir(directory, { withFileTypes: true }); }
+    let before: BigIntStats; let resolvedBefore: string;
+    try { before = await lstat(directory, { bigint: true }); resolvedBefore = await realpath(directory); }
     catch (error) { throw captureError(error); }
-    for (const entry of entries) {
-      const path = join(directory, entry.name);
-      let stat: BigIntStats;
-      try { stat = await lstat(path, { bigint: true }); }
+    if (!within(prepared.outputsRoot, resolvedBefore)) throw new Error("OUTPUT_CAPTURE_PATH_ESCAPE");
+    if (!before.isDirectory()) throw new Error("OUTPUT_CAPTURE_FILE_RACE");
+    const directoryPathStat = await lstat(resolvedBefore, { bigint: true }).catch(error => { throw captureError(error); });
+    if (!sameDirectory(before, directoryPathStat)) throw new Error("OUTPUT_CAPTURE_FILE_RACE");
+    before = directoryPathStat;
+    if (directory === prepared.outputsRoot && (before.dev !== rootDevice || before.ino !== rootInode)) {
+      throw new Error("OUTPUT_CAPTURE_FILE_RACE");
+    }
+    let primaryError: unknown;
+    try {
+      let entries;
+      try { entries = await readdir(directory, { withFileTypes: true }); }
       catch (error) { throw captureError(error); }
-      if (stat.isSymbolicLink()) throw new Error("OUTPUT_CAPTURE_SYMLINK_REJECTED");
-      if (stat.isDirectory()) { await walk(path); continue; }
-      if (!stat.isFile()) throw new Error("OUTPUT_CAPTURE_SPECIAL_FILE_REJECTED");
-      if (stat.nlink !== 1n) throw new Error("OUTPUT_CAPTURE_HARDLINK_REJECTED");
-      if (++count > prepared.maxFiles) throw new Error("OUTPUT_CAPTURE_FILE_LIMIT");
-      try {
-        const resolvedPath = await realpath(path);
-        if (!within(prepared.outputsRoot, resolvedPath)) throw new Error("OUTPUT_CAPTURE_PATH_ESCAPE");
-        const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
-        let bytes: Buffer;
+      await hooks.afterDirectoryRead?.(directory);
+      for (const entry of entries) {
+        const path = join(directory, entry.name);
+        let stat: BigIntStats;
+        try { stat = await lstat(path, { bigint: true }); }
+        catch (error) { throw captureError(error); }
+        if (stat.isSymbolicLink()) throw new Error("OUTPUT_CAPTURE_SYMLINK_REJECTED");
+        if (stat.isDirectory()) { await walk(path); continue; }
+        if (!stat.isFile()) throw new Error("OUTPUT_CAPTURE_SPECIAL_FILE_REJECTED");
+        if (stat.nlink !== 1n) throw new Error("OUTPUT_CAPTURE_HARDLINK_REJECTED");
+        if (++count > prepared.maxFiles) throw new Error("OUTPUT_CAPTURE_FILE_LIMIT");
         try {
-          const opened = await handle.stat({ bigint: true });
-          if (!sameFile(stat, opened)) throw new Error("OUTPUT_CAPTURE_FILE_RACE");
-          bytes = await readStableFile(handle, opened, prepared.maxTotalBytes - bytesUsed, hooks);
-          const after = await handle.stat({ bigint: true });
-          const resolvedAfter = await realpath(path);
-          const current = await lstat(path, { bigint: true });
-          if (!within(prepared.outputsRoot, resolvedAfter)) throw new Error("OUTPUT_CAPTURE_PATH_ESCAPE");
-          if (resolvedAfter !== resolvedPath || !sameFile(opened, after) || !sameFile(opened, current)) {
-            throw new Error("OUTPUT_CAPTURE_FILE_RACE");
-          }
-        } finally { await handle.close(); }
-        bytesUsed += bytes.length;
-        outputs.push({ source: "output-directory", fileName: relative(prepared.outputsRoot, path), bytes });
-      } catch (error) { throw captureError(error); }
+          const resolvedPath = await realpath(path);
+          if (!within(prepared.outputsRoot, resolvedPath)) throw new Error("OUTPUT_CAPTURE_PATH_ESCAPE");
+          await hooks.beforeFileOpen?.();
+          const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+          let bytes: Buffer;
+          try {
+            const opened = await handle.stat({ bigint: true });
+            if (!sameFile(stat, opened)) throw new Error("OUTPUT_CAPTURE_FILE_RACE");
+            bytes = await readStableFile(handle, opened, prepared.maxTotalBytes - bytesUsed, hooks);
+            const after = await handle.stat({ bigint: true });
+            const resolvedAfter = await realpath(path);
+            const current = await lstat(path, { bigint: true });
+            if (!within(prepared.outputsRoot, resolvedAfter)) throw new Error("OUTPUT_CAPTURE_PATH_ESCAPE");
+            if (resolvedAfter !== resolvedPath || !sameFile(opened, after) || !sameFile(opened, current)) {
+              throw new Error("OUTPUT_CAPTURE_FILE_RACE");
+            }
+          } finally { await handle.close(); }
+          bytesUsed += bytes.length;
+          outputs.push({ source: "output-directory", fileName: relative(prepared.outputsRoot, path), bytes });
+        } catch (error) { throw captureError(error); }
+      }
+    } catch (error) {
+      primaryError = captureError(error);
+      throw primaryError;
+    } finally {
+      try {
+        const after = await lstat(directory, { bigint: true }), resolvedAfter = await realpath(directory);
+        if (!within(prepared.outputsRoot, resolvedAfter)) throw new Error("OUTPUT_CAPTURE_PATH_ESCAPE");
+        if (resolvedAfter !== resolvedBefore || !sameDirectory(before, after)) throw new Error("OUTPUT_CAPTURE_FILE_RACE");
+      } catch (error) {
+        if (primaryError === undefined) throw captureError(error);
+      }
     }
   }
   await walk(prepared.outputsRoot);

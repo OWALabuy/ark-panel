@@ -1,16 +1,21 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { constants } from "node:fs";
 import { appendFile, link, mkdir, mkdtemp, open, rename, rm, symlink, truncate, utimes, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import { cleanOutputCapture, collectOutputDirectory, prepareOutputCapture } from "../src/gateway/output-capture.js";
 
 const RUN = "12345678-1234-4234-8234-123456789abc";
+const execFileAsync = promisify(execFile);
 type PreparedCapture = Awaited<ReturnType<typeof prepareOutputCapture>>;
 // The implementation signature accepts this test-only synchronization seam, while its exported
 // overload intentionally keeps production callers on the one-argument API.
 const collectWithReadHook = collectOutputDirectory as unknown as (prepared: PreparedCapture,
-  hooks: { afterFirstChunk: () => Promise<void> }) => ReturnType<typeof collectOutputDirectory>;
+  hooks: { beforeFileOpen?: () => Promise<void>; afterDirectoryRead?: (directory: string) => Promise<void>;
+    afterFirstChunk?: () => Promise<void> }) => ReturnType<typeof collectOutputDirectory>;
 
 test("只采集本轮 UUID outputs 内的普通文件并在持久化后清理", async t => {
   const workspace = await mkdtemp(join(tmpdir(), "panel-output-")); t.after(() => rm(workspace, { recursive: true, force: true }));
@@ -108,4 +113,75 @@ test("定长读取按剩余总预算拒绝后续文件", async t => {
   await assert.rejects(collectWithReadHook(prepared, { afterFirstChunk: async () => { reads += 1; } }),
     /OUTPUT_CAPTURE_BYTE_LIMIT/);
   assert.equal(reads, 1);
+});
+
+test("文件在打开前换成 FIFO 时不会阻塞", async t => {
+  if (process.platform === "win32") { t.skip("FIFO requires POSIX mkfifo"); return; }
+  const workspace = await mkdtemp(join(tmpdir(), "panel-output-fifo-"));
+  t.after(() => rm(workspace, { recursive: true, force: true }));
+  const cleanupRoot = await mkdtemp(join(tmpdir(), "panel-output-fifo-cleanup-"));
+  t.after(() => rm(cleanupRoot, { recursive: true, force: true }));
+  const prepared = await prepareOutputCapture({ workspaceRoot: workspace, cleanupRoot }, RUN);
+  const path = join(prepared.outputsRoot, "candidate"), fifo = join(workspace, "replacement-fifo");
+  await writeFile(path, "regular"); await execFileAsync("mkfifo", [fifo]);
+  await assert.rejects(collectWithReadHook(prepared, { beforeFileOpen: async () => { await rename(fifo, path); } }),
+    error => error instanceof Error && error.message === "OUTPUT_CAPTURE_FILE_RACE");
+  await assert.rejects(async () => {
+    const writer = await open(path, constants.O_WRONLY | constants.O_NONBLOCK);
+    await writer.close();
+  }, error => (error as NodeJS.ErrnoException).code === "ENXIO");
+});
+
+test("拒绝 outputs 根目录和嵌套目录在遍历期间被替换", async t => {
+  await t.test("root replaced by empty external symlink", async subtest => {
+    const workspace = await mkdtemp(join(tmpdir(), "panel-output-root-race-"));
+    subtest.after(() => rm(workspace, { recursive: true, force: true }));
+    const cleanupRoot = await mkdtemp(join(tmpdir(), "panel-output-root-race-cleanup-"));
+    subtest.after(() => rm(cleanupRoot, { recursive: true, force: true }));
+    const outside = await mkdtemp(join(tmpdir(), "panel-output-root-race-outside-"));
+    subtest.after(() => rm(outside, { recursive: true, force: true }));
+    const prepared = await prepareOutputCapture({ workspaceRoot: workspace, cleanupRoot }, RUN);
+    await rm(prepared.outputsRoot, { recursive: true }); await symlink(outside, prepared.outputsRoot);
+    await assert.rejects(collectOutputDirectory(prepared), /OUTPUT_CAPTURE_PATH_ESCAPE/);
+  });
+
+  await t.test("root replaced by another empty directory", async subtest => {
+    const workspace = await mkdtemp(join(tmpdir(), "panel-output-root-identity-"));
+    subtest.after(() => rm(workspace, { recursive: true, force: true }));
+    const cleanupRoot = await mkdtemp(join(tmpdir(), "panel-output-root-identity-cleanup-"));
+    subtest.after(() => rm(cleanupRoot, { recursive: true, force: true }));
+    const prepared = await prepareOutputCapture({ workspaceRoot: workspace, cleanupRoot }, RUN);
+    await rename(prepared.outputsRoot, join(workspace, "original-outputs"));
+    await mkdir(prepared.outputsRoot);
+    await assert.rejects(collectOutputDirectory(prepared), /OUTPUT_CAPTURE_FILE_RACE/);
+  });
+
+  await t.test("nested directory replaced after read", async subtest => {
+    const workspace = await mkdtemp(join(tmpdir(), "panel-output-nested-race-"));
+    subtest.after(() => rm(workspace, { recursive: true, force: true }));
+    const cleanupRoot = await mkdtemp(join(tmpdir(), "panel-output-nested-race-cleanup-"));
+    subtest.after(() => rm(cleanupRoot, { recursive: true, force: true }));
+    const prepared = await prepareOutputCapture({ workspaceRoot: workspace, cleanupRoot }, RUN);
+    const nested = join(prepared.outputsRoot, "nested"), moved = join(prepared.outputsRoot, "moved");
+    await mkdir(nested);
+    let replaced = false;
+    await assert.rejects(collectWithReadHook(prepared, { afterDirectoryRead: async directory => {
+      if (directory !== nested) return;
+      replaced = true; await rename(nested, moved); await mkdir(nested);
+    } }), /OUTPUT_CAPTURE_FILE_RACE/);
+    assert.equal(replaced, true);
+  });
+
+  await t.test("nested directory mutated after read", async subtest => {
+    const workspace = await mkdtemp(join(tmpdir(), "panel-output-nested-mutation-"));
+    subtest.after(() => rm(workspace, { recursive: true, force: true }));
+    const cleanupRoot = await mkdtemp(join(tmpdir(), "panel-output-nested-mutation-cleanup-"));
+    subtest.after(() => rm(cleanupRoot, { recursive: true, force: true }));
+    const prepared = await prepareOutputCapture({ workspaceRoot: workspace, cleanupRoot }, RUN);
+    const nested = join(prepared.outputsRoot, "nested");
+    await mkdir(nested);
+    await assert.rejects(collectWithReadHook(prepared, { afterDirectoryRead: async directory => {
+      if (directory === nested) await writeFile(join(nested, "late-output"), "changed");
+    } }), /OUTPUT_CAPTURE_FILE_RACE/);
+  });
 });
