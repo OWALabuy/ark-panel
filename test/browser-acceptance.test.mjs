@@ -508,6 +508,9 @@ test("desktop browser acceptance covers security and session lifecycle", { timeo
       localStorage.getItem('ark-panel:run:v1:' + encodeURIComponent(recordId)) === null)`);
     assert.equal(fixture.state.calls.generationRequests.length, requestsBeforeCollision,
       "a duplicated stored run id must start no recovery request");
+    await driver.executeScript(`
+      localStorage.removeItem('ark-panel:draft:v1:' + encodeURIComponent(arguments[0]) + ':' + encodeURIComponent(arguments[1]));
+    `, "fixture", "fixture-2");
 
     await (await visible(driver, '#agents .agent[data-id="fixture"]')).click();
     await waitScript(driver, "return !document.querySelector('.session-row.active')");
