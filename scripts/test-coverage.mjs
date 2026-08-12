@@ -64,6 +64,9 @@ function inventorySource(files) {
 function coverageArguments(compiledExclusions) {
   return [
     "--experimental-test-coverage",
+    // Node 22's process-isolated LCOV merge can add 95 zero-hit ranges for the same URL.
+    // Keep coverage-only tests in one isolate; ordinary npm test retains process isolation.
+    "--experimental-test-isolation=none",
     "--test-coverage-include=dist/src/**/*.js",
     ...compiledExclusions.map(path => `--test-coverage-exclude=${path}`)
   ];

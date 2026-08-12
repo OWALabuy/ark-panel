@@ -7,6 +7,24 @@
 
 The `coverage/` directory is ignored by Git. Each run recreates it and removes the generated inventory test before exiting.
 
+## Coverage execution isolation
+
+The coverage runner alone uses Node 22's
+`--experimental-test-isolation=none` mode. That keeps the compiled test files
+serial and in one test-runner context. Without it, the process-isolated runner
+can emit several V8 profiles for the same compiled URL; Node 22's built-in LCOV
+merge was observed to add 95 zero-hit branch ranges to that URL intermittently,
+making the branch denominator depend on process-profile ordering rather than
+executed behavior.
+
+This measurement setting does not change the ordinary test gate. `npm test`
+still uses Node's default per-file process isolation, and CI runs it separately
+before the coverage job. The single-context coverage run shares the module
+cache and process globals across test files, so it complements rather than
+replaces the normally isolated suite. V8 may still vary by a small number of
+reported branch ranges between otherwise identical runs; every run must
+nevertheless satisfy the unchanged line, branch, and function gates below.
+
 ## Scope and thresholds
 
 The baseline includes every executable `src/**/*.ts` module (type-only `.d.ts` declarations are not runtime code) unless it appears in the explicit exclusion table below. The runner verifies the one-to-one `src/**/*.ts` to `dist/src/**/*.js` inventory and compares that inventory with the coverage produced by the real test suite. If a core module was never loaded, a separate temporary inventory process discovers its executable lines, branches, and functions; the final LCOV and JSON reports add that entire module with zero covered points. Consequently, a new core module cannot disappear merely because no existing test imports it, and the inventory import itself does not grant artificial coverage.
