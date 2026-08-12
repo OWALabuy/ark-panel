@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { writeFile } from "node:fs/promises";
+import { chmod, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { GatewayControlError, loadGatewayStreamAuth, normalizeGatewayStreamEvent, OpenClawStreamObserver,
   resolveGatewayControlTransport, type GatewayControlMethod, type GatewayStreamEvent } from "../src/gateway/stream-client.js";
@@ -60,7 +60,8 @@ test("server control auth follows the pinned local mode resolver and never accep
   const configCases = [
     { auth: { mode: "token", token: " config-token ", password: "stale-password" }, expected: { token: "config-token" } },
     { auth: { mode: "password", token: "stale-token", password: " config-password " }, expected: { password: "config-password" } },
-    { auth: { mode: "trusted-proxy", password: " proxy-password " }, expected: { password: "proxy-password" } },
+    { auth: { mode: "trusted-proxy", password: " proxy-password ", trustedProxy: { userHeader: "x-auth-user" } },
+      gateway: { trustedProxies: ["127.0.0.1"] }, expected: { password: "proxy-password" } },
     { auth: { token: " inferred-token " }, expected: { token: "inferred-token" } },
     { auth: { password: " inferred-password " }, expected: { password: "inferred-password" } },
     { auth: { token: "ambiguous-token", password: "ambiguous-password" }, expected: undefined },
@@ -69,7 +70,7 @@ test("server control auth follows the pinned local mode resolver and never accep
     { auth: { mode: "unknown", token: "unknown-mode-token" }, expected: undefined }
   ];
   for (const configCase of configCases) {
-    await writeFile(configPath, JSON.stringify({ gateway: { auth: configCase.auth } }));
+    await writeFile(configPath, JSON.stringify({ gateway: { ...configCase.gateway, auth: configCase.auth } }));
     const expected = configCase.expected ? { url: "ws://127.0.0.1:18789", ...configCase.expected } : undefined;
     assert.deepEqual(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath }, true), expected);
   }
@@ -105,7 +106,9 @@ test("server control auth follows the pinned local mode resolver and never accep
       url: "ws://127.0.0.1:18789", ...localOverrideCase.expected
     });
   }
-  await writeFile(configPath, JSON.stringify({ gateway: { auth: { mode: "trusted-proxy", password: "old-password" } } }));
+  await writeFile(configPath, JSON.stringify({ gateway: { trustedProxies: ["127.0.0.1"], auth: {
+    mode: "trusted-proxy", password: "old-password", trustedProxy: { userHeader: "x-auth-user" }
+  } } }));
   assert.deepEqual(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath,
     PANEL_OPENCLAW_GATEWAY_PASSWORD: " new-password " }, true), {
     url: "ws://127.0.0.1:18789", password: "new-password"
@@ -149,6 +152,103 @@ test("server control auth follows the pinned local mode resolver and never accep
   await writeFile(configPath, "{not-json");
   await assertUnavailableGatewayAuth(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath,
     PANEL_OPENCLAW_GATEWAY_URL: "wss://independent.fixture.invalid", PANEL_OPENCLAW_GATEWAY_TOKEN: "fixture-env-token" }, true));
+});
+
+test("Gateway resolver validates config location and local port before selecting credentials", async t => {
+  const root = await tempFixture(t, "gateway-resolver-contract-");
+  const configPath = join(root, "openclaw.json"), otherConfigPath = join(root, "other-openclaw.json");
+  await writeFile(configPath, JSON.stringify({ gateway: { port: 19_001, auth: { mode: "token", token: "fixture-config-token" } } }));
+  await writeFile(otherConfigPath, JSON.stringify({ gateway: { port: 19_002, auth: { mode: "token", token: "fixture-other-token" } } }));
+
+  for (const [value, port] of [["19991", 19_991], ["localhost:19992", 19_992], ["[::1]:19993", 19_993]] as const) {
+    assert.deepEqual(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath, OPENCLAW_GATEWAY_PORT: value }, true), {
+      url: `ws://127.0.0.1:${port}`, token: "fixture-config-token"
+    });
+  }
+  for (const value of ["", " ", "0", "65536", "1.5", "localhost", ":19991", "a:b:19991"]) {
+    await assertUnavailableGatewayAuth(await loadGatewayStreamAuth({
+      OPENCLAW_CONFIG_PATH: configPath, OPENCLAW_GATEWAY_PORT: value
+    }, true));
+  }
+  assert.deepEqual(await loadGatewayStreamAuth({
+    PANEL_OPENCLAW_CONFIG_PATH: configPath, OPENCLAW_CONFIG_PATH: otherConfigPath
+  }, true), { url: "ws://127.0.0.1:19001", token: "fixture-config-token" });
+  assert.deepEqual(await loadGatewayStreamAuth({ OPENCLAW_CONFIG: configPath }, true), {
+    url: "ws://127.0.0.1:19001", token: "fixture-config-token"
+  });
+
+  const stateRoot = join(root, "state"), openClawHome = join(root, "openclaw-home");
+  const osHome = join(root, "os-home");
+  await mkdir(stateRoot, { recursive: true });
+  await mkdir(join(openClawHome, ".openclaw"), { recursive: true });
+  await mkdir(join(osHome, ".openclaw"), { recursive: true });
+  await writeFile(join(stateRoot, "openclaw.json"), JSON.stringify({ gateway: {
+    auth: { mode: "token", token: "fixture-state-token" }
+  } }));
+  await writeFile(join(openClawHome, ".openclaw", "openclaw.json"), JSON.stringify({ gateway: {
+    auth: { mode: "token", token: "fixture-openclaw-home-token" }
+  } }));
+  await writeFile(join(osHome, ".openclaw", "openclaw.json"), JSON.stringify({ gateway: {
+    auth: { mode: "token", token: "fixture-os-home-token" }
+  } }));
+  assert.deepEqual(await loadGatewayStreamAuth({ HOME: osHome, OPENCLAW_HOME: openClawHome,
+    OPENCLAW_STATE_DIR: stateRoot }, true), {
+    url: "ws://127.0.0.1:18789", token: "fixture-state-token"
+  });
+  assert.deepEqual(await loadGatewayStreamAuth({ HOME: osHome, OPENCLAW_HOME: openClawHome }, true), {
+    url: "ws://127.0.0.1:18789", token: "fixture-openclaw-home-token"
+  });
+  assert.deepEqual(await loadGatewayStreamAuth({ HOME: osHome }, true), {
+    url: "ws://127.0.0.1:18789", token: "fixture-os-home-token"
+  });
+  await assertUnavailableGatewayAuth(await loadGatewayStreamAuth({ HOME: osHome, OPENCLAW_PROFILE: "dev" }, true));
+  await assertUnavailableGatewayAuth(await loadGatewayStreamAuth({ HOME: osHome, OPENCLAW_HOME: openClawHome,
+    OPENCLAW_PROFILE: "fixture" }, true));
+  await assertUnavailableGatewayAuth(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath,
+    OPENCLAW_PROFILE: "fixture" }, true));
+  assert.deepEqual(await loadGatewayStreamAuth({ PANEL_OPENCLAW_CONFIG_PATH: configPath,
+    OPENCLAW_CONFIG_PATH: otherConfigPath, OPENCLAW_PROFILE: "fixture" }, true), {
+    url: "ws://127.0.0.1:19001", token: "fixture-config-token"
+  });
+
+  const legacyStateRoot = join(root, "legacy-state"), legacyHome = join(root, "legacy-home");
+  await mkdir(legacyStateRoot, { recursive: true });
+  await mkdir(join(legacyHome, ".openclaw"), { recursive: true });
+  await writeFile(join(legacyStateRoot, "clawdbot.json"), JSON.stringify({ gateway: {
+    auth: { mode: "token", token: "fixture-legacy-state-token" }
+  } }));
+  await writeFile(join(legacyHome, ".openclaw", "clawdbot.json"), JSON.stringify({ gateway: {
+    auth: { mode: "token", token: "fixture-legacy-home-token" }
+  } }));
+  assert.deepEqual(await loadGatewayStreamAuth({ OPENCLAW_STATE_DIR: legacyStateRoot }, true), {
+    url: "ws://127.0.0.1:18789", token: "fixture-legacy-state-token"
+  });
+  assert.deepEqual(await loadGatewayStreamAuth({ OPENCLAW_HOME: legacyHome }, true), {
+    url: "ws://127.0.0.1:18789", token: "fixture-legacy-home-token"
+  });
+
+  for (const explicitPath of ["", " ", join(root, "missing.json")]) await assertUnavailableGatewayAuth(
+    await loadGatewayStreamAuth({ PANEL_OPENCLAW_CONFIG_PATH: explicitPath, OPENCLAW_CONFIG_PATH: configPath }, true));
+  const unreadablePath = join(root, "unreadable.json");
+  await writeFile(unreadablePath, JSON.stringify({ gateway: { auth: { mode: "token", token: "fixture-must-not-send" } } }));
+  await chmod(unreadablePath, 0);
+  await assertUnavailableGatewayAuth(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: unreadablePath }, true));
+  await writeFile(otherConfigPath, "{ gateway: { auth: { mode: 'token' } } }");
+  await assertUnavailableGatewayAuth(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: otherConfigPath }, true));
+  for (const unsupportedResolution of [
+    { $include: "./base.json", gateway: { auth: { mode: "token", token: "fixture-must-not-send" } } },
+    { gateway: { port: "${FIXTURE_GATEWAY_PORT}", auth: { mode: "token", token: "fixture-must-not-send" } } }
+  ]) {
+    await writeFile(otherConfigPath, JSON.stringify(unsupportedResolution));
+    await assertUnavailableGatewayAuth(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: otherConfigPath,
+      FIXTURE_GATEWAY_PORT: "19003" }, true));
+  }
+  await writeFile(otherConfigPath, JSON.stringify({ fixtureLiteral: "$${FIXTURE_GATEWAY_PORT}", gateway: {
+    auth: { mode: "token", token: "fixture-literal-token" }
+  } }));
+  assert.deepEqual(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: otherConfigPath }, true), {
+    url: "ws://127.0.0.1:18789", token: "fixture-literal-token"
+  });
 });
 
 test("remote control auth requires its configured URL or a self-contained explicit endpoint", async t => {
@@ -201,6 +301,9 @@ test("remote control auth requires its configured URL or a self-contained explic
   ]) {
     await writeFile(configPath, JSON.stringify({ gateway: { mode: "remote", remote: unsupportedRemote } }));
     await assertUnavailableGatewayAuth(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath }, true));
+    await assertUnavailableGatewayAuth(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath,
+      PANEL_OPENCLAW_GATEWAY_URL: "wss://gateway.fixture.invalid/path",
+      PANEL_OPENCLAW_GATEWAY_TOKEN: "fixture-panel-token" }, true));
   }
   assert.deepEqual(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath,
     PANEL_OPENCLAW_GATEWAY_URL: "wss://independent.fixture.invalid", PANEL_OPENCLAW_GATEWAY_TOKEN: " fixture-panel-token " }, true), {
@@ -214,6 +317,11 @@ test("remote control auth requires its configured URL or a self-contained explic
     PANEL_OPENCLAW_GATEWAY_URL: "wss://gateway.fixture.invalid" }, true));
   await assertUnavailableGatewayAuth(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath,
     PANEL_OPENCLAW_GATEWAY_URL: "wss://other-gateway.fixture.invalid" }, true));
+  assert.deepEqual(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath,
+    PANEL_OPENCLAW_GATEWAY_URL: "wss://gateway.fixture.invalid/path",
+    PANEL_OPENCLAW_GATEWAY_TOKEN: " explicit-token " }, true), {
+    url: "wss://gateway.fixture.invalid/path", token: "explicit-token"
+  });
   assert.deepEqual(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath,
     PANEL_OPENCLAW_GATEWAY_URL: "wss://other-gateway.fixture.invalid", PANEL_OPENCLAW_GATEWAY_PASSWORD: " explicit-password " }, true), {
     url: "wss://other-gateway.fixture.invalid", password: "explicit-password"
@@ -323,20 +431,39 @@ test("Gateway SecretRef presence participates in mode and trusted-proxy fail-clo
   await assertUnavailableGatewayAuth(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath,
     PANEL_OPENCLAW_GATEWAY_TOKEN: "fixture-panel-token" }, true));
 
+  const trustedProxyGateway = { trustedProxies: ["127.0.0.1"], auth: {
+    mode: "trusted-proxy", password: "fixture-local-password", trustedProxy: { userHeader: "x-auth-user" }
+  } };
   for (const token of ["fixture-mutually-exclusive-token", tokenRef]) {
-    await writeFile(configPath, JSON.stringify({ gateway: { auth: {
-      mode: "trusted-proxy", token, password: "fixture-local-password"
+    await writeFile(configPath, JSON.stringify({ gateway: { ...trustedProxyGateway, auth: {
+      ...trustedProxyGateway.auth, token
     } } }));
     await assertUnavailableGatewayAuth(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath }, true));
   }
-  await writeFile(configPath, JSON.stringify({ gateway: { auth: { mode: "trusted-proxy" } } }));
-  await assertUnavailableGatewayAuth(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath }, true));
-  await writeFile(configPath, JSON.stringify({ gateway: { auth: { mode: "trusted-proxy", password: "fixture-local-password" } } }));
+  for (const gateway of [
+    { trustedProxies: ["127.0.0.1"], auth: { mode: "trusted-proxy", trustedProxy: { userHeader: "x-auth-user" } } },
+    { auth: { mode: "trusted-proxy", password: "fixture-local-password" } },
+    { trustedProxies: ["127.0.0.1"], auth: { mode: "trusted-proxy", password: "fixture-local-password" } },
+    { trustedProxies: [], auth: { mode: "trusted-proxy", password: "fixture-local-password",
+      trustedProxy: { userHeader: "x-auth-user" } } },
+    { trustedProxies: [" "], auth: { mode: "trusted-proxy", password: "fixture-local-password",
+      trustedProxy: { userHeader: "x-auth-user" } } },
+    { trustedProxies: ["127.0.0.1"], auth: { mode: "trusted-proxy", password: "fixture-local-password",
+      trustedProxy: { userHeader: " " } } }
+  ]) {
+    await writeFile(configPath, JSON.stringify({ gateway }));
+    await assertUnavailableGatewayAuth(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath }, true));
+  }
+  await writeFile(configPath, JSON.stringify({ gateway: trustedProxyGateway }));
   for (const panelCredentials of [
     { PANEL_OPENCLAW_GATEWAY_TOKEN: "fixture-panel-token" },
-    { PANEL_OPENCLAW_GATEWAY_TOKEN: "fixture-panel-token", PANEL_OPENCLAW_GATEWAY_PASSWORD: "fixture-panel-password" }
+    { PANEL_OPENCLAW_GATEWAY_TOKEN: "fixture-panel-token", PANEL_OPENCLAW_GATEWAY_PASSWORD: "fixture-panel-password" },
+    { PANEL_OPENCLAW_GATEWAY_TOKEN: " ", PANEL_OPENCLAW_GATEWAY_PASSWORD: "fixture-panel-password" },
+    { OPENCLAW_GATEWAY_TOKEN: "fixture-upstream-token" }
   ]) await assertUnavailableGatewayAuth(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath, ...panelCredentials }, true));
-  await writeFile(configPath, JSON.stringify({ gateway: { auth: { mode: "trusted-proxy", password: passwordRef } } }));
+  await writeFile(configPath, JSON.stringify({ gateway: { ...trustedProxyGateway, auth: {
+    ...trustedProxyGateway.auth, password: passwordRef
+  } } }));
   await assertUnavailableGatewayAuth(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath }, true));
   assert.deepEqual(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath,
     PANEL_OPENCLAW_GATEWAY_PASSWORD: " fixture-local-password " }, true), {

@@ -122,7 +122,7 @@ ssh -L 8790:127.0.0.1:8790 <用户>@<公网地址>
 
 ### 4.2 面板使用的 Gateway RPC 与 scope 矩阵
 
-面板只通过一条到 `127.0.0.1:18789` 的持久控制 WebSocket 调用下表方法。OpenClaw `2026.6.11` 的方法分类与面板用途如下；代码中的版本化允许列表必须与此表一致，未登记方法在发帧前本地拒绝。
+面板只通过一条持久控制 WebSocket 调用下表方法；默认本机端点是 `127.0.0.1:18789`，完整 resolver 边界见 §4.4。OpenClaw `2026.6.11` 的方法分类与面板用途如下；代码中的版本化允许列表必须与此表一致，未登记方法在发帧前本地拒绝。
 
 | scope | 方法 | 面板用途 |
 |---|---|---|
@@ -140,9 +140,11 @@ OpenClaw 中 write 能满足 read、admin 能满足全部 `operator.*`，但面�
 ### 4.4 鉴权方式（修正旧版结论）
 - OpenClaw `2026.6.11` 对 direct-loopback 的 `gateway-client/backend` + 共享 token/password 提供本机 backend self-pairing 分支，因此面板服务端不需要伪造浏览器设备身份，也不启用 `dangerouslyDisableDeviceAuth`。远程、浏览器或显式 device-token 身份不在这条保证内。
 - 连接角色固定为 `operator`，请求并核验精确的 read/write/admin scope 集合。scope 是同一个受信 Gateway operator 域内的纵深 guardrail，不是 hostile multi-tenant 隔离；共享 token/password 必须视为 owner 级 secret。真正跨用户/机器的隔离需要独立 Gateway/OS 用户，而不是只拆 scope 字符串。
-- token 使用常量时间算法与 `gateway.auth.token` 比较。应配置长期、可轮换的 secret；只存于 Gateway 配置或面板环境，不下发浏览器、不写日志。虽然上游可允许 direct-loopback 的 `auth.mode=none`，面板对同一本机端点的该 mode 无条件拒绝 admin 控制连接。`token` / `password` mode 只取同名字段；`trusted-proxy` 只允许同机 fallback password，配置 token（包括 SecretRef presence）即拒绝；mode 未配置时仅可从配置中唯一一种凭据推导，同时存在两种则因歧义拒绝。面板环境凭据组只覆盖该已知 mode 选中的值，整组全为空白时不回落。
-- `gateway.remote` 凭据独立于本机 `gateway.auth.mode`；remote mode 必须有有效 URL 和显式 `transport: "direct"`。面板不创建 SSH tunnel，也不实现 remote `tlsFingerprint` pin，遇到二者均拒绝；显式 panel URL 则是自带非空 panel credential group 的独立边界，不能继承磁盘 secret/pin。本机 URL 从 port 与 `gateway.tls.enabled` 得到；origin 以 scheme、port 及带类型 host 比较，loopback 别名与普通 DNS hostname 永不共用字符串 sentinel。公网必须使用 `wss://`，`ws://` 只允许固定版本定义的 loopback/private/link-local/CGNAT/ULA、`.local` 和 `.ts.net`。TLS 证书验证不得关闭。
-- SecretRef 字符串或对象会参与凭据 presence、mode 与互斥判断，但面板不执行 env/file/exec provider。选中的 ref 若没有对应非空 `PANEL_*` 明文覆盖就稳定 fail closed；完整 provider resolution 需要独立的权限与版本门禁评审。独立端点凭据只是 operator assertion，不改变服务端 mode，必须同步配置并在 #48 验证。轮换与回滚都同步更新两端；本批不要求重新签发既有凭据。
+- 控制 resolver 只读取严格 JSON。`PANEL_OPENCLAW_CONFIG_PATH` 是声明 `OPENCLAW_PROFILE` 时唯一允许的显式路径；没有它则 profile 在其他 selector 前 fail closed。否则依次使用官方 `OPENCLAW_CONFIG_PATH`、`OPENCLAW_STATE_DIR` 内 new/legacy 候选、`OPENCLAW_HOME` 内四候选、legacy `OPENCLAW_CONFIG`；无 selector 时在 OS home 内按同一四候选顺序查找。目录候选只对缺失继续，找到后不可读/解析失败或显式路径空白即拒绝且不落到低优先级来源。本批拒绝 JSON5，也拒绝严格 JSON 中的 `$include` 与未转义 `${VAR}`，避免部分解析；`$${VAR}` 保持字面量。失败只关闭 Gateway 控制可用性。
+- token 使用常量时间算法与 `gateway.auth.token` 比较。应配置长期、可轮换的 secret；只存于 Gateway 配置或面板环境，不下发浏览器、不写日志。虽然上游可允许 direct-loopback 的 `auth.mode=none`，面板对同一本机端点的该 mode 无条件拒绝 admin 控制连接。`token` / `password` mode 只取同名字段；`trusted-proxy` 只允许同机 password fallback，且必须同时满足非空白 `gateway.auth.trustedProxy.userHeader`、元素均非空白的非空 `gateway.trustedProxies` 列表、最终选中非空 password、配置 token 不存在且未声明 `PANEL_OPENCLAW_GATEWAY_TOKEN`；连接只发送 password。SecretRef token 算配置 presence，panel token 即使只声明也触发拒绝。mode 未配置时仅可从配置中唯一一种凭据推导，同时存在两种则因歧义拒绝。面板环境凭据组只覆盖该已知 mode 选中的值，整组全为空白时不回落。
+- 本机 URL 的 scheme 从 `gateway.tls.enabled` 得到；port 优先级为非空合法 `OPENCLAW_GATEWAY_PORT` > 合法 `gateway.port` > `18789`，已声明但空白或非法的环境值直接 fail closed。origin 以 scheme、port 及带类型 host 比较；loopback 别名不能使用会与真实 DNS hostname 碰撞的字符串 sentinel。公网必须使用 `wss://`，`ws://` 只允许固定版本定义的 loopback/private/link-local/CGNAT/ULA、`.local` 和 `.ts.net`。TLS 证书验证不得关闭。
+- `gateway.remote` 凭据独立于本机 `gateway.auth.mode`，且 remote mode 不回落本机默认地址。配置型 remote 端点必须有有效 URL、显式 `transport: "direct"` 且未配置 `tlsFingerprint`；非空 panel credential group 可覆盖其凭据值但不能改变 provenance 或绕过门禁。与配置 remote URL 同源的 `PANEL_OPENCLAW_GATEWAY_URL` 还必须带该凭据组并继续通过 direct / no-fingerprint。只有 panel URL 改变 origin，或配置 remote URL 缺失时，凭据组才能与该 URL 构成自包含的独立端点，不继承磁盘 secret、transport 或 pin；本机 panel URL 改变 origin 时采用同一独立边界。
+- SecretRef 字符串或对象会参与凭据 presence、mode 与互斥判断，但面板不执行 env/file/exec provider。选中的 ref 若没有对应非空 `PANEL_*` 明文覆盖就稳定 fail closed；所有配置、端点和凭据 resolver 拒绝都使用稳定脱敏错误，不得把 credential、ref、配置正文或所选私有路径写入错误/日志。完整 provider resolution 需要独立的权限与版本门禁评审。独立端点凭据只是 operator assertion，不改变服务端 mode，必须同步配置并在 #48 验证。轮换与回滚都同步更新两端；本批不要求重新签发既有凭据。
 
 ---
 

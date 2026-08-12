@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { BlockList, isIP } from "node:net";
 import { homedir } from "node:os";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { SUPPORTED_OPENCLAW_VERSION, type GatewayAttachment } from "./adapter.js";
 
 const MAX_TEXT_BYTES = 2 * 1024 * 1024;
@@ -509,7 +509,145 @@ function sameGatewayEndpoint(left: string, right: string): boolean {
   return leftEndpoint.host.kind === "loopback" || rightEndpoint.host.kind === "address" && leftEndpoint.host.value === rightEndpoint.host.value;
 }
 
-interface ExplicitCredentials { declared: boolean; token?: string; password?: string }
+interface ExplicitCredentials {
+  declared: boolean;
+  tokenDeclared: boolean;
+  passwordDeclared: boolean;
+  token?: string;
+  password?: string;
+}
+
+type GatewayEndpointProvenance = "local-config" | "remote-config" | "panel-independent";
+
+interface GatewayEndpointResolution {
+  gateway: Record<string, unknown>;
+  remote: Record<string, unknown> | undefined;
+  auth: Record<string, unknown> | undefined;
+  url: string;
+  provenance: GatewayEndpointProvenance;
+  explicitUrlDeclared: boolean;
+}
+
+function explicitGatewayCredentials(env: NodeJS.ProcessEnv): ExplicitCredentials | undefined {
+  const tokenDeclared = env.PANEL_OPENCLAW_GATEWAY_TOKEN !== undefined;
+  const passwordDeclared = env.PANEL_OPENCLAW_GATEWAY_PASSWORD !== undefined;
+  const token = trimmedString(env.PANEL_OPENCLAW_GATEWAY_TOKEN), password = trimmedString(env.PANEL_OPENCLAW_GATEWAY_PASSWORD);
+  if ((tokenDeclared || passwordDeclared) && !token && !password) return undefined;
+  return { declared: tokenDeclared || passwordDeclared, tokenDeclared, passwordDeclared,
+    ...(token ? { token } : {}), ...(password ? { password } : {}) };
+}
+
+function configuredGatewayPort(gateway: Record<string, unknown> | undefined, env: NodeJS.ProcessEnv): number | undefined {
+  if (env.OPENCLAW_GATEWAY_PORT !== undefined) {
+    const value = env.OPENCLAW_GATEWAY_PORT.trim();
+    if (!value) return undefined;
+    const match = /^\d+$/.exec(value) ?? /^\[[^\]]+\]:(\d+)$/.exec(value) ?? /^[^:]+:(\d+)$/.exec(value);
+    const rawPort = match?.[1] ?? (/^\d+$/.test(value) ? value : undefined);
+    if (!rawPort) return undefined;
+    const port = Number(rawPort); return Number.isSafeInteger(port) && port > 0 && port <= 65_535 ? port : undefined;
+  }
+  if (gateway?.port === undefined) return 18_789;
+  return typeof gateway.port === "number" && Number.isInteger(gateway.port) && gateway.port > 0 && gateway.port <= 65_535 ? gateway.port : undefined;
+}
+
+interface GatewayConfigCandidates { paths: string[]; allowMissingFallback: boolean }
+
+function stateConfigCandidates(stateDir: string): string[] {
+  return [join(stateDir, "openclaw.json"), join(stateDir, "clawdbot.json")];
+}
+
+function homeConfigCandidates(home: string): string[] {
+  return [...stateConfigCandidates(join(home, ".openclaw")), ...stateConfigCandidates(join(home, ".clawdbot"))];
+}
+
+function resolvedUserPath(value: string, env: NodeJS.ProcessEnv, openClawHome = true): string | undefined {
+  const normalized = value.trim(); if (!normalized) return undefined;
+  if (!normalized.startsWith("~")) return resolve(normalized);
+  if (normalized !== "~" && !normalized.startsWith("~/") && !normalized.startsWith("~\\")) return resolve(normalized);
+  const osHome = trimmedString(env.HOME) ?? homedir();
+  const effectiveHome = openClawHome ? trimmedString(env.OPENCLAW_HOME) ?? osHome : osHome;
+  return resolve(effectiveHome, normalized === "~" ? "." : normalized.slice(2));
+}
+
+function gatewayConfigCandidates(env: NodeJS.ProcessEnv): GatewayConfigCandidates | undefined {
+  if (env.PANEL_OPENCLAW_CONFIG_PATH !== undefined) {
+    const path = resolvedUserPath(env.PANEL_OPENCLAW_CONFIG_PATH, env);
+    return path ? { paths: [path], allowMissingFallback: false } : undefined;
+  }
+  if (env.OPENCLAW_PROFILE !== undefined) return undefined;
+  if (env.OPENCLAW_CONFIG_PATH !== undefined) {
+    const path = resolvedUserPath(env.OPENCLAW_CONFIG_PATH, env);
+    return path ? { paths: [path], allowMissingFallback: false } : undefined;
+  }
+  if (env.OPENCLAW_STATE_DIR !== undefined) {
+    const stateDir = resolvedUserPath(env.OPENCLAW_STATE_DIR, env); return stateDir ?
+      { paths: stateConfigCandidates(stateDir), allowMissingFallback: true } : undefined;
+  }
+  if (env.OPENCLAW_HOME !== undefined) {
+    const home = resolvedUserPath(env.OPENCLAW_HOME, env, false); return home ?
+      { paths: homeConfigCandidates(home), allowMissingFallback: true } : undefined;
+  }
+  if (env.OPENCLAW_CONFIG !== undefined) {
+    const path = resolvedUserPath(env.OPENCLAW_CONFIG, env); return path ? { paths: [path], allowMissingFallback: false } : undefined;
+  }
+  const home = trimmedString(env.HOME) ?? homedir();
+  return { paths: homeConfigCandidates(home), allowMissingFallback: true };
+}
+
+async function gatewayConfig(env: NodeJS.ProcessEnv): Promise<Record<string, unknown> | undefined> {
+  const candidates = gatewayConfigCandidates(env); if (!candidates) return undefined;
+  for (const path of candidates.paths) {
+    let contents: string;
+    try { contents = await readFile(path, "utf8"); }
+    catch (error) {
+      if (candidates.allowMissingFallback && (error as NodeJS.ErrnoException).code === "ENOENT") continue;
+      return undefined;
+    }
+    try {
+      const config = object(JSON.parse(contents));
+      if (!config || configUsesUnsupportedResolution(config)) return undefined;
+      return object(config.gateway);
+    }
+    catch { return undefined; }
+  }
+  return undefined;
+}
+
+function configUsesUnsupportedResolution(value: unknown): boolean {
+  if (typeof value === "string") return /(?<!\$)\$\{[A-Za-z_][A-Za-z0-9_]*\}/.test(value);
+  if (Array.isArray(value)) return value.some(configUsesUnsupportedResolution);
+  const record = object(value); return Boolean(record && (Object.prototype.hasOwnProperty.call(record, "$include") ||
+    Object.values(record).some(configUsesUnsupportedResolution)));
+}
+
+function resolveGatewayEndpoint(gateway: Record<string, unknown>, env: NodeJS.ProcessEnv,
+  explicitUrl: string | undefined, explicitUrlDeclared: boolean): GatewayEndpointResolution | undefined {
+  if (explicitUrlDeclared && !explicitUrl) return undefined;
+  if (gateway.mode !== undefined && gateway.mode !== "local" && gateway.mode !== "remote") return undefined;
+  const remoteMode = gateway.mode === "remote", remote = object(gateway.remote), auth = object(gateway.auth);
+  if (gateway.remote !== undefined && !remote) return undefined;
+  if (remoteMode) {
+    if (remote?.url !== undefined && typeof remote.url !== "string") return undefined;
+    const remoteUrl = trimmedString(remote?.url);
+    const url = explicitUrl ?? remoteUrl; if (!url) return undefined;
+    const provenance = explicitUrl && (!remoteUrl || !sameGatewayEndpoint(explicitUrl, remoteUrl)) ?
+      "panel-independent" : "remote-config";
+    return { gateway, remote, auth, url, provenance, explicitUrlDeclared };
+  }
+  const port = configuredGatewayPort(gateway, env); if (!port) return undefined;
+  const tls = object(gateway.tls);
+  if ((gateway.tls !== undefined && !tls) || (tls?.enabled !== undefined && typeof tls.enabled !== "boolean")) return undefined;
+  const configuredUrl = `${tls?.enabled === true ? "wss" : "ws"}://127.0.0.1:${port}`;
+  const url = explicitUrl ?? configuredUrl;
+  const provenance = explicitUrl && !sameGatewayEndpoint(explicitUrl, configuredUrl) ? "panel-independent" : "local-config";
+  return { gateway, remote, auth, url, provenance, explicitUrlDeclared };
+}
+
+function gatewayTransportAllowed(resolved: GatewayEndpointResolution): boolean {
+  if (!gatewayEndpoint(resolved.url)) return false;
+  if (resolved.provenance !== "remote-config") return true;
+  return resolved.remote?.transport === "direct" && resolved.remote.tlsFingerprint === undefined;
+}
 
 interface ConfigCredential { configured: boolean; invalid: boolean; unresolved: boolean; value?: string }
 
@@ -542,8 +680,8 @@ function selectedCredential(configured: ConfigCredential, explicit: string | und
   return configured.unresolved ? undefined : configured.value;
 }
 
-function localGatewayAuth(mode: unknown, url: string, configToken: ConfigCredential, configPassword: ConfigCredential,
-  explicit: ExplicitCredentials): GatewayAuth | undefined {
+function localGatewayAuth(mode: unknown, url: string, gateway: Record<string, unknown>, configToken: ConfigCredential,
+  configPassword: ConfigCredential, explicit: ExplicitCredentials, env: NodeJS.ProcessEnv): GatewayAuth | undefined {
   if (configToken.invalid || configPassword.invalid) return undefined;
   let effectiveMode = mode;
   if (effectiveMode === undefined) {
@@ -555,7 +693,12 @@ function localGatewayAuth(mode: unknown, url: string, configToken: ConfigCredent
     const token = selectedCredential(configToken, explicit.token, explicit.declared); return token ? { url, token } : undefined;
   }
   if (effectiveMode === "password" || effectiveMode === "trusted-proxy") {
-    if (effectiveMode === "trusted-proxy" && (configToken.configured || Boolean(explicit.token))) return undefined;
+    if (effectiveMode === "trusted-proxy") {
+      const trustedProxy = object(object(gateway.auth)?.trustedProxy), trustedProxies = gateway.trustedProxies;
+      if (configToken.configured || explicit.tokenDeclared || Boolean(trimmedString(env.OPENCLAW_GATEWAY_TOKEN)) ||
+        !trimmedString(trustedProxy?.userHeader) ||
+        !Array.isArray(trustedProxies) || trustedProxies.length === 0 || trustedProxies.some(value => !trimmedString(value))) return undefined;
+    }
     const password = selectedCredential(configPassword, explicit.password, explicit.declared); return password ? { url, password } : undefined;
   }
   return undefined;
@@ -564,43 +707,25 @@ function localGatewayAuth(mode: unknown, url: string, configToken: ConfigCredent
 export async function loadGatewayStreamAuth(env: NodeJS.ProcessEnv = process.env, allowWhenStreamingDisabled = false): Promise<GatewayAuth | undefined> {
   if (!allowWhenStreamingDisabled && env.PANEL_OPENCLAW_STREAMING === "0") return undefined;
   const explicitUrl = trimmedString(env.PANEL_OPENCLAW_GATEWAY_URL);
-  const explicitToken = trimmedString(env.PANEL_OPENCLAW_GATEWAY_TOKEN), explicitPassword = trimmedString(env.PANEL_OPENCLAW_GATEWAY_PASSWORD);
-  const explicit: ExplicitCredentials = { declared: env.PANEL_OPENCLAW_GATEWAY_TOKEN !== undefined || env.PANEL_OPENCLAW_GATEWAY_PASSWORD !== undefined,
-    ...(explicitToken ? { token: explicitToken } : {}), ...(explicitPassword ? { password: explicitPassword } : {}) };
-  if (explicit.declared && !explicit.token && !explicit.password) return undefined;
-  const path = resolve(env.OPENCLAW_CONFIG_PATH ?? env.OPENCLAW_CONFIG ?? `${env.HOME ?? homedir()}/.openclaw/openclaw.json`);
-  let gateway: Record<string, unknown> | undefined;
-  try { gateway = object(object(JSON.parse(await readFile(path, "utf8")))?.gateway); } catch { return undefined; }
-  if (gateway?.mode !== undefined && gateway.mode !== "local" && gateway.mode !== "remote") return undefined;
-  const remote = object(gateway?.remote), auth = object(gateway?.auth), remoteMode = gateway?.mode === "remote";
-  const configuredPort = gateway?.port === undefined ? 18_789 :
-    typeof gateway.port === "number" && Number.isInteger(gateway.port) && gateway.port > 0 && gateway.port <= 65_535 ? gateway.port : undefined;
-  if (configuredPort === undefined) return undefined;
-  const remoteUrl = trimmedString(remote?.url);
-  if (remoteMode && explicitUrl) {
-    if (!gatewayEndpoint(explicitUrl) || !explicit.declared || !explicit.token && !explicit.password) return undefined;
-    return { url: explicitUrl, ...(explicit.token ? { token: explicit.token } : {}), ...(explicit.password ? { password: explicit.password } : {}) };
+  const explicit = explicitGatewayCredentials(env); if (!explicit) return undefined;
+  const gateway = await gatewayConfig(env); if (!gateway) return undefined;
+  const resolved = resolveGatewayEndpoint(gateway, env, explicitUrl, env.PANEL_OPENCLAW_GATEWAY_URL !== undefined);
+  if (!resolved || !gatewayTransportAllowed(resolved)) return undefined;
+  if (resolved.provenance === "panel-independent") {
+    if (!explicit.declared || !explicit.token && !explicit.password) return undefined;
+    return { url: resolved.url, ...(explicit.token ? { token: explicit.token } : {}),
+      ...(explicit.password ? { password: explicit.password } : {}) };
   }
-  if (remoteMode) {
-    if (!remoteUrl || !gatewayEndpoint(remoteUrl)) return undefined;
-    if (remote?.transport !== "direct" || remote.tlsFingerprint !== undefined) return undefined;
-    const token = configCredential(remote?.token), password = configCredential(remote?.password);
+  if (resolved.provenance === "remote-config") {
+    const token = configCredential(resolved.remote?.token), password = configCredential(resolved.remote?.password);
     if (token.invalid || password.invalid) return undefined;
-    if (explicit.declared) return explicit.token || explicit.password ? { url: remoteUrl,
+    if (resolved.explicitUrlDeclared && !explicit.declared) return undefined;
+    if (explicit.declared) return explicit.token || explicit.password ? { url: resolved.url,
       ...(explicit.token ? { token: explicit.token } : {}), ...(explicit.password ? { password: explicit.password } : {}) } : undefined;
     if (token.unresolved || password.unresolved) return undefined;
-    return token.value || password.value ? { url: remoteUrl, ...(token.value ? { token: token.value } : {}),
+    return token.value || password.value ? { url: resolved.url, ...(token.value ? { token: token.value } : {}),
       ...(password.value ? { password: password.value } : {}) } : undefined;
   }
-  const tls = object(gateway?.tls);
-  if (gateway?.tls !== undefined && !tls || tls?.enabled !== undefined && typeof tls.enabled !== "boolean") return undefined;
-  const configuredUrl = `${tls?.enabled === true ? "wss" : "ws"}://127.0.0.1:${configuredPort}`;
-  const url = explicitUrl ?? configuredUrl;
-  if (!gatewayEndpoint(url)) return undefined;
-  if (explicitUrl && !sameGatewayEndpoint(explicitUrl, configuredUrl)) {
-    if (!explicit.declared || !explicit.token && !explicit.password) return undefined;
-    return { url, ...(explicit.token ? { token: explicit.token } : {}), ...(explicit.password ? { password: explicit.password } : {}) };
-  }
-  const configToken = configCredential(auth?.token), configPassword = configCredential(auth?.password);
-  return localGatewayAuth(auth?.mode, url, configToken, configPassword, explicit);
+  const configToken = configCredential(resolved.auth?.token), configPassword = configCredential(resolved.auth?.password);
+  return localGatewayAuth(resolved.auth?.mode, resolved.url, gateway, configToken, configPassword, explicit, env);
 }
