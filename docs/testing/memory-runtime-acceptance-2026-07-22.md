@@ -1,5 +1,15 @@
 # 记忆整理 runtime 验收记录（2026-07-22）
 
+> **历史证据元数据**
+>
+> - Date: `2026-07-22`
+> - ark-panel commit: `218bbef`
+> - OpenClaw version: `2026.6.11`
+> - Status: `historical pass`
+> - Superseded/current applicability: 结果只适用于当时两个隔离 memory runtime、工具
+>   policy 与虚构来源；不是当前环境的持续实机保证。当前确定性覆盖与待复验边界见
+>   [acceptance matrix](README.md)。
+
 环境：OpenClaw 2026.6.11。`panel-memory-claude` 与 `panel-memory-main` 均使用独立 agent/session 目录、零渠道 binding，并与对应普通面板 runtime 共享 workspace。两者的 per-agent 工具 allowlist 仅包含 `memory_search` 与 `memory_get`。
 
 ## 验收中发现并修复的问题

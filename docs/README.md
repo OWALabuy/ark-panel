@@ -26,8 +26,14 @@ historical context and is never normative.
 ## Support and acceptance
 
 [`testing/README.md`](testing/README.md) is the current support/acceptance matrix and routes to the
-relevant procedure or dated evidence. Individual files under `testing/` do not establish timeless
-support on their own.
+relevant procedure or dated evidence. It distinguishes continuously automated checks, current
+runbooks, dated historical passes, partial or failed results, unsupported operations, and unknown
+live boundaries.
+
+Files named for a date or described as results preserve what was observed in that specific
+environment; they are evidence, not timeless product guarantees. A runbook explains how to perform
+a gated check but is not proof that it was run. Individual files under `testing/` do not establish
+timeless support on their own.
 
 ## Development archive
 

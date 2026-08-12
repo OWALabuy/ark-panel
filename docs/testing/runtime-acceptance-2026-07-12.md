@@ -1,5 +1,15 @@
 # 专用 runtime 验收记录（2026-07-12）
 
+> **历史证据元数据**
+>
+> - Date: `2026-07-12`
+> - ark-panel commit: `cf67b56`（仓库中最早保存该结果的 snapshot）
+> - OpenClaw version: `2026.6.11`
+> - Status: `partial`
+> - Superseded/current applicability: 当次 `panel-claude-runtime` 通过而
+>   `panel-main-runtime` 的 bootstrap 失败；不得把单个 runtime 的结果推广到全部
+>   panel 会话。当前逐 runtime 状态见 [acceptance matrix](README.md)。
+
 环境：OpenClaw 2026.6.11；`panel-claude-runtime` 与 `panel-main-runtime` 均为 0 bindings，sessions 根与真实 agent 隔离。每项仅调用一次随机无匹配 nonce 的 `memory_search`；没有调用 browser/canvas、文件、shell、网络或消息工具。
 
 | 项目 | panel-claude-runtime | panel-main-runtime |

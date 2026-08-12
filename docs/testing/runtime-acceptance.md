@@ -1,5 +1,15 @@
 # 专用 runtime 兼容性验收
 
+> **当前 runbook 元数据（不是执行结果）**
+>
+> - Date: `2026-08-13`（runbook review）
+> - ark-panel commit: `cfe53d9`（implementation snapshot）
+> - OpenClaw version: target `2026.6.11`
+> - Status: `unknown`
+> - Superseded/current applicability: 本 runbook 当前可用，但只有实际执行后生成的
+>   日期化记录才能改变某个 runtime 的状态；runbook 本身不证明通过。已知历史结果
+>   与当前缺口见 [acceptance matrix](README.md)。
+
 该验收只允许 `panel-claude-runtime`、`panel-main-runtime` 或 `paneltest`，并要求 runtime 在 `openclaw.json` 中没有任何 binding。脚本使用一次性 session，完成后按受限 artifact 清理流程注销和删除。
 
 ```sh

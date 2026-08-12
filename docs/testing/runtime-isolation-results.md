@@ -1,5 +1,15 @@
 # `panel-claude-runtime` 隔离生成验收
 
+> **历史证据元数据**
+>
+> - Date: `2026-07-11`
+> - ark-panel commit: `cf67b56`（仓库中最早保存该结果的 snapshot）
+> - OpenClaw version: `2026.6.11` (`e085fa1`)
+> - Status: `partial`
+> - Superseded/current applicability: 专用 runtime 三次生成与自身清理通过，但并发的
+>   source session 变化使严格的整目录不变性未能证明；不能提升为当前隔离保证。
+>   当前状态见 [acceptance matrix](README.md)。
+
 验收日期：2026-07-11
 OpenClaw：2026.6.11（e085fa1）
 目标 runtime：`panel-claude-runtime`

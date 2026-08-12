@@ -1,5 +1,15 @@
 # 真实活会话写入验收记录
 
+> **历史证据元数据**
+>
+> - Date: `2026-07-12`
+> - ark-panel commit: `cf67b56`（仓库中最早保存该结果的 snapshot）
+> - OpenClaw version: `2026.6.11` (`e085fa1`)
+> - Status: `unsupported`
+> - Superseded/current applicability: 本轮不是通过结果；预检在 0 写入时停止。现有
+>   active/reset source 仍是只读来源，本文不能作为直接写入能力证明。当前边界见
+>   [acceptance matrix](README.md)。
+
 日期：2026-07-12
 OpenClaw：2026.6.11（e085fa1）
 

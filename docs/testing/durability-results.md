@@ -1,5 +1,15 @@
 # 面板异常恢复与耐久验收记录
 
+> **历史证据元数据**
+>
+> - Date: `2026-07-12`
+> - ark-panel commit: `cf67b56`（仓库中最早保存该结果的 snapshot）
+> - OpenClaw version: 不适用（本轮只用 fixture）
+> - Status: `historical pass`
+> - Superseded/current applicability: 本文件保留当时的内存 completed cache、断线与
+>   “无持久 run journal”事实；当前实现已有 durable run journal，不能用本文描述
+>   当前恢复架构。当前自动化边界见 [acceptance matrix](README.md)。
+
 日期：2026-07-12
 
 本轮只使用内存/临时目录 fixture，没有调用真实模型、真实 agent、IM 或 gateway，也没有重启 gateway。

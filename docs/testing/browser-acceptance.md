@@ -1,5 +1,18 @@
 # 浏览器自动化验收
 
+> **当前自动化与日期化证据元数据**
+>
+> - Date: `2026-08-12`（初始自动化）、`2026-08-13`（#43 网络边界复验）
+> - ark-panel commit: `3a29ee4`（初始自动化）、`cfe53d9`（外部图片边界）
+> - OpenClaw version: 不适用（虚构本地 browser fixture）
+> - Status: runbook `current automated`；2026-08-12 result `historical pass`；
+>   2026-08-13 result `partial`
+> - Superseded/current applicability: 本文件仍是 Firefox 自动化 runbook；其中每次
+>   运行结果只适用于自己的日期与 commit。2026-08-13 的三轮结果因两次
+>   `DRIVER_QUIT_FAILED` 记为 `partial`，详见
+>   [current acceptance matrix](README.md)。更早的 2026-07-11 手工结果已独立
+>   保存为[历史证据](browser-acceptance-2026-07-11.md)。
+
 2026-08-12 起，仓库通过 `npm run test:browser` 执行真实 Firefox/WebDriver
 交互验收。测试只使用 `test/browser-fixture.mjs` 中完全虚构的内存数据，监听
 `127.0.0.1` 的临时端口，不读取 agent、workspace 或用户目录，也不连接
