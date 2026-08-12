@@ -92,20 +92,24 @@ gateway 连接凭证：读 `~/.openclaw/openclaw.json` 的 `gateway.auth.token`�
 
 面板用 OpenClaw 的 transcript 格式存会话，便于直接查看、纳入 git、以后迁移。
 
-**每个会话是一个 JSONL 文件**，每行一个 JSON 对象：
+**每个会话的 transcript 是一个 JSONL 文件**，每行一个 JSON 对象：
 - 首行是会话头：`{"type":"session","version":3,"id":"<uuid>","timestamp":"<ISO>","cwd":"<workspace路径>"}`
 - 消息行：`{"type":"message","id":"<短id>","parentId":"<父id或null>","timestamp":"<ISO>","message":{"role":"user|assistant","content":...}}`
 - 其它类型（`model_change`、`thinking_level_change`、`custom`）按原样保留，不必理解其语义，但要能读能写回。
 
 **关键：`id` + `parentId` 构成一棵树。** fork 就是让新消息的 `parentId` 指向历史上某个节点。面板的 fork 树直接建立在这个父子关系上。
 
-**面板存储目录布局建议**（Codex 可调整，但要在代码里写清楚）：
+**面板存储的当前目录布局**：
 ```
 <面板数据目录>/
   sessions/
-    <会话uuid>.jsonl          # 每条会话线一个文件
-  index.json                  # 面板自己的会话索引（见 §4）
+    <agentId>/
+      <recordId>/
+        metadata.json         # 可变会话属性与 fork 来源
+        transcript.jsonl      # 权威完整 transcript
 ```
+
+`metadata.json` 与 `transcript.jsonl` 共同构成一条可见的权威记录，不得逐文件直接发布。创建时在同一 `<agentId>/` 下以保留前缀 staging 目录写入：两个 `0600` 文件分别写完并 `fsync`，再 `fsync` staging 目录，单次 rename 为 `<recordId>/`，最后 `fsync` `<agentId>/`。发布失败时回退为不可枚举的 staging；若回退本身也失败则必须明确报告 durability 不确定，不得宣称创建成功。已有 staging 或其他半成品作为故障证据保守报告，不自动删除。列表、读取与搜索忽略 staging，并对每条已发布记录独立校验；缺文件、损坏 JSON、非普通文件、硬/符号链接或不安全权限只隔离当前记录，结构化诊断不得含正文或私密绝对路径。这不改变现有 metadata/transcript schema，也不对历史数据做静默迁移或删除。
 
 参考样本：可以把 `~/.openclaw/agents/claude/sessions/` 里的文件**拷贝出来**做解析测试样本，绝不直接读写原目录。
 

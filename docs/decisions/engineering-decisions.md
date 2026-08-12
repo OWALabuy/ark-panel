@@ -35,6 +35,7 @@ API 统一位于 `/api/v1`。成功响应是 `{ "data": ... }`；失败响应是
 - active 会话只读源文件；reset 会话导入为不可变快照；panel 会话只写面板数据目录。
 - active/reset 的 `recordId` 由 agent、类型及稳定来源标识计算；panel 的 UUID 写入 metadata。重建索引不会改变 ID。
 - metadata 记录 fork 来源，不能只放在索引里。
+- 新建 panel 会话时，`metadata.json` 与 `transcript.jsonl` 先在同父目录的保留 staging 目录中完整写入并逐层 `fsync`，只用单次目录 rename 发布为可见记录。staging 和单条残缺/损坏记录只作脱敏诊断与隔离，不自动删除，也不得影响其他健康会话。
 - 完整 run 使用同目录临时文件、`fsync`、原子改名提交；索引也采用同样方式。不会把多行 append 当作事务。
 - 读写时拒绝符号链接，规范化路径后必须仍位于配置的根目录。
 

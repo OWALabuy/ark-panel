@@ -5,7 +5,7 @@ import { deriveFork } from "../domain/fork.js";
 import { externalRecordId } from "../domain/record-id.js";
 import { parseTranscript, TranscriptError, type JsonObject, type TranscriptDocument } from "../domain/transcript.js";
 import { assertWithin } from "../storage/atomic.js";
-import { createPanelSession, deletePanelSession, listPanelSessions, loadPanelSession } from "../storage/panel-sessions.js";
+import { createPanelSession, deletePanelSession, loadPanelSession, scanPanelSessions } from "../storage/panel-sessions.js";
 import { loadReadonlyMetadata, updateReadonlyMetadata, type ReadonlySourceIdentity } from "../storage/readonly-metadata.js";
 import { updatePanelMetadata } from "../storage/panel-sessions.js";
 import { currentTranscriptBranch } from "../domain/branch.js";
@@ -127,11 +127,10 @@ export class SessionReadData {
 
   private async panelRecords(agentId: string): Promise<ConversationRecord[]> {
     const result: ConversationRecord[] = [];
-    for (const metadata of await listPanelSessions(this.dataRoot, agentId)) {
-      const loaded = await loadPanelSession(this.dataRoot, agentId, metadata.recordId);
-      const path = assertWithin(this.dataRoot, join(this.dataRoot, "sessions", agentId, metadata.recordId, "transcript.jsonl")); const stat = await lstat(path);
+    for (const loaded of await scanPanelSessions(this.dataRoot, agentId)) {
+      const metadata = loaded.metadata;
       result.push({ recordId: metadata.recordId, agentId, sourceKind: "panel", sourceKey: metadata.recordId,
-        revision: `${stat.size}:${stat.mtimeMs}`, updatedAt: stat.mtime.toISOString(), messageCount: loaded.document.entries.filter(entry => entry.type === "message").length,
+        revision: loaded.revision, updatedAt: loaded.updatedAt, messageCount: loaded.document.entries.filter(entry => entry.type === "message").length,
         title: metadata.title ?? documentTitle(loaded.document), archived: metadata.archived ?? false, hidden: metadata.hidden ?? false,
         pinned: metadata.pinned ?? false, memoryDisposition: metadata.memoryDisposition ?? "scratch",
         ...(metadata.project ? { project: metadata.project } : {}) });

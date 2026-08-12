@@ -4,7 +4,7 @@ import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { SessionReadData } from "../src/server/read-data.js";
 import { ConservativeContextBudget } from "../src/domain/context-budget.js";
-import { commitPanelTranscript, loadPanelSession, updatePanelMetadata } from "../src/storage/panel-sessions.js";
+import { commitPanelTranscript, createPanelSession, loadPanelSession, updatePanelMetadata } from "../src/storage/panel-sessions.js";
 import { tempFixture } from "./test-helpers.js";
 
 const header = { type: "session", version: 3, id: "11111111-1111-4111-8111-111111111111", timestamp: "2026-07-11T00:00:00Z", cwd: "/private/workspace", unknownSecret: "must-not-leak" };
@@ -152,4 +152,18 @@ test("sessions 根目录本身是符号链接时拒绝读取", async t => {
   await mkdir(actual); await mkdir(data); await symlink(actual, link);
   const reads = new SessionReadData([{ agentId: "fixture", sessionsRoot: link }], data);
   await assert.rejects(reads.sessions(), /根目录不安全/);
+});
+
+test("单条残缺 panel 记录不会拖垮健康会话的列表、读取或搜索", async t => {
+  const root = await tempFixture(t, "panel-read-quarantine-"), sessions = join(root, "source"), data = join(root, "data");
+  await mkdir(sessions); await mkdir(data);
+  const healthy = await createPanelSession(data, "fixture", { header: { type: "session", version: 3, id: "healthy" }, entries: [
+    { type: "message", id: "u", parentId: null, message: { role: "user", content: "healthy searchable needle" } }
+  ] }, { recordId: "healthy" });
+  const broken = join(data, "sessions", "fixture", "broken"); await mkdir(broken, { mode: 0o700 });
+  await writeFile(join(broken, "metadata.json"), "{private broken body", { mode: 0o600 });
+  const reads = new SessionReadData([{ agentId: "fixture", sessionsRoot: sessions }], data);
+  assert.deepEqual((await reads.sessions("fixture")).map(item => item.recordId), [healthy.recordId]);
+  assert.equal((await reads.conversation(healthy.recordId) as { recordId: string }).recordId, healthy.recordId);
+  assert.deepEqual((await reads.search("searchable", "fixture") as Array<{ recordId: string }>).map(item => item.recordId), [healthy.recordId]);
 });

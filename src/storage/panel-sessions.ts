@@ -1,5 +1,7 @@
-import { mkdir, open, readdir, readFile, lstat, unlink, rmdir } from "node:fs/promises";
-import { join } from "node:path";
+import { createHash, randomUUID } from "node:crypto";
+import { constants, type Stats } from "node:fs";
+import { mkdir, open, readdir, lstat, unlink, rmdir, rename } from "node:fs/promises";
+import { join, resolve } from "node:path";
 import { newPanelRecordId } from "../domain/record-id.js";
 import { parseTranscript, serializeTranscript, type TranscriptDocument } from "../domain/transcript.js";
 import { assertWithin, atomicWrite } from "./atomic.js";
@@ -14,6 +16,90 @@ export interface PanelMetadata {
 }
 
 const metadataUpdates = new Map<string, Promise<void>>();
+const sessionCreates = new Map<string, Promise<void>>();
+const STAGING_PREFIX = ".panel-session-staging-";
+
+export type PanelSessionPublishStep = "metadata-write" | "metadata-sync" | "transcript-write" | "transcript-sync" |
+  "staging-directory-sync" | "publish-rename" | "published-directory-sync";
+export interface PanelSessionPublishOptions { beforeStep?: (step: PanelSessionPublishStep) => void | Promise<void> }
+
+export type PanelSessionDiagnosticReason = "STAGING_DIRECTORY" | "ENTRY_UNSAFE" | "METADATA_MISSING" | "METADATA_UNSAFE" |
+  "METADATA_INVALID_JSON" | "METADATA_INVALID" | "TRANSCRIPT_MISSING" | "TRANSCRIPT_UNSAFE" | "TRANSCRIPT_INVALID";
+export interface PanelSessionDiagnostic {
+  event: "panel_session_record_skipped"; agentId: string; entryKey: string; reason: PanelSessionDiagnosticReason;
+}
+export type PanelSessionDiagnosticSink = (event: PanelSessionDiagnostic) => void;
+
+export interface ScannedPanelSession {
+  metadata: PanelMetadata; document: TranscriptDocument; revision: string; updatedAt: string;
+}
+
+class PanelSessionScanError extends Error {
+  constructor(readonly reason: PanelSessionDiagnosticReason) { super(reason); }
+}
+
+function opaqueComponent(value: string, label: string): string {
+  if (!value || value.length > 200 || value === "." || value === ".." || value.startsWith(STAGING_PREFIX) || /[\u0000-\u001f\u007f/\\]/.test(value)) throw new Error(`${label} 格式无效`);
+  return value;
+}
+
+function entryKey(name: string): string {
+  return createHash("sha256").update(name, "utf8").digest("hex").slice(0, 16);
+}
+
+function defaultDiagnostic(event: PanelSessionDiagnostic): void {
+  process.stderr.write(`${JSON.stringify(event)}\n`);
+}
+
+function diagnostic(sink: PanelSessionDiagnosticSink, agentId: string, name: string, reason: PanelSessionDiagnosticReason): void {
+  try { sink({ event: "panel_session_record_skipped", agentId, entryKey: entryKey(name), reason }); }
+  catch { /* Diagnostics must never hide otherwise healthy sessions. */ }
+}
+
+function isMissing(error: unknown): boolean { return (error as NodeJS.ErrnoException).code === "ENOENT"; }
+
+function assertPrivateDirectory(stat: Stats, label: string): void {
+  if (!stat.isDirectory() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0) throw new Error(`${label}目录不安全`);
+}
+
+async function syncDirectory(path: string): Promise<void> {
+  const directory = await open(path, "r");
+  try { await directory.sync(); } finally { await directory.close(); }
+}
+
+async function ensurePrivateChild(parent: string, path: string, label: string): Promise<void> {
+  let created = false;
+  try { await mkdir(path, { mode: 0o700 }); created = true; }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
+  assertPrivateDirectory(await lstat(path), label);
+  if (created) await syncDirectory(parent);
+}
+
+async function prepareAgentRoot(dataRoot: string, agentId: string): Promise<string> {
+  opaqueComponent(agentId, "agentId"); const root = resolve(dataRoot);
+  const rootStat = await lstat(root); if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) throw new Error("panel data 根目录不安全");
+  const sessionsRoot = assertWithin(root, join(root, "sessions")); await ensurePrivateChild(root, sessionsRoot, "panel sessions");
+  const agentRoot = assertWithin(sessionsRoot, join(sessionsRoot, agentId)); await ensurePrivateChild(sessionsRoot, agentRoot, "panel agent");
+  return agentRoot;
+}
+
+async function existingAgentRoot(dataRoot: string, agentId: string): Promise<string | undefined> {
+  opaqueComponent(agentId, "agentId"); const root = resolve(dataRoot), sessionsRoot = assertWithin(root, join(root, "sessions"));
+  try {
+    const rootStat = await lstat(root); if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) throw new Error("panel data 根目录不安全");
+    assertPrivateDirectory(await lstat(sessionsRoot), "panel sessions");
+    const agentRoot = assertWithin(sessionsRoot, join(sessionsRoot, agentId)); assertPrivateDirectory(await lstat(agentRoot), "panel agent");
+    return agentRoot;
+  } catch (error) { if (isMissing(error)) return undefined; throw error; }
+}
+
+async function serializedCreate<T>(key: string, operation: () => Promise<T>): Promise<T> {
+  const previous = sessionCreates.get(key) ?? Promise.resolve(); let release!: () => void;
+  const current = new Promise<void>(resolve => { release = resolve; }), queued = previous.then(() => current);
+  sessionCreates.set(key, queued); await previous;
+  try { return await operation(); }
+  finally { release(); if (sessionCreates.get(key) === queued) sessionCreates.delete(key); }
+}
 
 function validateMetadata(value: unknown, agentId: string, recordId: string): PanelMetadata {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("panel metadata 格式无效");
@@ -31,49 +117,104 @@ function validateMetadata(value: unknown, agentId: string, recordId: string): Pa
   return { archived: false, hidden: false, memoryDisposition: "scratch", ...metadata } as PanelMetadata;
 }
 
-async function readRegular(path: string): Promise<string> {
-  const stat = await lstat(path);
-  if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("panel 会话文件不安全");
-  return await readFile(path, "utf8");
+async function readRegular(path: string): Promise<{ text: string; stat: Stats }> {
+  const candidate = await lstat(path);
+  if (!candidate.isFile() || candidate.isSymbolicLink() || candidate.nlink !== 1 || (candidate.mode & 0o077) !== 0) throw new Error("panel 会话文件不安全");
+  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const before = await handle.stat();
+    if (!before.isFile() || before.dev !== candidate.dev || before.ino !== candidate.ino || before.nlink !== 1 || (before.mode & 0o077) !== 0) throw new Error("panel 会话文件不安全");
+    const bytes = await handle.readFile(), after = await handle.stat();
+    if (after.dev !== before.dev || after.ino !== before.ino || after.size !== before.size || after.mtimeMs !== before.mtimeMs || after.nlink !== 1 || bytes.length !== before.size) throw new Error("panel 会话文件读取期间发生变化");
+    return { text: bytes.toString("utf8"), stat: after };
+  } finally { await handle.close(); }
+}
+
+async function scanRecord(directory: string, agentId: string, recordId: string): Promise<ScannedPanelSession> {
+  let metadataText: string;
+  try { metadataText = (await readRegular(join(directory, "metadata.json"))).text; }
+  catch (error) { throw new PanelSessionScanError(isMissing(error) ? "METADATA_MISSING" : "METADATA_UNSAFE"); }
+  let rawMetadata: unknown;
+  try { rawMetadata = JSON.parse(metadataText); }
+  catch { throw new PanelSessionScanError("METADATA_INVALID_JSON"); }
+  let metadata: PanelMetadata;
+  try { metadata = validateMetadata(rawMetadata, agentId, recordId); }
+  catch { throw new PanelSessionScanError("METADATA_INVALID"); }
+  let transcript: { text: string; stat: Stats };
+  try { transcript = await readRegular(join(directory, "transcript.jsonl")); }
+  catch (error) { throw new PanelSessionScanError(isMissing(error) ? "TRANSCRIPT_MISSING" : "TRANSCRIPT_UNSAFE"); }
+  let document: TranscriptDocument;
+  try { document = parseTranscript(transcript.text); }
+  catch { throw new PanelSessionScanError("TRANSCRIPT_INVALID"); }
+  return { metadata, document, revision: `${transcript.stat.size}:${transcript.stat.mtimeMs}`, updatedAt: transcript.stat.mtime.toISOString() };
 }
 
 export async function createPanelSession(dataRoot: string, agentId: string, document: TranscriptDocument,
-  source?: { parentRecordId?: string; forkedFromMessageId?: string; recordId?: string; createdAt?: string; title?: string; project?: string }): Promise<PanelMetadata> {
+  source?: { parentRecordId?: string; forkedFromMessageId?: string; recordId?: string; createdAt?: string; title?: string; project?: string },
+  options: PanelSessionPublishOptions = {}): Promise<PanelMetadata> {
   const recordId = source?.recordId ?? newPanelRecordId(); const createdAt = source?.createdAt ?? new Date().toISOString();
-  const metadata: PanelMetadata = { version: 1, recordId, agentId, createdAt,
+  opaqueComponent(agentId, "agentId"); opaqueComponent(recordId, "recordId");
+  const metadata = validateMetadata({ version: 1, recordId, agentId, createdAt,
     archived: false, hidden: false, memoryDisposition: "scratch", ...(source?.title ? { title: source.title } : {}), ...(source?.project ? { project: source.project } : {}),
-    ...(source?.parentRecordId && source.forkedFromMessageId ? { parentRecordId: source.parentRecordId, forkedFromMessageId: source.forkedFromMessageId } : {}) };
-  const directory = assertWithin(dataRoot, join(dataRoot, "sessions", agentId, recordId));
-  await mkdir(directory, { recursive: true, mode: 0o700 });
-  const metadataHandle = await open(join(directory, "metadata.json"), "wx", 0o600);
-  try { await metadataHandle.writeFile(JSON.stringify(metadata, null, 2) + "\n"); await metadataHandle.sync(); }
-  finally { await metadataHandle.close(); }
-  const transcriptHandle = await open(join(directory, "transcript.jsonl"), "wx", 0o600);
-  try { await transcriptHandle.writeFile(serializeTranscript(document)); await transcriptHandle.sync(); }
-  finally { await transcriptHandle.close(); }
-  return metadata;
+    ...(source?.parentRecordId && source.forkedFromMessageId ? { parentRecordId: source.parentRecordId, forkedFromMessageId: source.forkedFromMessageId } : {}) }, agentId, recordId);
+  const key = `${resolve(dataRoot)}\0${agentId}\0${recordId}`;
+  return await serializedCreate(key, async () => {
+    const agentRoot = await prepareAgentRoot(dataRoot, agentId), directory = assertWithin(agentRoot, join(agentRoot, recordId));
+    try { await lstat(directory); throw new Error("PANEL_SESSION_EXISTS"); }
+    catch (error) { if (!isMissing(error)) throw error; }
+    const staging = assertWithin(agentRoot, join(agentRoot, `${STAGING_PREFIX}${randomUUID()}`));
+    await mkdir(staging, { mode: 0o700 }); assertPrivateDirectory(await lstat(staging), "panel staging");
+    const write = async (name: string, data: string, writeStep: PanelSessionPublishStep, syncStep: PanelSessionPublishStep) => {
+      const handle = await open(join(staging, name), "wx", 0o600);
+      try {
+        await options.beforeStep?.(writeStep); await handle.writeFile(data, "utf8");
+        await options.beforeStep?.(syncStep); await handle.sync();
+      } finally { await handle.close(); }
+    };
+    await write("metadata.json", JSON.stringify(metadata, null, 2) + "\n", "metadata-write", "metadata-sync");
+    await write("transcript.jsonl", serializeTranscript(document), "transcript-write", "transcript-sync");
+    await options.beforeStep?.("staging-directory-sync"); await syncDirectory(staging);
+    try { await lstat(directory); throw new Error("PANEL_SESSION_EXISTS"); }
+    catch (error) { if (!isMissing(error)) throw error; }
+    await options.beforeStep?.("publish-rename"); await rename(staging, directory);
+    try { await options.beforeStep?.("published-directory-sync"); await syncDirectory(agentRoot); }
+    catch (error) {
+      try { await rename(directory, staging); await syncDirectory(agentRoot); }
+      catch (rollbackError) { throw new AggregateError([error, rollbackError], "PANEL_SESSION_PUBLISH_DURABILITY_UNCERTAIN"); }
+      throw error;
+    }
+    return metadata;
+  });
 }
 
-export async function listPanelSessions(dataRoot: string, agentId: string): Promise<PanelMetadata[]> {
-  const root = assertWithin(dataRoot, join(dataRoot, "sessions", agentId));
-  try {
-    const records: PanelMetadata[] = [];
-    for (const name of await readdir(root)) {
-      const directory = assertWithin(root, join(root, name)); const stat = await lstat(directory);
-      if (!stat.isDirectory() || stat.isSymbolicLink()) continue;
-      const metadata = validateMetadata(JSON.parse(await readRegular(join(directory, "metadata.json"))), agentId, name);
-      parseTranscript(await readRegular(join(directory, "transcript.jsonl")));
-      records.push(metadata);
-    }
-    return records.sort((a, b) => a.recordId.localeCompare(b.recordId));
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
-    throw error;
+export async function scanPanelSessions(dataRoot: string, agentId: string,
+  onDiagnostic: PanelSessionDiagnosticSink = defaultDiagnostic): Promise<ScannedPanelSession[]> {
+  const root = await existingAgentRoot(dataRoot, agentId); if (!root) return [];
+  const records: ScannedPanelSession[] = [];
+  for (const name of (await readdir(root)).sort()) {
+    if (name.startsWith(STAGING_PREFIX)) { diagnostic(onDiagnostic, agentId, name, "STAGING_DIRECTORY"); continue; }
+    try { opaqueComponent(name, "recordId"); }
+    catch { diagnostic(onDiagnostic, agentId, name, "ENTRY_UNSAFE"); continue; }
+    const directory = assertWithin(root, join(root, name));
+    let stat: Stats;
+    try { stat = await lstat(directory); }
+    catch { diagnostic(onDiagnostic, agentId, name, "ENTRY_UNSAFE"); continue; }
+    if (!stat.isDirectory() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0) { diagnostic(onDiagnostic, agentId, name, "ENTRY_UNSAFE"); continue; }
+    try { records.push(await scanRecord(directory, agentId, name)); }
+    catch (error) { diagnostic(onDiagnostic, agentId, name, error instanceof PanelSessionScanError ? error.reason : "ENTRY_UNSAFE"); }
   }
+  return records.sort((a, b) => a.metadata.recordId.localeCompare(b.metadata.recordId));
+}
+
+export async function listPanelSessions(dataRoot: string, agentId: string,
+  onDiagnostic: PanelSessionDiagnosticSink = defaultDiagnostic): Promise<PanelMetadata[]> {
+  return (await scanPanelSessions(dataRoot, agentId, onDiagnostic)).map(record => record.metadata);
 }
 
 export async function commitPanelTranscript(dataRoot: string, metadata: PanelMetadata, document: TranscriptDocument): Promise<void> {
-  const path = assertWithin(dataRoot, join(dataRoot, "sessions", metadata.agentId, metadata.recordId, "transcript.jsonl"));
+  const directory = await publishedRecordDirectory(dataRoot, metadata.agentId, metadata.recordId);
+  await readRegular(join(directory, "transcript.jsonl"));
+  const path = assertWithin(directory, join(directory, "transcript.jsonl"));
   await atomicWrite(path, serializeTranscript(document));
 }
 
@@ -83,8 +224,8 @@ export async function updatePanelMetadata(dataRoot: string, agentId: string, rec
   let release!: () => void; const current = new Promise<void>(resolve => { release = resolve; });
   const queued = previous.then(() => current); metadataUpdates.set(key, queued); await previous;
   try {
-    const path = assertWithin(dataRoot, join(dataRoot, "sessions", agentId, recordId, "metadata.json"));
-    const metadata = validateMetadata(JSON.parse(await readRegular(path)), agentId, recordId);
+    const directory = await publishedRecordDirectory(dataRoot, agentId, recordId), path = assertWithin(directory, join(directory, "metadata.json"));
+    const metadata = validateMetadata(JSON.parse((await readRegular(path)).text), agentId, recordId);
     const next = validateMetadata(update({ ...metadata }), agentId, recordId);
     await atomicWrite(path, JSON.stringify(next, null, 2) + "\n"); return next;
   } finally {
@@ -92,16 +233,20 @@ export async function updatePanelMetadata(dataRoot: string, agentId: string, rec
   }
 }
 
+async function publishedRecordDirectory(dataRoot: string, agentId: string, recordId: string): Promise<string> {
+  opaqueComponent(agentId, "agentId"); opaqueComponent(recordId, "recordId");
+  const agentRoot = await existingAgentRoot(dataRoot, agentId); if (!agentRoot) throw new Error("PANEL_SESSION_NOT_FOUND");
+  const directory = assertWithin(agentRoot, join(agentRoot, recordId)); const stat = await lstat(directory);
+  assertPrivateDirectory(stat, "panel 会话"); return directory;
+}
+
 export async function loadPanelSession(dataRoot: string, agentId: string, recordId: string): Promise<{ metadata: PanelMetadata; document: TranscriptDocument }> {
-  const directory = assertWithin(dataRoot, join(dataRoot, "sessions", agentId, recordId));
-  const stat = await lstat(directory); if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("panel 会话目录不安全");
-  const metadata = validateMetadata(JSON.parse(await readRegular(join(directory, "metadata.json"))), agentId, recordId);
-  return { metadata, document: parseTranscript(await readRegular(join(directory, "transcript.jsonl"))) };
+  const directory = await publishedRecordDirectory(dataRoot, agentId, recordId), scanned = await scanRecord(directory, agentId, recordId);
+  return { metadata: scanned.metadata, document: scanned.document };
 }
 
 export async function deletePanelSession(dataRoot: string, agentId: string, recordId: string): Promise<void> {
-  const directory = assertWithin(dataRoot, join(dataRoot, "sessions", agentId, recordId));
-  const stat = await lstat(directory); if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("panel 会话目录不安全");
+  const directory = await publishedRecordDirectory(dataRoot, agentId, recordId);
   const names = (await readdir(directory)).sort();
   const expected = names.includes("attachments.json") ? ["attachments.json", "metadata.json", "transcript.jsonl"] : ["metadata.json", "transcript.jsonl"];
   if (names.length !== expected.length || names.some((name, index) => name !== expected[index])) throw new Error("PANEL_SESSION_DELETE_UNSAFE");
@@ -109,7 +254,7 @@ export async function deletePanelSession(dataRoot: string, agentId: string, reco
   if (!loaded.metadata.archived) throw new Error("SESSION_NOT_ARCHIVED");
   for (const name of names) {
     const path = assertWithin(directory, join(directory, name)); const file = await lstat(path);
-    if (!file.isFile() || file.isSymbolicLink()) throw new Error("PANEL_SESSION_DELETE_UNSAFE");
+    if (!file.isFile() || file.isSymbolicLink() || file.nlink !== 1) throw new Error("PANEL_SESSION_DELETE_UNSAFE");
   }
   if (names.includes("attachments.json")) await removeSessionAttachmentReferences(dataRoot, agentId, recordId);
   await unlink(join(directory, "transcript.jsonl")); await unlink(join(directory, "metadata.json")); await rmdir(directory);
