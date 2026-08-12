@@ -1,18 +1,19 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
-import { mkdtemp, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 import sharp from "sharp";
 import { createPanelServer } from "../src/server/app.js";
 import { passwordHash } from "../src/server/auth.js";
 import { ExperienceStore, MAX_AVATAR_BYTES } from "../src/server/experience-store.js";
+import { tempFixture } from "./test-helpers.js";
 
-async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), "panel-experience-http-")), publicDir = join(root, "public"), dataRoot = join(root, "data");
+async function fixture(t: import("node:test").TestContext) {
+  const root = await tempFixture(t, "panel-experience-http-"), publicDir = join(root, "public"), dataRoot = join(root, "data");
   await import("node:fs/promises").then(fs => Promise.all([fs.mkdir(publicDir), fs.mkdir(dataRoot)])); await writeFile(join(publicDir, "index.html"), "ok");
   const server = createPanelServer({ auth: { username: "owl", passwordHash: passwordHash("correct", "0011223344556677"), sessionSecret: "test-secret-long-enough" }, publicDir, experience: new ExperienceStore(dataRoot, ["claude"]) });
+  t.after(async () => { if (server.listening) { server.close(); await once(server, "close"); } });
   server.listen(0, "127.0.0.1"); await once(server, "listening"); const address = server.address(); if (!address || typeof address === "string") throw new Error("no address");
   const base = `http://127.0.0.1:${address.port}`;
   const login = await fetch(`${base}/api/v1/auth/login`, { method: "POST", headers: { origin: base, "content-type": "application/json" }, body: JSON.stringify({ username: "owl", password: "correct" }) });
@@ -21,7 +22,7 @@ async function fixture() {
 }
 
 test("settings HTTP 要求登录和 CSRF，并拒绝未知字段", async t => {
-  const x = await fixture(); t.after(() => x.server.close());
+  const x = await fixture(t);
   assert.equal((await fetch(`${x.base}/api/v1/settings`)).status, 401);
   assert.deepEqual((await (await fetch(`${x.base}/api/v1/settings`, { headers: { cookie: x.cookie } })).json()).data, { version: 1, locale: "zh-CN", appearance: { theme: "system", accent: "default" }, conversation: { showStatus: true } });
   const noCsrf = await fetch(`${x.base}/api/v1/settings`, { method: "PATCH", headers: { cookie: x.cookie, origin: x.base, "content-type": "application/json" }, body: JSON.stringify({ appearance: { theme: "dark" } }) }); assert.equal(noCsrf.status, 403);
@@ -34,7 +35,7 @@ test("settings HTTP 要求登录和 CSRF，并拒绝未知字段", async t => {
 });
 
 test("avatar HTTP 校验 allowlist、流式上限、真实格式、缓存与删除", async t => {
-  const x = await fixture(); t.after(() => x.server.close());
+  const x = await fixture(t);
   const image = await sharp({ create: { width: 40, height: 20, channels: 3, background: "#123456" } }).jpeg().toBuffer();
   assert.equal((await fetch(`${x.base}/api/v1/agents/claude/avatar`)).status, 401);
   assert.equal((await fetch(`${x.base}/api/v1/agents/claude/avatar`, { method: "PUT", headers: { cookie: x.cookie, origin: x.base }, body: new Uint8Array(image) })).status, 403);

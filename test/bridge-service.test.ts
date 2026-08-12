@@ -5,10 +5,11 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { BridgeService } from "../src/gateway/bridge-service.js";
 import type { BridgeLifecycleEvent, BridgeMaterializer, CreatedSession, GatewayClient } from "../src/gateway/adapter.js";
+import { deferred, tempFixture, withTimeout } from "./test-helpers.js";
 
-test("bridge 成功和失败都先注销并清理", async () => {
+test("bridge 成功和失败都先注销并清理", async t => {
   for (const fail of [false, true]) {
-    const root = await mkdtemp(join(tmpdir(), "bridge-service-")); const id = "11111111-1111-4111-8111-111111111111";
+    const root = await tempFixture(t, "bridge-service-"); const id = "11111111-1111-4111-8111-111111111111";
     const created: CreatedSession = { sessionId: id, sessionKey: "agent:runtime:key", transcriptPath: join(root, `${id}.jsonl`) };
     await writeFile(join(root, `${id}.jsonl.deleted.fixture`), "x");
     const events: string[] = [];
@@ -100,8 +101,8 @@ test("连续 20 轮 fixture 生成后无 transcript/trajectory artifact 累积",
   assert.deepEqual(await readdir(root),["sessions.json"]);assert.equal(await readFile(join(root,"sessions.json"),"utf8"),"{}");
 });
 
-test("bridge 在发送前把会话 override 以 patch 应用到临时 session", async () => {
-  const root = await mkdtemp(join(tmpdir(), "bridge-overrides-"));
+test("bridge 在发送前把会话 override 以 patch 应用到临时 session", async t => {
+  const root = await tempFixture(t, "bridge-overrides-");
   const id = "22222222-2222-4222-8222-222222222222";
   const created: CreatedSession = { sessionId: id, sessionKey: "agent:runtime:key", transcriptPath: join(root, `${id}.jsonl`) };
   await writeFile(join(root, `${id}.jsonl.deleted.fixture`), "x");
@@ -222,15 +223,19 @@ test("bridge 在 send 后 lifecycle 持久化期间收到 abort 不会漏停 gat
 test("显式停止的 abort RPC 未确认时不谎报成功，也不清理仍可能运行的 session", async t => {
   const root = await mkdtemp(join(tmpdir(), "bridge-abort-unconfirmed-")); t.after(() => rm(root, { recursive: true, force: true }));
   const id = "12121212-1212-4212-8212-121212121212", controller = new AbortController(); let deleted = false, cleanupPending = 0;
+  const watcherStarted = deferred();
   const created: CreatedSession = { sessionId: id, sessionKey: "agent:runtime:uncertain", transcriptPath: join(root, `${id}.jsonl`) };
   const client: GatewayClient = { async version() { return "2026.6.11"; }, async createSession() { return created; }, async send() { return { runId: "run" }; },
-    async waitForCompletion(_session, _run, signal) { await new Promise<void>((resolve, reject) => signal?.addEventListener("abort", () => reject(new Error("BRIDGE_ABORTED")), { once: true })); },
+    async waitForCompletion(_session, _run, signal) {
+      watcherStarted.resolve();
+      await new Promise<void>((resolve, reject) => signal?.addEventListener("abort", () => reject(new Error("BRIDGE_ABORTED")), { once: true }));
+    },
     async abort() { throw new Error("OPENCLAW_CLI_TIMEOUT"); }, async deleteSession() { deleted = true; } };
   const materializer: BridgeMaterializer = { async replaceCreatedTranscript() { return 0; }, async readNewEntries() { return []; }, verifyAndStripSubmittedUser(entries) { return entries; } };
   const service = new BridgeService(client, materializer, new Map([["runtime", root]]));
   const pending = service.generate({ runtimeAgentId: "runtime", historyThroughPreviousRun: { header: { type: "session" }, entries: [] }, latestUserMessage: "x",
     latestUserEntryId: "user", idempotencyKey: "key", signal: controller.signal, cleanupFailed: async () => { cleanupPending++; } });
-  await new Promise(resolve => setTimeout(resolve, 5)); controller.abort();
+  await withTimeout(watcherStarted.promise, "bridge completion watcher to start"); controller.abort();
   await assert.rejects(pending, /RUN_ABORT_UNCONFIRMED/); assert.equal(deleted, false); assert.equal(cleanupPending, 1);
 });
 

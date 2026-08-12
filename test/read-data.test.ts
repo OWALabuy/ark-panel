@@ -1,19 +1,19 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, symlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
 import { SessionReadData } from "../src/server/read-data.js";
 import { ConservativeContextBudget } from "../src/domain/context-budget.js";
 import { commitPanelTranscript, loadPanelSession, updatePanelMetadata } from "../src/storage/panel-sessions.js";
+import { tempFixture } from "./test-helpers.js";
 
 const header = { type: "session", version: 3, id: "11111111-1111-4111-8111-111111111111", timestamp: "2026-07-11T00:00:00Z", cwd: "/private/workspace", unknownSecret: "must-not-leak" };
 const user = { type: "message", id: "u1", parentId: null, timestamp: "2026-07-11T00:00:01Z", message: { role: "user", content: "needle private fixture" } };
 const assistant = { type: "message", id: "a1", parentId: "u1", timestamp: "2026-07-11T00:00:02Z", message: { role: "assistant", content: [{ type: "text", text: "fixture reply" }], stopReason: "stop" } };
 const jsonl = (...entries: object[]) => [header, ...entries].map(value => JSON.stringify(value)).join("\n") + "\n";
 
-test("只读扫描 active/reset/panel，容忍 active 半行并拒绝符号链接来源", async () => {
-  const root = await mkdtemp(join(tmpdir(), "panel-read-")), sessions = join(root, "source"), data = join(root, "data");
+test("只读扫描 active/reset/panel，容忍 active 半行并拒绝符号链接来源", async t => {
+  const root = await tempFixture(t, "panel-read-"), sessions = join(root, "source"), data = join(root, "data");
   await mkdir(sessions); await mkdir(data);
   const activeId = "11111111-1111-4111-8111-111111111111", linkedId = "22222222-2222-4222-8222-222222222222";
   const activePath = join(sessions, `${activeId}.jsonl`); await writeFile(activePath, jsonl(user, assistant) + '{"type":"message"');
@@ -67,8 +67,8 @@ test("只读扫描 active/reset/panel，容忍 active 半行并拒绝符号链�
   assert.equal(await readFile(activePath, "utf8"), before, "派生操作不得写源 transcript");
 });
 
-test("记忆整理从原生会话分支继承有效模型与思考等级", async () => {
-  const root = await mkdtemp(join(tmpdir(), "panel-memory-source-")), sessions = join(root, "source"), data = join(root, "data"); await mkdir(sessions); await mkdir(data);
+test("记忆整理从原生会话分支继承有效模型与思考等级", async t => {
+  const root = await tempFixture(t, "panel-memory-source-"), sessions = join(root, "source"), data = join(root, "data"); await mkdir(sessions); await mkdir(data);
   const model = { type: "model_change", id: "m1", parentId: null, provider: "fixture-provider", modelId: "fixture-model" };
   const thinking = { type: "thinking_level_change", id: "t1", parentId: "m1", thinkingLevel: "high" };
   const linkedUser = { ...user, parentId: "t1" }; await writeFile(join(sessions, `${header.id}.jsonl`), jsonl(model, thinking, linkedUser, assistant));
@@ -77,8 +77,8 @@ test("记忆整理从原生会话分支继承有效模型与思考等级", async
   assert.deepEqual(source?.overrides, { modelOverride: "fixture-provider/fixture-model", thinkingLevel: "high" });
 });
 
-test("面板会话要求显式确认并先归档才可永久删除", async () => {
-  const root = await mkdtemp(join(tmpdir(), "panel-read-delete-")), sessions = join(root, "source"), data = join(root, "data");
+test("面板会话要求显式确认并先归档才可永久删除", async t => {
+  const root = await tempFixture(t, "panel-read-delete-"), sessions = join(root, "source"), data = join(root, "data");
   await mkdir(sessions); await mkdir(data); const reads = new SessionReadData([{ agentId: "fixture", sessionsRoot: sessions }], data);
   const created = await reads.createPanel("fixture") as { recordId: string };
   assert.equal((await reads.conversation(created.recordId) as { memoryDisposition: string }).memoryDisposition, "scratch");
@@ -91,8 +91,8 @@ test("面板会话要求显式确认并先归档才可永久删除", async () =>
   assert.equal(await reads.conversation(created.recordId), null);
 });
 
-test("面板会话状态只把绑定当前 tip 的 OpenClaw fresh 用量作为主上下文", async () => {
-  const root = await mkdtemp(join(tmpdir(), "panel-read-status-")), sessions = join(root, "source"), data = join(root, "data");
+test("面板会话状态只把绑定当前 tip 的 OpenClaw fresh 用量作为主上下文", async t => {
+  const root = await tempFixture(t, "panel-read-status-"), sessions = join(root, "source"), data = join(root, "data");
   await mkdir(sessions); await mkdir(data); const reads = new SessionReadData([{ agentId: "fixture", sessionsRoot: sessions }], data, new ConservativeContextBudget(1_024));
   const created = await reads.createPanel("fixture", "status") as { recordId: string };
   await updatePanelMetadata(data, "fixture", created.recordId, current => ({ ...current, modelOverride: "provider/model", thinkingLevel: "high", reasoningLevel: "stream" }));
@@ -115,8 +115,8 @@ test("面板会话状态只把绑定当前 tip 的 OpenClaw fresh 用量作为�
   assert.equal(((await reads.conversation(created.recordId) as { status: { contextUsage: unknown } }).status.contextUsage), null);
 });
 
-test("conversation DTO 仅返回规范化 current branch 与 compaction 安全字段", async () => {
-  const root=await mkdtemp(join(tmpdir(),"panel-read-compact-")),sessions=join(root,"source"),data=join(root,"data");
+test("conversation DTO 仅返回规范化 current branch 与 compaction 安全字段", async t => {
+  const root=await tempFixture(t, "panel-read-compact-"),sessions=join(root,"source"),data=join(root,"data");
   await mkdir(sessions);await mkdir(data);const reads=new SessionReadData([{agentId:"fixture",sessionsRoot:sessions}],data);
   const created=await reads.createPanel("fixture","compact") as {recordId:string},loaded=await loadPanelSession(data,"fixture",created.recordId);
   const document={...loaded.document,entries:[
@@ -131,8 +131,8 @@ test("conversation DTO 仅返回规范化 current branch 与 compaction 安全�
   assert.doesNotMatch(JSON.stringify(value),/side secret|must not leak/);
 });
 
-test("project 目录汇总正常与归档会话、忽略大小写重复和隐藏来源", async () => {
-  const root = await mkdtemp(join(tmpdir(), "panel-read-projects-")), sessions = join(root, "source"), data = join(root, "data");
+test("project 目录汇总正常与归档会话、忽略大小写重复和隐藏来源", async t => {
+  const root = await tempFixture(t, "panel-read-projects-"), sessions = join(root, "source"), data = join(root, "data");
   await mkdir(sessions); await mkdir(data);
   const activeId = "33333333-3333-4333-8333-333333333333";
   await writeFile(join(sessions, `${activeId}.jsonl`), jsonl(user));
@@ -147,8 +147,8 @@ test("project 目录汇总正常与归档会话、忽略大小写重复和隐藏
   assert.deepEqual(await reads.projects("fixture"), ["project alpha"]);
 });
 
-test("sessions 根目录本身是符号链接时拒绝读取", async () => {
-  const root = await mkdtemp(join(tmpdir(), "panel-read-link-")), actual = join(root, "actual"), link = join(root, "link"), data = join(root, "data");
+test("sessions 根目录本身是符号链接时拒绝读取", async t => {
+  const root = await tempFixture(t, "panel-read-link-"), actual = join(root, "actual"), link = join(root, "link"), data = join(root, "data");
   await mkdir(actual); await mkdir(data); await symlink(actual, link);
   const reads = new SessionReadData([{ agentId: "fixture", sessionsRoot: link }], data);
   await assert.rejects(reads.sessions(), /根目录不安全/);

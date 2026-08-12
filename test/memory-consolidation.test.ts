@@ -1,15 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { link, mkdtemp, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
+import { link, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
 import { MemoryConsolidationStore } from "../src/storage/memory-consolidation.js";
+import { tempFixture } from "./test-helpers.js";
 
 const hash = (value: string) => createHash("sha256").update(value, "utf8").digest("hex");
 
-test("候选不触碰 workspace，后续确认原子替换同一会话文件并推进 checkpoint", async () => {
-  const root = await mkdtemp(join(tmpdir(), "panel-memory-state-")), data = join(root, "data"), workspace = join(root, "workspace"); await mkdir(data); await mkdir(workspace);
+test("候选不触碰 workspace，后续确认原子替换同一会话文件并推进 checkpoint", async t => {
+  const root = await tempFixture(t, "panel-memory-state-"), data = join(root, "data"), workspace = join(root, "workspace"); await mkdir(data); await mkdir(workspace);
   const store = new MemoryConsolidationStore(data), candidate = await store.createCandidate({ agentId: "agent", recordId: "record", sourceKind: "panel", sourceRevision: "rev-1", fromEntryId: "u1", throughEntryId: "a2", content: "# Notes\n\n- Safe" });
   assert.equal(await store.checkpoint("record"), undefined); await assert.rejects(readFile(join(workspace, "memory", "anything")), /ENOENT/);
   const ledger = await store.confirm(candidate.batchId, candidate.contentHash, workspace);
@@ -24,8 +24,8 @@ test("候选不触碰 workspace，后续确认原子替换同一会话文件并�
   assert.equal(await store.checkpoint("record"), "a4"); assert.equal((await store.ledgers()).length, 2);
 });
 
-test("确认拒绝 hash 篡改与过期候选，且失败不推进 checkpoint", async () => {
-  const root = await mkdtemp(join(tmpdir(), "panel-memory-stale-")), data = join(root, "data"), workspace = join(root, "workspace"); await mkdir(data); await mkdir(workspace);
+test("确认拒绝 hash 篡改与过期候选，且失败不推进 checkpoint", async t => {
+  const root = await tempFixture(t, "panel-memory-stale-"), data = join(root, "data"), workspace = join(root, "workspace"); await mkdir(data); await mkdir(workspace);
   const store = new MemoryConsolidationStore(data), first = await store.createCandidate({ agentId: "agent", recordId: "record", sourceKind: "active", sourceRevision: "one", fromEntryId: "u1", throughEntryId: "a1", content: "first" });
   const competing = await store.createCandidate({ agentId: "agent", recordId: "record", sourceKind: "active", sourceRevision: "one", fromEntryId: "u1", throughEntryId: "a2", content: "competing" });
   await assert.rejects(store.confirm(first.batchId, "wrong", workspace), /MEMORY_CANDIDATE_HASH_MISMATCH/); assert.equal(await store.checkpoint("record"), undefined);
@@ -33,8 +33,8 @@ test("确认拒绝 hash 篡改与过期候选，且失败不推进 checkpoint", 
   assert.equal(await store.checkpoint("record"), "a1");
 });
 
-test("滚动文件已替换但 state 尚未推进时，重复确认完成崩溃恢复", async () => {
-  const root = await mkdtemp(join(tmpdir(), "panel-memory-recover-")), data = join(root, "data"), workspace = join(root, "workspace"); await mkdir(data); await mkdir(workspace);
+test("滚动文件已替换但 state 尚未推进时，重复确认完成崩溃恢复", async t => {
+  const root = await tempFixture(t, "panel-memory-recover-"), data = join(root, "data"), workspace = join(root, "workspace"); await mkdir(data); await mkdir(workspace);
   const store = new MemoryConsolidationStore(data), first = await store.createCandidate({ agentId: "agent", recordId: "record", sourceKind: "panel", sourceRevision: "one", fromEntryId: "u1", throughEntryId: "a1", content: "first" });
   const firstLedger = await store.confirm(first.batchId, first.contentHash, workspace), context = await store.context("record", workspace);
   const second = await store.createCandidate({ agentId: "agent", recordId: "record", sourceKind: "panel", sourceRevision: "two",
@@ -46,8 +46,8 @@ test("滚动文件已替换但 state 尚未推进时，重复确认完成崩溃�
   assert.equal((await store.ledgers()).length, 2);
 });
 
-test("旧版逐 batch 文件作为基线迁移，滚动 state 持久化后安全清理", async () => {
-  const root = await mkdtemp(join(tmpdir(), "panel-memory-migrate-")), data = join(root, "data"), workspace = join(root, "workspace");
+test("旧版逐 batch 文件作为基线迁移，滚动 state 持久化后安全清理", async t => {
+  const root = await tempFixture(t, "panel-memory-migrate-"), data = join(root, "data"), workspace = join(root, "workspace");
   const stateRoot = join(data, "memory", "state"), memoryRoot = join(workspace, "memory"); await mkdir(stateRoot, { recursive: true }); await mkdir(memoryRoot, { recursive: true });
   const recordId = "legacy-record", batchId = "12345678-1234-4123-8123-123456789abc", content = "# Legacy\n\n- Existing";
   const oldPath = "memory/2026-07-22-ark-panel-12345678-1234-4123-8123-123456789abc.md"; await writeFile(join(workspace, oldPath), content + "\n");
@@ -66,8 +66,8 @@ test("旧版逐 batch 文件作为基线迁移，滚动 state 持久化后安全
   assert.equal(migrated.version, 2); assert.equal(migrated.legacyTargets, undefined);
 });
 
-test("滚动文件删除后以最后确认的完整候选恢复，保留 checkpoint 且支持无新增重建", async () => {
-  const root = await mkdtemp(join(tmpdir(), "panel-memory-restore-")), data = join(root, "data"), workspace = join(root, "workspace"); await mkdir(data); await mkdir(workspace);
+test("滚动文件删除后以最后确认的完整候选恢复，保留 checkpoint 且支持无新增重建", async t => {
+  const root = await tempFixture(t, "panel-memory-restore-"), data = join(root, "data"), workspace = join(root, "workspace"); await mkdir(data); await mkdir(workspace);
   const firstStore = new MemoryConsolidationStore(data), first = await firstStore.createCandidate({ agentId: "agent", recordId: "record", sourceKind: "panel", sourceRevision: "one", fromEntryId: "u1", throughEntryId: "a1", content: "# Remembered\n\n- Kept" });
   const ledger = await firstStore.confirm(first.batchId, first.contentHash, workspace); await unlink(join(workspace, ledger.targetPath));
   const store = new MemoryConsolidationStore(data);
@@ -83,8 +83,8 @@ test("滚动文件删除后以最后确认的完整候选恢复，保留 checkpo
   assert.equal(await store.recovery("record", workspace), "none");
 });
 
-test("恢复候选以 state 和缺失目标做 CAS，拒绝生成期间被重新创建的文件", async () => {
-  const root = await mkdtemp(join(tmpdir(), "panel-memory-restore-cas-")), data = join(root, "data"), workspace = join(root, "workspace"); await mkdir(data); await mkdir(workspace);
+test("恢复候选以 state 和缺失目标做 CAS，拒绝生成期间被重新创建的文件", async t => {
+  const root = await tempFixture(t, "panel-memory-restore-cas-"), data = join(root, "data"), workspace = join(root, "workspace"); await mkdir(data); await mkdir(workspace);
   const store = new MemoryConsolidationStore(data), first = await store.createCandidate({ agentId: "agent", recordId: "record", sourceKind: "panel", sourceRevision: "one", fromEntryId: "u1", throughEntryId: "a1", content: "first" });
   const ledger = await store.confirm(first.batchId, first.contentHash, workspace); await unlink(join(workspace, ledger.targetPath));
   const context = await store.context("record", workspace, "restore"), recovery = await store.createCandidate({ agentId: "agent", recordId: "record", sourceKind: "panel", sourceRevision: "two",
@@ -95,8 +95,8 @@ test("恢复候选以 state 和缺失目标做 CAS，拒绝生成期间被重新
   assert.equal(await store.checkpoint("record"), "a1");
 });
 
-test("恢复快照缺失或不安全时只允许完整会话重建", async () => {
-  const root = await mkdtemp(join(tmpdir(), "panel-memory-rebuild-only-")), data = join(root, "data"), workspace = join(root, "workspace"); await mkdir(data); await mkdir(workspace);
+test("恢复快照缺失或不安全时只允许完整会话重建", async t => {
+  const root = await tempFixture(t, "panel-memory-rebuild-only-"), data = join(root, "data"), workspace = join(root, "workspace"); await mkdir(data); await mkdir(workspace);
   const store = new MemoryConsolidationStore(data), first = await store.createCandidate({ agentId: "agent", recordId: "record", sourceKind: "panel", sourceRevision: "one", fromEntryId: "u1", throughEntryId: "a1", content: "first" });
   const ledger = await store.confirm(first.batchId, first.contentHash, workspace); await unlink(join(workspace, ledger.targetPath));
   const candidatePath = join(data, "memory", "candidates", `${first.batchId}.json`), hardlinkPath = join(data, "memory", "candidates", `${first.batchId}.copy`); await link(candidatePath, hardlinkPath);
@@ -106,8 +106,8 @@ test("恢复快照缺失或不安全时只允许完整会话重建", async () =>
   await unlink(hardlinkPath);
 });
 
-test("v1 state 的旧 batch 缺失时可从完整会话重建并迁移到 v2", async () => {
-  const root = await mkdtemp(join(tmpdir(), "panel-memory-v1-rebuild-")), data = join(root, "data"), workspace = join(root, "workspace"), stateRoot = join(data, "memory", "state");
+test("v1 state 的旧 batch 缺失时可从完整会话重建并迁移到 v2", async t => {
+  const root = await tempFixture(t, "panel-memory-v1-rebuild-"), data = join(root, "data"), workspace = join(root, "workspace"), stateRoot = join(data, "memory", "state");
   await mkdir(stateRoot, { recursive: true }); await mkdir(workspace);
   const recordId = "legacy-missing", batchId = "12345678-1234-4123-8123-123456789abc", targetPath = `memory/2026-07-22-ark-panel-${batchId}.md`;
   const ledger = { batchId, agentId: "agent", recordId, sourceKind: "panel", sourceRevision: "rev-1", fromEntryId: "u1", throughEntryId: "a1",

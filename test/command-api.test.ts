@@ -1,13 +1,11 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { mkdtemp } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import test, { type TestContext } from "node:test";
 import { commitPanelTranscript, createPanelSession, loadPanelSession } from "../src/storage/panel-sessions.js";
 import { PANEL_COMMAND_ALLOWLIST_VERSION, PanelCommandApi, transcriptUsage } from "../src/server/command-api.js";
+import { tempFixture } from "./test-helpers.js";
 
-async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), "panel-command-")), agentId = "agent", recordId = "record";
+async function fixture(t: TestContext) {
+  const root = await tempFixture(t, "panel-command-"), agentId = "agent", recordId = "record";
   await createPanelSession(root, agentId, { header: { type: "session", version: 3, id: "fixture" }, entries: [] }, { recordId });
   const created: Array<[string, string | undefined]> = [];
   const api = new PanelCommandApi(root, [agentId], {
@@ -19,8 +17,8 @@ async function fixture() {
   return { root, agentId, recordId, api, created };
 }
 
-test("A 类命令写 metadata 和系统事件，default 清除覆盖项", async () => {
-  const x = await fixture();
+test("A 类命令写 metadata 和系统事件，default 清除覆盖项", async t => {
+  const x = await fixture(t);
   const result = await x.api.dispatch(x.recordId, { command: "/model", args: ["provider/model"] });
   assert.equal(result.allowlistVersion, PANEL_COMMAND_ALLOWLIST_VERSION); assert.equal(result.effect, "updated");
   let loaded = await loadPanelSession(x.root, x.agentId, x.recordId); assert.equal(loaded.metadata.modelOverride, "provider/model");
@@ -31,8 +29,8 @@ test("A 类命令写 metadata 和系统事件，default 清除覆盖项", async 
   assert.equal((await loadPanelSession(x.root, x.agentId, x.recordId)).metadata.reasoningLevel, undefined);
 });
 
-test("命令 allowlist 默认拒绝，模型可用性和参数受校验", async () => {
-  const x = await fixture();
+test("命令 allowlist 默认拒绝，模型可用性和参数受校验", async t => {
+  const x = await fixture(t);
   await assert.rejects(x.api.dispatch(x.recordId, { command: "/bash", args: ["id"] }), /COMMAND_NOT_ALLOWED/);
   await assert.rejects(x.api.dispatch(x.recordId, { command: "/model", args: ["missing\/model"] }), /MODEL_NOT_AVAILABLE/);
   await assert.rejects(x.api.dispatch(x.recordId, { command: "/reasoning", args: ["verbose"] }), /REASONING_LEVEL_INVALID/);
@@ -40,8 +38,8 @@ test("命令 allowlist 默认拒绝，模型可用性和参数受校验", async 
   assert.equal((await loadPanelSession(x.root, x.agentId, x.recordId)).metadata.modelOverride, "provider/model");
 });
 
-test("思考档在派发时通过真实 override provider 校验，切模型会复核已存档位", async () => {
-  const x = await fixture(); const seen: unknown[] = [];
+test("思考档在派发时通过真实 override provider 校验，切模型会复核已存档位", async t => {
+  const x = await fixture(t); const seen: unknown[] = [];
   const api = new PanelCommandApi(x.root, [x.agentId], {
     async models() { return [{ key: "provider/model", available: true }, { key: "provider/other", available: true }]; },
     async commands() { return []; }, async status() { return {}; }, async createPanel() { return {}; },
@@ -54,8 +52,8 @@ test("思考档在派发时通过真实 override provider 校验，切模型会�
   assert.equal((await loadPanelSession(x.root, x.agentId, x.recordId)).metadata.modelOverride, "provider/model");
 });
 
-test("C 类命令只读，new 复用面板会话创建能力", async () => {
-  const x = await fixture();
+test("C 类命令只读，new 复用面板会话创建能力", async t => {
+  const x = await fixture(t);
   assert.deepEqual((await x.api.dispatch(x.recordId, { command: "status", args: [] })).data, { ok: true });
   assert.deepEqual((await x.api.dispatch(x.recordId, { command: "commands", args: [] })).data, { commands: [
     { name: "think", supported: true }, { name: "dynamic-skill", source: "skill", supported: false }
@@ -82,8 +80,8 @@ test("usage 只汇总当前分支中模型实际上报的 token，并公开覆�
     tokens: { input: 18, output: 6, cacheRead: 3, cacheWrite: 0, reasoning: 1, reportedTotal: 17 } });
 });
 
-test("compact 走独立结构化 provider 并透传 revision，不进入普通命令队列", async () => {
-  const x = await fixture(); const seen: unknown[] = [];
+test("compact 走独立结构化 provider 并透传 revision，不进入普通命令队列", async t => {
+  const x = await fixture(t); const seen: unknown[] = [];
   const api = new PanelCommandApi(x.root, [x.agentId], {
     async models() { return []; }, async commands() { return []; }, async status() { return {}; }, async createPanel() { return {}; },
     async compact(recordId, revision) { seen.push({ recordId, revision }); return { compacted: true, revision: "next" }; }
@@ -94,8 +92,8 @@ test("compact 走独立结构化 provider 并透传 revision，不进入普通�
   await assert.rejects(api.dispatch(x.recordId, { command: "compact", args: ["unsafe"] }), /COMMAND_ARGS_INVALID/);
 });
 
-test("设置事件从 compaction active leaf 续接而不是文件末尾 side entry", async () => {
-  const x = await fixture(), loaded = await loadPanelSession(x.root, x.agentId, x.recordId);
+test("设置事件从 compaction active leaf 续接而不是文件末尾 side entry", async t => {
+  const x = await fixture(t), loaded = await loadPanelSession(x.root, x.agentId, x.recordId);
   await commitPanelTranscript(x.root, loaded.metadata, { header: loaded.document.header, entries: [
     { type: "message", id: "u1", parentId: null, message: { role: "user" } },
     { type: "compaction", id: "c1", parentId: "u1", summary: "summary", firstKeptEntryId: "u1", tokensBefore: 10 },

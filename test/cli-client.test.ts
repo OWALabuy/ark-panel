@@ -1,9 +1,9 @@
-import test from "node:test";
+import test, { type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { appendFile, mkdtemp, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { completedRunStatus, GatewayRunError, OpenClawCliClient, parseSessionContextUsage, trajectoryRunState } from "../src/gateway/cli-client.js";
+import { deferred, tempFixture } from "./test-helpers.js";
 
 test("从 trajectory 中按 runId 识别 session.ended", () => {
   const lines = [
@@ -28,39 +28,50 @@ test("保留 terminal 的安全诊断字段并区分上游 timeout/interrupt", a
   assert.equal(interrupted.terminalStatus, "interrupted");
 });
 
-async function clientFixture(abortResponses: Array<Record<string, unknown>> = []) {
-  const root = await mkdtemp(join(tmpdir(), "panel-cli-")), sessionId = "11111111-1111-4111-8111-111111111111";
+interface ClientFixtureOptions {
+  abortResponses?: Array<Record<string, unknown>>;
+  onAbort?: (context: { call: number; root: string; sessionId: string }) => Promise<void>;
+}
+
+async function clientFixture(t: TestContext, options: ClientFixtureOptions = {}) {
+  const root = await tempFixture(t, "panel-cli-"), sessionId = "11111111-1111-4111-8111-111111111111";
   let sentParams: Record<string, unknown> | undefined, abortCalls = 0;
   const client = new OpenClawCliClient({ sessionsRoots: new Map([["runtime", root]]), gatewayRunTimeoutMs: 30, watcherGraceMs: 80, pollIntervalMs: 5,
     commandRunner: async (_executable, args) => {
       const method = args[2], params = JSON.parse(args.at(-1) ?? "{}") as Record<string, unknown>;
       if (method === "sessions.create") return JSON.stringify({ key: `agent:runtime:${String(params.key)}`, sessionId });
       if (method === "sessions.send") { sentParams = params; return JSON.stringify({ runId: "run" }); }
-      if (method === "sessions.abort") return JSON.stringify(abortResponses[Math.min(abortCalls++, abortResponses.length - 1)] ?? { ok: true, status: "no-active-run", abortedRunId: null });
+      if (method === "sessions.abort") {
+        const call = abortCalls++; await options.onAbort?.({ call, root, sessionId });
+        const responses = options.abortResponses ?? [];
+        return JSON.stringify(responses[Math.min(call, responses.length - 1)] ?? { ok: true, status: "no-active-run", abortedRunId: null });
+      }
       return "{}";
     } });
   const created = await client.createSession("runtime");
   return { client, root, created, sessionId, sentParams: () => sentParams, abortCalls: () => abortCalls };
 }
 
-test("gateway timeout 与 watcher grace 分离，并在 grace 内接住 terminal", async () => {
-  const x = await clientFixture(); await x.client.send(x.created.sessionKey, "hello", "key");
+test("gateway timeout 与 watcher grace 分离，并在 grace 内接住 terminal", async t => {
+  const x = await clientFixture(t); await x.client.send(x.created.sessionKey, "hello", "key");
   assert.equal(x.sentParams()?.timeoutMs, 30);
   const waiting = x.client.waitForCompletion(x.sessionId, "run");
-  setTimeout(() => void writeFile(join(x.root, `${x.sessionId}.trajectory.jsonl`), `${JSON.stringify({ type: "session.ended", runId: "run", data: { status: "success" } })}\n`), 45);
-  await waiting;
+  const terminalWritten = deferred();
+  // The 45 ms timer is intentional: this assertion requires terminal visibility after the 30 ms gateway timeout but within the 80 ms watcher grace.
+  const terminalTimer = setTimeout(() => void writeFile(join(x.root, `${x.sessionId}.trajectory.jsonl`), `${JSON.stringify({ type: "session.ended", runId: "run", data: { status: "success" } })}\n`).then(() => terminalWritten.resolve(), terminalWritten.reject), 45);
+  t.after(() => clearTimeout(terminalTimer));
+  await Promise.all([waiting, terminalWritten.promise]);
 });
 
-test("send 原样透传结构化附件，包括 Office 文件", async () => {
-  const x = await clientFixture();
+test("send 原样透传结构化附件，包括 Office 文件", async t => {
+  const x = await clientFixture(t);
   const attachments = [{ fileName: "预算.xlsx", mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", content: "UEsDBA==" }];
   await x.client.send(x.created.sessionKey, "请查看附件", "key", attachments);
   assert.deepEqual(x.sentParams()?.attachments, attachments);
 });
 
 test("生成控制 RPC 复用持久 transport，create 直接采用返回的 sessionId", async t => {
-  const root = await mkdtemp(join(tmpdir(), "panel-persistent-rpc-"));
-  t.after(() => import("node:fs/promises").then(fs => fs.rm(root, { recursive: true, force: true })));
+  const root = await tempFixture(t, "panel-persistent-rpc-");
   const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
   const sessionId = "22222222-2222-4222-8222-222222222222";
   const client = new OpenClawCliClient({ sessionsRoots: new Map([["runtime", root]]), commandRunner: async () => {
@@ -80,7 +91,7 @@ test("生成控制 RPC 复用持久 transport，create 直接采用返回的 ses
   assert.match(String(calls[0]?.params.label), /^panel bridge [0-9a-f]{8}$/);
 });
 
-test("sessions.list 只采用目标会话的 OpenClaw fresh 上下文用量", async () => {
+test("sessions.list 只采用目标会话的 OpenClaw fresh 上下文用量", async t => {
   const key = "agent:runtime:panel-fixture";
   assert.deepEqual(parseSessionContextUsage({ sessions: [
     { key: "agent:runtime:other", totalTokens: 999, totalTokensFresh: true, contextTokens: 1_000 },
@@ -90,7 +101,7 @@ test("sessions.list 只采用目标会话的 OpenClaw fresh 上下文用量", as
     { key, totalTokens: 12_345, totalTokensFresh: false, contextTokens: 200_000 }
   ] }, key), { source: "openclaw-session", totalTokens: null, contextTokens: 200_000, totalTokensFresh: false });
 
-  const root = await mkdtemp(join(tmpdir(), "panel-session-usage-"));
+  const root = await tempFixture(t, "panel-session-usage-");
   let observed: { method: string; params: unknown } | undefined;
   const client = new OpenClawCliClient({ sessionsRoots: new Map([["runtime", root]]), rpc: { async request(method, params) {
     observed = { method, params }; return { sessions: [{ key, totalTokens: 7, totalTokensFresh: true, contextTokens: 100 }] };
@@ -100,8 +111,8 @@ test("sessions.list 只采用目标会话的 OpenClaw fresh 上下文用量", as
   await assert.rejects(client.sessionContextUsage("other", key), /RUNTIME_NOT_CONFIGURED/);
 });
 
-test("compact 仅调用 sessions.compact typed RPC 并拒绝异步 pending", async () => {
-  const root = await mkdtemp(join(tmpdir(), "panel-cli-compact-")), calls: string[] = [];
+test("compact 仅调用 sessions.compact typed RPC 并拒绝异步 pending", async t => {
+  const root = await tempFixture(t, "panel-cli-compact-"), calls: string[] = [];
   let pending = false, timeout: number | undefined;
   const successor = "33333333-3333-4333-8333-333333333333", successorPath = join(root, `${successor}.jsonl`);
   const client = new OpenClawCliClient({ sessionsRoots: new Map([["runtime", root]]), gatewayRunTimeoutMs: 54_321, rpc: { async request(method, _params, timeoutMs) {
@@ -116,8 +127,8 @@ test("compact 仅调用 sessions.compact typed RPC 并拒绝异步 pending", asy
   assert.deepEqual(calls, ["sessions.compact", "sessions.compact"]);
 });
 
-test("configuredTools 调用已配置 runtime 的 tools.catalog", async () => {
-  const root = await mkdtemp(join(tmpdir(), "panel-cli-tools-"));
+test("configuredTools 调用已配置 runtime 的 tools.catalog", async t => {
+  const root = await tempFixture(t, "panel-cli-tools-");
   let observed: { method: string; params: Record<string, unknown> } | undefined;
   const client = new OpenClawCliClient({ sessionsRoots: new Map([["runtime", root]]), commandRunner: async (_executable, args) => {
     const method = String(args[2]), params = JSON.parse(args.at(-1) ?? "{}") as Record<string, unknown>;
@@ -132,8 +143,8 @@ test("configuredTools 调用已配置 runtime 的 tools.catalog", async () => {
   await assert.rejects(client.configuredTools("other"), /RUNTIME_NOT_CONFIGURED/);
 });
 
-test("effectiveTools 读取临时 session 经 policy 过滤后的实际工具", async () => {
-  const root = await mkdtemp(join(tmpdir(), "panel-cli-effective-tools-")); let observed: { method: string; params: Record<string, unknown> } | undefined;
+test("effectiveTools 读取临时 session 经 policy 过滤后的实际工具", async t => {
+  const root = await tempFixture(t, "panel-cli-effective-tools-"); let observed: { method: string; params: Record<string, unknown> } | undefined;
   const client = new OpenClawCliClient({ sessionsRoots: new Map([["runtime", root]]), commandRunner: async (_executable, args) => {
     const method = String(args[2]), params = JSON.parse(args.at(-1) ?? "{}") as Record<string, unknown>; observed = { method, params };
     return JSON.stringify({ agentId: "runtime", groups: [{ id: "core", tools: [{ id: "memory_search" }, { id: "memory_get" }] }] });
@@ -160,7 +171,7 @@ test("记忆索引刷新仅接受 allowlist agent，并以结构化 CLI 参数�
 });
 
 test("按本轮 runId 采集 OpenClaw 明确登记的内联 artifact", async t => {
-  const root = await mkdtemp(join(tmpdir(), "panel-cli-artifact-")); t.after(() => import("node:fs/promises").then(fs => fs.rm(root, { recursive: true, force: true })));
+  const root = await tempFixture(t, "panel-cli-artifact-");
   const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
   const client = new OpenClawCliClient({ sessionsRoots: new Map([["runtime", root]]), commandRunner: async (_executable, args) => {
     const method = String(args[2]), params = JSON.parse(args.at(-1) ?? "{}") as Record<string, unknown>; calls.push({ method, params });
@@ -176,36 +187,41 @@ test("按本轮 runId 采集 OpenClaw 明确登记的内联 artifact", async t =
   assert.deepEqual(calls.map(call => call.params.runId), ["run-1", "run-1"]);
 });
 
-test("增量 trajectory 正确处理跨 append 的 UTF-8 字符", async () => {
-  const x = await clientFixture(), path = join(x.root, `${x.sessionId}.trajectory.jsonl`);
-  const line = Buffer.from(`${JSON.stringify({ type: "session.ended", runId: "run", data: { status: "success", note: "中文" } })}\n`);
-  const marker = Buffer.from("中"), position = line.indexOf(marker); await writeFile(path, line.subarray(0, position + 1));
-  setTimeout(() => void appendFile(path, line.subarray(position + 1)), 10);
+test("增量 trajectory 正确处理跨读取块的 UTF-8 字符", async t => {
+  const x = await clientFixture(t), path = join(x.root, `${x.sessionId}.trajectory.jsonl`);
+  const entry = (note: string) => Buffer.from(`${JSON.stringify({ type: "session.ended", runId: "run", data: { status: "success", note } })}\n`);
+  const initial = entry("中文"), marker = Buffer.from("中"), boundary = 64 * 1024 - 1;
+  const line = entry(`${"x".repeat(boundary - initial.indexOf(marker))}中文`);
+  assert.equal(line.indexOf(marker), boundary); await writeFile(path, line);
   await x.client.waitForCompletion(x.sessionId, "run");
 });
 
-test("未观察到 trajectory 与真实上游 timeout 使用稳定错误码", async () => {
-  const missing = await clientFixture();
+test("未观察到 trajectory 与真实上游 timeout 使用稳定错误码", async t => {
+  const missing = await clientFixture(t);
   await assert.rejects(missing.client.waitForCompletion(missing.sessionId, "run"), (error: unknown) => error instanceof GatewayRunError && error.code === "GATEWAY_RUN_NOT_STARTED");
-  const timed = await clientFixture();
+  const timed = await clientFixture(t);
   await writeFile(join(timed.root, `${timed.sessionId}.trajectory.jsonl`), `${JSON.stringify({ type: "session.ended", runId: "run", data: { status: "error", timedOut: true } })}\n`);
   await assert.rejects(timed.client.waitForCompletion(timed.sessionId, "run"), (error: unknown) => error instanceof GatewayRunError && error.code === "GATEWAY_RUN_TIMEOUT");
 });
 
-test("AbortSignal 立即打断 watcher", async () => {
-  const x = await clientFixture(), controller = new AbortController(); controller.abort();
+test("AbortSignal 立即打断 watcher", async t => {
+  const x = await clientFixture(t), controller = new AbortController(); controller.abort();
   await assert.rejects(x.client.waitForCompletion(x.sessionId, "run", controller.signal), /BRIDGE_ABORTED/);
 });
 
-test("abort 等 terminal 后继续确认 no-active-run", async () => {
-  const x = await clientFixture([{ ok: true, status: "aborted", abortedRunId: "run" }, { ok: true, status: "no-active-run", abortedRunId: null }]);
-  setTimeout(() => void writeFile(join(x.root, `${x.sessionId}.trajectory.jsonl`), `${JSON.stringify({ type: "session.ended", runId: "run", data: { status: "interrupted", aborted: true } })}\n`), 15);
+test("abort 等 terminal 后继续确认 no-active-run", async t => {
+  const x = await clientFixture(t, {
+    abortResponses: [{ ok: true, status: "aborted", abortedRunId: "run" }, { ok: true, status: "no-active-run", abortedRunId: null }],
+    onAbort: async ({ call, root, sessionId }) => {
+      if (call === 0) await writeFile(join(root, `${sessionId}.trajectory.jsonl`), `${JSON.stringify({ type: "session.ended", runId: "run", data: { status: "interrupted", aborted: true } })}\n`);
+    }
+  });
   await x.client.abort(x.created.sessionKey, "run"); assert.equal(x.abortCalls(), 2);
 });
 
-test("abort runId 不匹配会拒绝清理；no-active-run 无需 trajectory", async () => {
-  const mismatch = await clientFixture([{ ok: true, status: "aborted", abortedRunId: "other" }]);
+test("abort runId 不匹配会拒绝清理；no-active-run 无需 trajectory", async t => {
+  const mismatch = await clientFixture(t, { abortResponses: [{ ok: true, status: "aborted", abortedRunId: "other" }] });
   await assert.rejects(mismatch.client.abort(mismatch.created.sessionKey, "run"), /OPENCLAW_ABORT_RUN_MISMATCH/);
-  const inactive = await clientFixture([{ ok: true, status: "no-active-run", abortedRunId: null }]);
+  const inactive = await clientFixture(t, { abortResponses: [{ ok: true, status: "no-active-run", abortedRunId: null }] });
   await inactive.client.abort(inactive.created.sessionKey, "run"); assert.equal(inactive.abortCalls(), 1);
 });

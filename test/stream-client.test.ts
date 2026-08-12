@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { normalizeGatewayStreamEvent, OpenClawStreamObserver, type GatewayStreamEvent } from "../src/gateway/stream-client.js";
+import { deferred, withTimeout } from "./test-helpers.js";
 
 test("stream parser accepts full text snapshots and tool lifecycle while rejecting malformed or oversized payloads", () => {
   assert.deepEqual(normalizeGatewayStreamEvent("chat", { runId: "run", sessionKey: "agent:a:s", seq: 2, state: "delta",
@@ -25,11 +26,13 @@ class FakeSocket {
   private emit(type: string, event: unknown): void { for (const listener of this.listeners.get(type) ?? []) listener(event as never); }
 }
 
-test("observer uses backend identity, routes sessions independently, and resubscribes after reconnect", async () => {
+test("observer uses backend identity, routes sessions independently, and resubscribes after reconnect", async t => {
   const sockets: FakeSocket[] = [], methods: string[] = [];
+  const reconnected = deferred(), resubscribed = deferred();
   const factory = () => {
     const socket = new FakeSocket((current, frame) => {
       const method = String(frame.method), id = String(frame.id); methods.push(method);
+      if (method === "sessions.messages.subscribe" && methods.filter(value => value === method).length === 4) resubscribed.resolve();
       if (method === "sessions.send") {
         const params = frame.params as Record<string, unknown>;
         const allowed = new Set(["key", "agentId", "message", "thinking", "attachments", "timeoutMs", "idempotencyKey"]);
@@ -44,10 +47,11 @@ test("observer uses backend identity, routes sessions independently, and resubsc
         method === "sessions.send" ? { runId: "attachment-run" } : { subscribed: true };
       queueMicrotask(() => current.message({ type: "res", id, ok: true, payload }));
     });
-    sockets.push(socket); queueMicrotask(() => socket.challenge()); return socket;
+    sockets.push(socket); if (sockets.length === 2) reconnected.resolve(); queueMicrotask(() => socket.challenge()); return socket;
   };
   const observer = new OpenClawStreamObserver({ url: "ws://fixture", token: "fixture", requestTimeoutMs: 500,
     reconnectMinMs: 1, reconnectMaxMs: 2, webSocketFactory: factory });
+  t.after(() => observer.stop());
   const first: GatewayStreamEvent[] = [], second: GatewayStreamEvent[] = [];
   const unobserveFirst = await observer.observe("agent:a:first", event => first.push(event));
   const unobserveSecond = await observer.observe("agent:a:second", event => second.push(event));
@@ -63,33 +67,35 @@ test("observer uses backend identity, routes sessions independently, and resubsc
   assert.equal(first.some(event => event.type === "assistant_text" && event.text === "one"), true);
   assert.equal(second.some(event => event.type === "assistant_text"), false);
   sockets[0]!.close(1006, "dropped");
-  for (let index = 0; index < 100 && sockets.length < 2; index++) await new Promise(resolve => setTimeout(resolve, 2));
-  for (let index = 0; index < 100 && methods.filter(value => value === "sessions.messages.subscribe").length < 4; index++) await new Promise(resolve => setTimeout(resolve, 2));
+  await withTimeout(Promise.all([reconnected.promise, resubscribed.promise]), "observer reconnect and resubscription");
   assert.equal(sockets.length, 2); assert.equal(methods.filter(value => value === "sessions.subscribe").length, 2);
   assert.equal(methods.filter(value => value === "sessions.messages.subscribe").length, 4);
   assert.equal(first.some(event => event.type === "connection" && event.state === "disconnected"), true);
   unobserveFirst(); unobserveSecond(); observer.stop();
 });
 
-test("observer replaces a socket that emits error without close", async () => {
+test("observer replaces a socket that emits error without close", async t => {
   const sockets: FakeSocket[] = [];
+  const reconnected = deferred();
   const factory = () => {
     const socket = new FakeSocket((current, frame) => queueMicrotask(() => current.message({ type: "res", id: frame.id, ok: true,
       payload: frame.method === "connect" ? { server: { version: "2026.6.11" } } : { subscribed: true } })));
-    sockets.push(socket); queueMicrotask(() => socket.challenge()); return socket;
+    sockets.push(socket); if (sockets.length === 2) reconnected.resolve(); queueMicrotask(() => socket.challenge()); return socket;
   };
   const observer = new OpenClawStreamObserver({ url: "ws://fixture", requestTimeoutMs: 100,
     reconnectMinMs: 1, reconnectMaxMs: 2, webSocketFactory: factory });
+  t.after(() => observer.stop());
   await observer.request("sessions.list", {});
   sockets[0]!.error();
-  for (let index = 0; index < 100 && sockets.length < 2; index++) await new Promise(resolve => setTimeout(resolve, 2));
+  await withTimeout(reconnected.promise, "observer reconnect after socket error");
   assert.equal(sockets.length, 2);
   assert.deepEqual(await observer.request("sessions.list", {}), { subscribed: true });
   observer.stop();
 });
 
-test("observer replaces a socket after an RPC timeout", async () => {
+test("observer replaces a socket after an RPC timeout", async t => {
   const sockets: FakeSocket[] = [];
+  const reconnected = deferred();
   const factory = () => {
     const socketIndex = sockets.length;
     const socket = new FakeSocket((current, frame) => {
@@ -97,30 +103,36 @@ test("observer replaces a socket after an RPC timeout", async () => {
       queueMicrotask(() => current.message({ type: "res", id: frame.id, ok: true,
         payload: frame.method === "connect" ? { server: { version: "2026.6.11" } } : { key: "agent:a:new" } }));
     });
-    sockets.push(socket); queueMicrotask(() => socket.challenge()); return socket;
+    sockets.push(socket); if (sockets.length === 2) reconnected.resolve(); queueMicrotask(() => socket.challenge()); return socket;
   };
   const observer = new OpenClawStreamObserver({ url: "ws://fixture", requestTimeoutMs: 20,
     reconnectMinMs: 1, reconnectMaxMs: 2, webSocketFactory: factory });
-  const keepAlive = setTimeout(() => undefined, 100);
-  try { await assert.rejects(observer.request("sessions.create", {}), /gateway request timeout for sessions.create/); }
-  finally { clearTimeout(keepAlive); }
-  for (let index = 0; index < 100 && sockets.length < 2; index++) await new Promise(resolve => setTimeout(resolve, 2));
+  t.after(() => observer.stop());
+  await withTimeout(assert.rejects(observer.request("sessions.create", {}), /gateway request timeout for sessions.create/), "intentional RPC timeout");
+  await withTimeout(reconnected.promise, "observer reconnect after RPC timeout");
   assert.equal(sockets.length, 2);
   assert.deepEqual(await observer.request("sessions.create", {}), { key: "agent:a:new" });
   observer.stop();
 });
 
-test("observer honors a longer per-request timeout for model-backed RPCs", async () => {
+test("observer honors a longer per-request timeout for model-backed RPCs", async t => {
   const sockets: FakeSocket[] = [];
+  const responseTimers = new Set<NodeJS.Timeout>();
   const observer = new OpenClawStreamObserver({ url: "ws://fixture", requestTimeoutMs: 10,
     webSocketFactory: () => {
       const socket = new FakeSocket((current, frame) => {
+        // This timer is the subject of the test: compact must outlive the default request timeout.
         const delay = frame.method === "sessions.compact" ? 30 : 0;
-        setTimeout(() => current.message({ type: "res", id: frame.id, ok: true,
-          payload: frame.method === "connect" ? { server: { version: "2026.6.11" } } : { ok: true } }), delay);
+        const timer = setTimeout(() => {
+          responseTimers.delete(timer);
+          current.message({ type: "res", id: frame.id, ok: true,
+            payload: frame.method === "connect" ? { server: { version: "2026.6.11" } } : { ok: true } });
+        }, delay);
+        responseTimers.add(timer);
       });
       sockets.push(socket); queueMicrotask(() => socket.challenge()); return socket;
     } });
+  t.after(() => { observer.stop(); for (const timer of responseTimers) clearTimeout(timer); });
   assert.deepEqual(await observer.request("sessions.compact", {}, 60), { ok: true });
   observer.stop();
 });

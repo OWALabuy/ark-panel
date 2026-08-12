@@ -1,12 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
 import { createPanelSession, deletePanelSession, listPanelSessions, commitPanelTranscript, loadPanelSession, updatePanelMetadata } from "../src/storage/panel-sessions.js";
+import { tempFixture } from "./test-helpers.js";
 
-test("panel 会话 UUID 存入 metadata，可列出并原子提交 transcript", async () => {
-  const root = await mkdtemp(join(tmpdir(), "panel-owned-"));
+test("panel 会话 UUID 存入 metadata，可列出并原子提交 transcript", async t => {
+  const root = await tempFixture(t, "panel-owned-");
   const document = { header: { type: "session", version: 3, id: "fixture" }, entries: [] };
   const metadata = await createPanelSession(root, "fixture-agent", document, { parentRecordId: "parent", forkedFromMessageId: "msg" });
   assert.equal(metadata.archived, false); assert.equal(metadata.hidden, false); assert.equal(metadata.memoryDisposition, "scratch");
@@ -16,8 +16,8 @@ test("panel 会话 UUID 存入 metadata，可列出并原子提交 transcript", 
   assert.match(stored, /虚构内容/);
 });
 
-test("旧 metadata 可直接读取，覆盖项更新采用原子 read-modify-write", async () => {
-  const root = await mkdtemp(join(tmpdir(), "panel-metadata-"));
+test("旧 metadata 可直接读取，覆盖项更新采用原子 read-modify-write", async t => {
+  const root = await tempFixture(t, "panel-metadata-");
   const document = { header: { type: "session", version: 3, id: "fixture" }, entries: [] };
   const metadata = await createPanelSession(root, "agent", document);
   assert.equal((await loadPanelSession(root, "agent", metadata.recordId)).metadata.modelOverride, undefined);
@@ -32,8 +32,8 @@ test("旧 metadata 可直接读取，覆盖项更新采用原子 read-modify-wri
   await assert.rejects(updatePanelMetadata(root, "agent", metadata.recordId, current => ({ ...current, project: "bad\nproject" })), /project 格式无效/);
 });
 
-test("panel 会话只有归档后且目录内容完全已知时才能删除", async () => {
-  const root = await mkdtemp(join(tmpdir(), "panel-delete-")), document = { header: { type: "session", version: 3 }, entries: [] };
+test("panel 会话只有归档后且目录内容完全已知时才能删除", async t => {
+  const root = await tempFixture(t, "panel-delete-"), document = { header: { type: "session", version: 3 }, entries: [] };
   const first = await createPanelSession(root, "agent", document);
   await assert.rejects(deletePanelSession(root, "agent", first.recordId), /SESSION_NOT_ARCHIVED/);
   await updatePanelMetadata(root, "agent", first.recordId, current => ({ ...current, archived: true }));
