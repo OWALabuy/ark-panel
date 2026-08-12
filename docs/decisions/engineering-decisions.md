@@ -1,6 +1,6 @@
 # 会话面板工程决定
 
-更新日期：2026-07-11
+更新日期：2026-08-12
 
 ## 技术栈
 
@@ -56,6 +56,32 @@ API 统一位于 `/api/v1`。成功响应是 `{ "data": ... }`；失败响应是
 
 清理顺序固定为：先调用官方 `sessions.delete` 注销，再删除 runtime agent 专用 sessions 根目录中、与本次已验证 sessionId 严格匹配的已知 artifact。清理函数只接受服务端刚创建并登记的 UUID；只允许 `.jsonl.deleted.*`、`.trajectory.jsonl`、`.trajectory-path.json` 等经过当前版本验证的类型；拒绝符号链接、目录越界和未知文件。真实 agent 的 sessions 根目录永远不进入清理 allowlist。
 
+## Gateway WebSocket 权限范围与凭据生命周期（2026-08-12）
+
+**决定：接受一条带管理权限的本机控制连接。** 面板服务端复用一条持久 Gateway WebSocket 承担观察、生成控制、结构化命令和临时 session 生命周期；本批不拆成多条连接或多份凭据。该决定只适用于版本门禁固定的 OpenClaw `2026.6.11`。
+
+握手身份固定为 `client.id=gateway-client`、`client.mode=backend`、`role=operator`，并且请求的 scope 集合必须恰好是 `operator.read`、`operator.write`、`operator.admin`。Gateway `hello.auth.scopes` 也必须与该集合完全相同：缺少任一项或返回额外项都拒绝连接，不尝试动态加权、降权或扩大权限。握手失败和 RPC 拒绝只向面板上层返回稳定、归一化、脱敏的错误；token、password、原始上游 payload、消息正文和 prompt 不得进入错误或日志。
+
+当前生产调用面固定为：
+
+| scope | 面板使用的 RPC / 订阅 | 用途 |
+|---|---|---|
+| `operator.read` | `status`、`commands.list`、`tools.catalog`、`tools.effective`、`sessions.list`、`sessions.subscribe`、`sessions.messages.subscribe` / `sessions.messages.unsubscribe`、`artifacts.list`、`artifacts.download` | 状态与目录读取、session/消息观察、当前 run 产物收集 |
+| `operator.write` | `sessions.create`、`sessions.send`、`sessions.abort` | 创建一次性 runtime session、发送本轮消息或附件、停止当前 run |
+| `operator.admin` | `sessions.patch`、`sessions.delete`、`sessions.compact` | 应用临时 session override、注销临时 session、执行持久压缩流程 |
+
+该矩阵依据 OpenClaw `2026.6.11` 官方发行包内的 `docs/gateway/operator-scopes.md`、`docs/gateway/protocol.md` 与 core method descriptors 核对；admin 的蕴含关系只用于理解上游授权，不能让面板接受缩写后的 `hello` 集合。升级时必须针对新发行包重新核对，不能沿用内容哈希文件名或当前分类。
+
+scope 集合只描述 Gateway 连接具备的上游能力，不替代面板自己的 typed API、登录、CSRF 和 default-deny allowlist。尤其是持有 `operator.admin` 会令内部命令满足 owner 判定，因此普通消息路径继续拒绝所有 `/` 文本，D 类管理命令也不因连接有 admin scope 而获得面板入口。
+
+这是 trusted-local、single-operator 部署中的纵深 guardrail，不是强多租户隔离边界。共享 token/password 按 owner 级 secret 管理，只能存在于服务端环境或 OpenClaw 配置中，不下发浏览器；Gateway 默认只经 loopback 访问，显式远程配置也只能指向同一所有者控制的可信私网，不得直接暴露到公网。远程端点不继承 direct-loopback self-pairing，必须另行完成上游配对与隔离验收。当前凭据已经服务于同一 owner 连接，scope 是握手契约而非本次需要迁移的面板数据，因此本批无需重新签发凭据。
+
+凭据轮换必须把 Gateway 与面板视为同一个发布单元：先准备新 secret，同步更新两端，再重启 Gateway 与面板并确认精确 scope 握手；不得让新旧 secret 长期并存。若轮换需回滚，则在两端恢复受保护的上一份 secret 并再次同步重启。部署本批代码只需正常重启面板以启用握手强制；不改存储格式、不改 OpenClaw pin。若精确 scope 校验与既有部署不兼容，回滚到上一版面板即可，凭据与 OpenClaw 配置无需转换，同时保留版本门禁，不能以接受未知或额外 scope 作为临时绕过。
+
+`PANEL_OPENCLAW_STREAMING=0` 只关闭临时文本/工具预览；同一控制 WebSocket 及上述三个 scope 仍用于生成、结构化命令、附件和 admin 生命周期。预览订阅失败而控制连接仍可用时只降级预览；生产无法解析固定凭据时不创建连接，并向 Gateway 调用面注入只返回 `GATEWAY_TRANSPORT_UNAVAILABLE` 的拒绝 transport。凭据缺失、控制连接不可用、scope 不匹配或 RPC 被拒绝时，相关 Gateway 操作失败关闭，本地权威会话的只读浏览仍可用，不能回落为逐次 Gateway CLI RPC。
+
+备选方案——把观察、写入与管理拆成独立连接/身份——需要新增凭据模型、部署迁移与回滚步骤，并对固定版本重新做隔离 runtime 验收；它是独立工作项，不在本批静默引入。本决定没有宣称完成新的真实 runtime 验收，真实环境复验仍按版本门禁和专门验收流程执行。
+
 ## 版本控制与升级维护（2026-07-12）
 
 面板核心数据（transcript JSONL、metadata）是自主的、可迁移的，不绑定 OpenClaw；读取索引由这些数据重建。但 2a′ 混合架构对 OpenClaw 保留了一层**软耦合**：更换或升级 OpenClaw 时，这层是唯一需要重新验证/适配的面。集中记录，避免升级时到处找。
@@ -64,13 +90,13 @@ API 统一位于 `/api/v1`。成功响应是 `{ "data": ... }`；失败响应是
 1. **版本门禁**：第一版固定 `2026.6.11`。启动推理前核对 CLI/gateway 版本；不匹配返回 `OPENCLAW_VERSION_UNSUPPORTED`，拒绝推理与清理。升级 = 抬高这个 pin，且必须在抬高前跑完下面的复核。
 2. **transcript 格式**：会话头 `version:3`、`id`/`parentId` 树、content block 类型（text / tool_use / tool_result / thinking / model_change / thinking_level_change / custom）。schema 变了，解析器与 fork 回溯都要改。
 3. **推理桥接 RPC 与流程**：`sessions.create` → 覆盖 transcript → `sessions.send` → 读新增 entry → `sessions.delete` + 受限清理。RPC 名称、参数、一次性 session 行为都可能随版本变。
-4. **握手与鉴权**：operator 角色 + `gateway.auth.token`、跳过设备签名的分支（`roleCanSkipDeviceIdentity`）。
+4. **握手、鉴权与 scope 矩阵**：`gateway-client/backend` + operator 角色 + 共享 token/password、direct-loopback backend self-pairing 分支、请求和 `hello` 精确匹配 `operator.read` / `operator.write` / `operator.admin`，以及上表每个 RPC 的 scope 归属。
 5. **清理 artifact 类型**：`.jsonl.deleted.*`、`.trajectory.jsonl`、`.trajectory-path.json`。版本若新增/改名 artifact 类型，清理 allowlist 要同步扩充，否则残留累积。
 6. **记忆机制假设**：共享 workspace 的记忆文件与 bootstrap 注入、内置 engine 对 `MEMORY.md` / `memory/**/*.md` 的索引、文件 watcher、dreaming/promote 和压缩前 flush 的行为（见 `panel-memory.md`）。`scratch` 与 `eligible` 都读取既有记忆；面板只为 eligible 维护每会话一份独立的滚动短期文件。普通 session 缺少按路径只读和动态工具 deny 的限制，以及临时 runtime transcript 是否可能被 dreaming 摄取，升级或启用 dreaming 前都须重验。
 7. **打包源码路径**：`~/.nvm/.../node_modules/openclaw/dist/*.js` 的文件名带内容哈希后缀，升级必变；任何靠读 dist 得出的结论都要重查，不能假设文件名不变。
 
 ### 升级流程（不在真实 agent 上首验）
-1. 先在隔离的 `paneltest`（无渠道绑定）上装新版本，跑推理桥接冒烟 + 上述 2–6 项复核。
+1. 先在隔离的 `paneltest`（无渠道绑定）上装新版本，跑推理桥接冒烟 + 上述 2–7 项复核；握手 scope 与 RPC 权限矩阵必须逐项重验。
 2. 复核通过后再抬高版本 pin，并更新本文与 `architecture.md §四` 里标注的版本号。
 3. 复核未过时，面板对新版本继续走版本门禁拒绝推理，直到适配完成；期间只读浏览仍可用（只读不依赖桥接）。
 4. OpenClaw 升级与面板自身发布相互独立：面板可在不升 OpenClaw 时发版；升 OpenClaw 必须过版本门禁。

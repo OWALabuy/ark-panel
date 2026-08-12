@@ -9,6 +9,7 @@ import { passwordHash } from "../src/server/auth.js";
 import { createPanelServer, type AttachmentApi, type CommandApi, type GenerationApi, type MemoryApi, type MemoryConsolidationApi, type ReadApi } from "../src/server/app.js";
 import type { PublicPanelRun } from "../src/server/run-store.js";
 import { ForkError } from "../src/domain/fork.js";
+import { GatewayControlError } from "../src/gateway/stream-client.js";
 import { tempFixture } from "./test-helpers.js";
 
 const testRunId="99999999-9999-4999-8999-999999999999";
@@ -156,6 +157,24 @@ test("结构化命令接口受登录和 CSRF 保护并委托命令派发器", as
   const loginBody = await login.json() as { data: { csrfToken: string } }; const cookies = login.headers.getSetCookie().map(value => value.split(";", 1)[0]).join("; ");
   const response = await fetch(`${x.base}/api/v1/sessions/record/command`, { method: "POST", headers: { cookie: cookies, origin: x.base, "x-csrf-token": loginBody.data.csrfToken, "content-type": "application/json" }, body: JSON.stringify({ command: "status", args: [] }) });
   assert.equal(response.status, 200); assert.deepEqual(calls, [["record", { command: "status", args: [] }]]);
+});
+
+test("Gateway 控制错误通过 HTTP 保持稳定且不泄露上游正文", async t => {
+  const privateValue = "fixture-secret-/private/owner";
+  const x = await fixture(t, undefined, undefined, { async dispatch() {
+    // The transport has already discarded any raw upstream payload before this boundary.
+    throw new GatewayControlError("GATEWAY_TRANSPORT_UNAVAILABLE", privateValue);
+  } });
+  const login = await fetch(`${x.base}/api/v1/auth/login`, { method: "POST", headers: { origin: x.base, "content-type": "application/json" },
+    body: JSON.stringify({ username: "owl", password: "correct", ignored: privateValue }) });
+  const loginBody = await login.json() as { data: { csrfToken: string } };
+  const cookies = login.headers.getSetCookie().map(value => value.split(";", 1)[0]).join("; ");
+  const response = await fetch(`${x.base}/api/v1/sessions/record/command`, { method: "POST", headers: { cookie: cookies, origin: x.base,
+    "x-csrf-token": loginBody.data.csrfToken, "content-type": "application/json" }, body: JSON.stringify({ command: "status", args: [] }) });
+  const body = await response.json();
+  assert.equal(response.status, 503); assert.equal(body.error.code, "GATEWAY_TRANSPORT_UNAVAILABLE");
+  assert.equal(body.error.message, "OpenClaw Gateway 控制通道不可用，请检查认证配置");
+  assert.equal(JSON.stringify(body).includes(privateValue), false);
 });
 
 test("fixed Host policy, logout, request limit, and static symlink boundary", async t => {

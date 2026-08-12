@@ -11,6 +11,7 @@ import type { BridgeRequest } from "../src/gateway/adapter.js";
 import { listSessionAttachments, readSessionAttachmentBytes, storeSessionAttachment } from "../src/storage/attachments.js";
 import { PanelRunStore, type PanelRunRecord } from "../src/server/run-store.js";
 import { deferred, tempFixture, waitFor, withTimeout, writeThenFailBeforeDirectorySync } from "./test-helpers.js";
+import { GatewayControlError } from "../src/gateway/stream-client.js";
 
 interface RunStoreTestHooks {
   onDirectoryScan?(): void;
@@ -357,6 +358,19 @@ test("后台 run 将停止未确认记录为 failed 而不是 aborted", async t 
   const runId="13131313-1313-4313-8313-131313131313";await api.create(metadata.recordId,"message",runId);
   await waitFor(async()=>(await api.get(runId))?.status==="failed","unconfirmed abort failure");
   const run=await api.get(runId);assert.equal(run?.status,"failed");assert.equal(run?.error?.code,"RUN_ABORT_UNCONFIRMED");
+});
+
+test("后台 run 保留稳定脱敏的 Gateway 控制错误", async t => {
+  const root = await tempFixture(t, "generation-gateway-unavailable-");
+  const metadata = await createPanelSession(root, "claude", { header: { type: "session" }, entries: [] });
+  const api = new PanelGenerationApi({ async generate() { throw new GatewayControlError("GATEWAY_TRANSPORT_UNAVAILABLE", "private fixture prompt"); } },
+    { dataRoot: root, runtimeByAgent: new Map([["claude", "runtime"]]) });
+  const runId = "14141414-1414-4414-8414-141414141414";
+  await api.create(metadata.recordId, "private fixture prompt", runId);
+  await waitFor(async () => (await api.get(runId))?.status === "failed", "Gateway transport failure");
+  const run = await api.get(runId);
+  assert.deepEqual(run?.error, { code: "GATEWAY_TRANSPORT_UNAVAILABLE", message: "OpenClaw Gateway 控制通道不可用，请检查认证配置。" });
+  assert.doesNotMatch(JSON.stringify(run), /private fixture prompt/);
 });
 
 test("run 订阅先给快照、终态可重订阅，重启恢复 staged entries 而不重复调用模型", async t => {

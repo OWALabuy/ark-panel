@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { normalizeGatewayStreamEvent, OpenClawStreamObserver, type GatewayStreamEvent } from "../src/gateway/stream-client.js";
+import { GatewayControlError, loadGatewayStreamAuth, normalizeGatewayStreamEvent, OpenClawStreamObserver,
+  resolveGatewayControlTransport, type GatewayControlMethod, type GatewayStreamEvent } from "../src/gateway/stream-client.js";
 import { deferred, withTimeout } from "./test-helpers.js";
 
 test("stream parser accepts full text snapshots and tool lifecycle while rejecting malformed or oversized payloads", () => {
@@ -12,6 +13,26 @@ test("stream parser accepts full text snapshots and tool lifecycle while rejecti
     { type: "tool", runId: "run", sessionKey: "agent:a:s", upstreamSeq: 3, callId: "call", name: "exec", phase: "started", args: { command: "true" } });
   assert.equal(normalizeGatewayStreamEvent("chat", { runId: "run", sessionKey: "agent:a:s", state: "delta", message: {} }), undefined);
   assert.equal(normalizeGatewayStreamEvent("chat", { runId: "run", sessionKey: "agent:a:s", state: "delta", message: { content: "x".repeat(2 * 1024 * 1024 + 1) } }), undefined);
+});
+
+test("disabling preview does not disable the server control credential", async () => {
+  const env = {
+    PANEL_OPENCLAW_STREAMING: "0",
+    PANEL_OPENCLAW_GATEWAY_URL: "ws://127.0.0.1:18789",
+    PANEL_OPENCLAW_GATEWAY_TOKEN: "fixture-control-token"
+  };
+  assert.equal(await loadGatewayStreamAuth(env), undefined);
+  assert.deepEqual(await loadGatewayStreamAuth(env, true), {
+    url: "ws://127.0.0.1:18789",
+    token: "fixture-control-token"
+  });
+});
+
+test("missing server control credentials select a stable fail-closed transport", async () => {
+  const transport = resolveGatewayControlTransport();
+  await assert.rejects(transport.request("status", { privatePath: "/private/fixture", secret: "fixture-secret" }), error =>
+    error instanceof GatewayControlError && error.code === "GATEWAY_TRANSPORT_UNAVAILABLE" &&
+    error.message === "GATEWAY_TRANSPORT_UNAVAILABLE" && !error.message.includes("fixture"));
 });
 
 class FakeSocket {
@@ -43,7 +64,8 @@ test("observer uses backend identity, routes sessions independently, and resubsc
           return;
         }
       }
-      const payload = method === "connect" ? { server: { version: "2026.6.11" }, auth: { scopes: ["operator.read", "operator.write"] } } :
+      const payload = method === "connect" ? { type: "hello-ok", server: { version: "2026.6.11" },
+        auth: { role: "operator", scopes: ["operator.read", "operator.write", "operator.admin"] } } :
         method === "sessions.send" ? { runId: "attachment-run" } : { subscribed: true };
       queueMicrotask(() => current.message({ type: "res", id, ok: true, payload }));
     });
@@ -55,8 +77,9 @@ test("observer uses backend identity, routes sessions independently, and resubsc
   const first: GatewayStreamEvent[] = [], second: GatewayStreamEvent[] = [];
   const unobserveFirst = await observer.observe("agent:a:first", event => first.push(event));
   const unobserveSecond = await observer.observe("agent:a:second", event => second.push(event));
-  const connect = sockets[0]!.sent.find(frame => frame.method === "connect")!.params as { client: { id: string; mode: string }; scopes: string[] };
+  const connect = sockets[0]!.sent.find(frame => frame.method === "connect")!.params as { client: { id: string; mode: string }; role: string; scopes: string[] };
   assert.equal(connect.client.id, "gateway-client"); assert.equal(connect.client.mode, "backend");
+  assert.equal(connect.role, "operator");
   assert.deepEqual(connect.scopes, ["operator.read", "operator.write", "operator.admin"]);
   assert.deepEqual(await observer.send("agent:a:first", "附件", "11111111-1111-4111-8111-111111111111",
     [{ fileName: "input.docx", mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", content: "UEs=" }]), { runId: "attachment-run" });
@@ -79,7 +102,8 @@ test("observer replaces a socket that emits error without close", async t => {
   const reconnected = deferred();
   const factory = () => {
     const socket = new FakeSocket((current, frame) => queueMicrotask(() => current.message({ type: "res", id: frame.id, ok: true,
-      payload: frame.method === "connect" ? { server: { version: "2026.6.11" } } : { subscribed: true } })));
+      payload: frame.method === "connect" ? { type: "hello-ok", server: { version: "2026.6.11" },
+        auth: { role: "operator", scopes: ["operator.read", "operator.write", "operator.admin"] } } : { subscribed: true } })));
     sockets.push(socket); if (sockets.length === 2) reconnected.resolve(); queueMicrotask(() => socket.challenge()); return socket;
   };
   const observer = new OpenClawStreamObserver({ url: "ws://fixture", requestTimeoutMs: 100,
@@ -101,14 +125,15 @@ test("observer replaces a socket after an RPC timeout", async t => {
     const socket = new FakeSocket((current, frame) => {
       if (frame.method === "sessions.create" && socketIndex === 0) return;
       queueMicrotask(() => current.message({ type: "res", id: frame.id, ok: true,
-        payload: frame.method === "connect" ? { server: { version: "2026.6.11" } } : { key: "agent:a:new" } }));
+        payload: frame.method === "connect" ? { type: "hello-ok", server: { version: "2026.6.11" },
+          auth: { role: "operator", scopes: ["operator.read", "operator.write", "operator.admin"] } } : { key: "agent:a:new" } }));
     });
     sockets.push(socket); if (sockets.length === 2) reconnected.resolve(); queueMicrotask(() => socket.challenge()); return socket;
   };
   const observer = new OpenClawStreamObserver({ url: "ws://fixture", requestTimeoutMs: 20,
     reconnectMinMs: 1, reconnectMaxMs: 2, webSocketFactory: factory });
   t.after(() => observer.stop());
-  await withTimeout(assert.rejects(observer.request("sessions.create", {}), /gateway request timeout for sessions.create/), "intentional RPC timeout");
+  await withTimeout(assert.rejects(observer.request("sessions.create", {}), /GATEWAY_REQUEST_TIMEOUT: sessions\.create/), "intentional RPC timeout");
   await withTimeout(reconnected.promise, "observer reconnect after RPC timeout");
   assert.equal(sockets.length, 2);
   assert.deepEqual(await observer.request("sessions.create", {}), { key: "agent:a:new" });
@@ -126,7 +151,8 @@ test("observer honors a longer per-request timeout for model-backed RPCs", async
         const timer = setTimeout(() => {
           responseTimers.delete(timer);
           current.message({ type: "res", id: frame.id, ok: true,
-            payload: frame.method === "connect" ? { server: { version: "2026.6.11" } } : { ok: true } });
+            payload: frame.method === "connect" ? { type: "hello-ok", server: { version: "2026.6.11" },
+              auth: { role: "operator", scopes: ["operator.read", "operator.write", "operator.admin"] } } : { ok: true } });
         }, delay);
         responseTimers.add(timer);
       });
@@ -134,5 +160,149 @@ test("observer honors a longer per-request timeout for model-backed RPCs", async
     } });
   t.after(() => { observer.stop(); for (const timer of responseTimers) clearTimeout(timer); });
   assert.deepEqual(await observer.request("sessions.compact", {}, 60), { ok: true });
+  observer.stop();
+});
+
+test("observer rejects every non-exact role and scope grant before enabling control RPCs", async t => {
+  const invalidAuth = [
+    { label: "missing", auth: { role: "operator", scopes: ["operator.read", "operator.write"] } },
+    { label: "extra", auth: { role: "operator", scopes: ["operator.read", "operator.write", "operator.admin", "operator.pairing"] } },
+    { label: "unknown", auth: { role: "operator", scopes: ["operator.read", "operator.write", "operator.admin", "operator.future"] } },
+    { label: "duplicate", auth: { role: "operator", scopes: ["operator.read", "operator.write", "operator.admin", "operator.admin"] } },
+    { label: "role", auth: { role: "node", scopes: ["operator.read", "operator.write", "operator.admin"] } }
+  ] as const;
+  for (const fixture of invalidAuth) {
+    const diagnostics: string[] = [], sockets: FakeSocket[] = [];
+    const observer = new OpenClawStreamObserver({ url: "ws://fixture", token: "fixture", requestTimeoutMs: 200,
+      reconnectMinMs: 60_000, reconnectMaxMs: 60_000, onDiagnostic: message => diagnostics.push(message),
+      webSocketFactory: () => {
+        const socket = new FakeSocket((current, frame) => queueMicrotask(() => current.message({ type: "res", id: frame.id, ok: true,
+          payload: { type: "hello-ok", server: { version: "2026.6.11" }, auth: fixture.auth } })));
+        sockets.push(socket); queueMicrotask(() => socket.challenge()); return socket;
+      } });
+    t.after(() => observer.stop());
+    await withTimeout(assert.rejects(observer.request("status", {}), /GATEWAY_SCOPE_CONTRACT_VIOLATION/), `invalid ${fixture.label} grant`);
+    assert.deepEqual(sockets[0]!.sent.map(frame => frame.method), ["connect"]);
+    assert.equal(sockets[0]!.readyState, 3);
+    assert.equal(diagnostics.some(message => message.includes("GATEWAY_SCOPE_CONTRACT_VIOLATION")), true);
+    observer.stop();
+  }
+});
+
+test("observer rejects a different pinned Gateway version before any business RPC", async t => {
+  const sockets: FakeSocket[] = [];
+  const observer = new OpenClawStreamObserver({ url: "ws://fixture", token: "fixture", requestTimeoutMs: 200,
+    reconnectMinMs: 60_000, reconnectMaxMs: 60_000, webSocketFactory: () => {
+      const socket = new FakeSocket((current, frame) => queueMicrotask(() => current.message({ type: "res", id: frame.id, ok: true,
+        payload: { type: "hello-ok", server: { version: "2026.6.12" },
+          auth: { role: "operator", scopes: ["operator.read", "operator.write", "operator.admin"] } } })));
+      sockets.push(socket); queueMicrotask(() => socket.challenge()); return socket;
+    } });
+  t.after(() => observer.stop());
+  await assert.rejects(observer.request("status", {}), error => error instanceof GatewayControlError &&
+    error.code === "OPENCLAW_VERSION_UNSUPPORTED" && error.message === "OPENCLAW_VERSION_UNSUPPORTED");
+  assert.deepEqual(sockets[0]!.sent.map(frame => frame.method), ["connect"]);
+  observer.stop();
+});
+
+test("observer normalizes denied handshakes and upstream RPC errors without exposing payloads", async t => {
+  const secret = "fixture-token-and-private-message-/private/example";
+  const deniedDiagnostics: string[] = [];
+  const denied = new OpenClawStreamObserver({ url: "ws://fixture", token: "fixture", requestTimeoutMs: 200,
+    reconnectMinMs: 60_000, reconnectMaxMs: 60_000, onDiagnostic: message => deniedDiagnostics.push(message),
+    webSocketFactory: () => {
+      const socket = new FakeSocket((current, frame) => queueMicrotask(() => current.message({ type: "res", id: frame.id, ok: false,
+        error: { code: "INVALID_REQUEST", message: `missing scope ${secret}`, details: { raw: secret } } })));
+      queueMicrotask(() => socket.challenge()); return socket;
+    } });
+  t.after(() => denied.stop());
+  await assert.rejects(denied.request("status", {}), error => error instanceof GatewayControlError &&
+    error.code === "GATEWAY_HANDSHAKE_DENIED" && error.message === "GATEWAY_HANDSHAKE_DENIED" && !error.message.includes(secret));
+  assert.equal(deniedDiagnostics.some(message => message.includes(secret)), false);
+  denied.stop();
+
+  const rpcDiagnostics: string[] = [];
+  const rpc = new OpenClawStreamObserver({ url: "ws://fixture", token: "fixture", requestTimeoutMs: 200,
+    onDiagnostic: message => rpcDiagnostics.push(message), webSocketFactory: () => {
+      const socket = new FakeSocket((current, frame) => queueMicrotask(() => current.message(frame.method === "status" ?
+        { type: "res", id: frame.id, ok: false, error: { message: secret, payload: { secret } } } :
+        { type: "res", id: frame.id, ok: true, payload: frame.method === "connect" ? { type: "hello-ok",
+          server: { version: "2026.6.11" }, auth: { role: "operator", scopes: ["operator.read", "operator.write", "operator.admin"] } } : { ok: true } })));
+      queueMicrotask(() => socket.challenge()); return socket;
+    } });
+  t.after(() => rpc.stop());
+  await assert.rejects(rpc.request("status", {}), error => error instanceof GatewayControlError &&
+    error.code === "GATEWAY_REQUEST_DENIED" && error.message === "GATEWAY_REQUEST_DENIED" && !error.message.includes(secret));
+  assert.equal(rpcDiagnostics.some(message => message.includes(secret)), false);
+  rpc.stop();
+
+  const closedDiagnostics: string[] = [];
+  const closed = new OpenClawStreamObserver({ url: "ws://fixture", token: "fixture", requestTimeoutMs: 200,
+    reconnectMinMs: 60_000, reconnectMaxMs: 60_000, onDiagnostic: message => closedDiagnostics.push(message), webSocketFactory: () => {
+      const socket = new FakeSocket((current, frame) => queueMicrotask(() => frame.method === "status" ? current.close(1008, secret) :
+        current.message({ type: "res", id: frame.id, ok: true, payload: frame.method === "connect" ? { type: "hello-ok",
+          server: { version: "2026.6.11" }, auth: { role: "operator", scopes: ["operator.read", "operator.write", "operator.admin"] } } : { ok: true } })));
+      queueMicrotask(() => socket.challenge()); return socket;
+    } });
+  t.after(() => closed.stop());
+  await assert.rejects(closed.request("status", {}), error => error instanceof GatewayControlError &&
+    error.code === "GATEWAY_CONNECTION_CLOSED" && error.message === "GATEWAY_CONNECTION_CLOSED" && !error.message.includes(secret));
+  assert.equal(closedDiagnostics.some(message => message.includes(secret)), false);
+  closed.stop();
+});
+
+test("observer enforces the reviewed read, write, and admin RPC map and sends nothing else", async t => {
+  const sockets: FakeSocket[] = [];
+  const observer = new OpenClawStreamObserver({ url: "ws://fixture", token: "fixture", requestTimeoutMs: 200,
+    webSocketFactory: () => {
+      const socket = new FakeSocket((current, frame) => queueMicrotask(() => current.message({ type: "res", id: frame.id, ok: true,
+        payload: frame.method === "connect" ? { type: "hello-ok", server: { version: "2026.6.11" },
+          auth: { role: "operator", scopes: ["operator.admin", "operator.read", "operator.write"] } } : { ok: true } })));
+      sockets.push(socket); queueMicrotask(() => socket.challenge()); return socket;
+    } });
+  t.after(() => observer.stop());
+  await assert.rejects(observer.request("config.set" as GatewayControlMethod, { secret: "must-not-send" }), /GATEWAY_RPC_METHOD_NOT_ALLOWED/);
+  assert.equal(sockets.length, 0);
+  const reviewedByScope = {
+    "operator.read": ["artifacts.download", "artifacts.list", "commands.list", "sessions.list", "sessions.messages.subscribe",
+      "sessions.messages.unsubscribe", "sessions.subscribe", "status", "tools.catalog", "tools.effective"],
+    "operator.write": ["sessions.abort", "sessions.create", "sessions.send"],
+    "operator.admin": ["sessions.compact", "sessions.delete", "sessions.patch"]
+  } as const;
+  await observer.request("status", {});
+  const internal = observer as unknown as { grantedScopes: ReadonlySet<string> };
+  for (const [scope, methods] of Object.entries(reviewedByScope)) {
+    internal.grantedScopes = new Set([scope]);
+    for (const method of methods) await observer.request(method, {});
+    const rejected = scope === "operator.read" ? "sessions.send" : scope === "operator.write" ? "sessions.delete" : "status";
+    const sentBefore = sockets[0]!.sent.length;
+    await assert.rejects(observer.request(rejected, {}), /GATEWAY_SCOPE_CONTRACT_VIOLATION/);
+    assert.equal(sockets[0]!.sent.length, sentBefore);
+  }
+  const reviewed = Object.values(reviewedByScope).flat();
+  assert.deepEqual([...new Set(sockets[0]!.sent.map(frame => String(frame.method)).filter(method => method !== "connect"))].sort(), reviewed.sort());
+  assert.equal(sockets[0]!.sent.some(frame => frame.method === "config.set"), false);
+  observer.stop();
+});
+
+test("observer discards the previous grant and fails closed when a reconnect hello is narrower", async t => {
+  const sockets: FakeSocket[] = [], secondHandshake = deferred();
+  const observer = new OpenClawStreamObserver({ url: "ws://fixture", token: "fixture", requestTimeoutMs: 200,
+    reconnectMinMs: 1, reconnectMaxMs: 2, webSocketFactory: () => {
+      const index = sockets.length;
+      const socket = new FakeSocket((current, frame) => queueMicrotask(() => {
+        current.message({ type: "res", id: frame.id, ok: true, payload: frame.method === "connect" ? { type: "hello-ok",
+          server: { version: "2026.6.11" }, auth: { role: "operator", scopes: index === 0 ?
+            ["operator.read", "operator.write", "operator.admin"] : ["operator.read", "operator.write"] } } : { ok: true } });
+        if (index === 1 && frame.method === "connect") queueMicrotask(() => secondHandshake.resolve());
+      }));
+      sockets.push(socket); queueMicrotask(() => socket.challenge()); return socket;
+    } });
+  t.after(() => observer.stop());
+  assert.deepEqual(await observer.request("status", {}), { ok: true });
+  sockets[0]!.close(1006, "fixture reconnect");
+  await withTimeout(secondHandshake.promise, "narrow reconnect handshake");
+  await assert.rejects(observer.request("status", {}), /GATEWAY_SCOPE_CONTRACT_VIOLATION/);
+  assert.deepEqual(sockets[1]!.sent.map(frame => frame.method), ["connect"]);
   observer.stop();
 });

@@ -4,6 +4,7 @@ import { extname, join, normalize, relative, sep } from "node:path";
 import { cookie, cookies, issueSession, newCsrf, verifyPassword, verifySession, type AuthConfig } from "./auth.js";
 import { mockAgents, mockConversation, mockSessions } from "./mock-data.js";
 import { ForkError } from "../domain/fork.js";
+import { GatewayControlError } from "../gateway/stream-client.js";
 import type { PublicPanelRun } from "./run-store.js";
 import { MAX_AVATAR_BYTES, validateSettingsPatch, type PanelSettings, type SettingsPatch, type StoredAvatar } from "./experience-store.js";
 import { MAX_ATTACHMENT_BYTES } from "../storage/attachments.js";
@@ -314,7 +315,14 @@ export function createPanelServer(options: AppOptions) {
         OPENCLAW_COMPACTION_ENTRY_INVALID: [502, "OpenClaw 返回的压缩记录无效"], OPENCLAW_COMPACTION_PARENT_INVALID: [502, "OpenClaw 返回的压缩父链无效"],
         OPENCLAW_COMPACTION_BOUNDARY_INVALID: [502, "OpenClaw 返回的压缩边界无效"], REVISION_CONFLICT: [409, "会话已更新，请刷新后重试。"],
         RUNTIME_NOT_CONFIGURED: [409, "Agent 推理 runtime 未配置。"], COMMAND_UNAVAILABLE: [501, "该命令当前不可用"] });
-      const code = error instanceof ForkError ? error.code : error instanceof Error ? error.message : "INVALID_REQUEST"; const mapped = known[code];
+      Object.assign(known, { GATEWAY_CONNECTION_CLOSED: [503, "OpenClaw Gateway 控制连接已断开，请稍后重试"],
+        GATEWAY_HANDSHAKE_DENIED: [502, "OpenClaw Gateway 拒绝了控制连接，请检查认证配置"],
+        GATEWAY_REQUEST_DENIED: [502, "OpenClaw Gateway 拒绝了控制请求"], GATEWAY_REQUEST_TIMEOUT: [504, "OpenClaw Gateway 控制请求超时"],
+        GATEWAY_RPC_METHOD_NOT_ALLOWED: [502, "该 Gateway 方法未在当前版本允许列表中"],
+        GATEWAY_SCOPE_CONTRACT_VIOLATION: [502, "OpenClaw Gateway 权限契约不匹配"],
+        GATEWAY_TRANSPORT_UNAVAILABLE: [503, "OpenClaw Gateway 控制通道不可用，请检查认证配置"],
+        OPENCLAW_VERSION_UNSUPPORTED: [503, "OpenClaw 版本不受支持"] });
+      const code = error instanceof ForkError ? error.code : error instanceof GatewayControlError ? error.code : error instanceof Error ? error.message : "INVALID_REQUEST"; const mapped = known[code];
       const status = error instanceof HttpError ? error.status : error instanceof SyntaxError ? 400 : error instanceof ForkError ? 409 : mapped?.[0] ?? 500;
       fail(res, status, error instanceof HttpError ? error.code : error instanceof ForkError ? error.code : mapped ? code : "INVALID_REQUEST", error instanceof ForkError ? error.message : mapped?.[1] ?? "请求无法处理", requestId);
     }

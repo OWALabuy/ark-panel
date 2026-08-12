@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { appendFile, stat, utimes, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { completedRunStatus, GatewayRunError, OpenClawCliClient, parseSessionContextUsage, trajectoryRunState } from "../src/gateway/cli-client.js";
+import { GatewayControlError, resolveGatewayControlTransport } from "../src/gateway/stream-client.js";
 import { deferred, tempFixture, waitFor, withTimeout } from "./test-helpers.js";
 
 test("从 trajectory 中按 runId 识别 session.ended", () => {
@@ -98,6 +99,14 @@ test("生成控制 RPC 复用持久 transport，create 直接采用返回的 ses
   assert.equal(created.sessionId, sessionId);
   assert.deepEqual(calls.map(call => call.method), ["sessions.create", "sessions.send", "sessions.delete"]);
   assert.match(String(calls[0]?.params.label), /^panel bridge [0-9a-f]{8}$/);
+});
+
+test("生产拒绝 transport 不会回落到逐次 Gateway CLI RPC", async () => {
+  let cliCalls = 0;
+  const client = new OpenClawCliClient({ sessionsRoots: new Map(), rpc: resolveGatewayControlTransport(),
+    commandRunner: async () => { cliCalls++; throw new Error("CLI fallback must not run"); } });
+  await assert.rejects(client.status(), error => error instanceof GatewayControlError && error.code === "GATEWAY_TRANSPORT_UNAVAILABLE");
+  assert.equal(cliCalls, 0);
 });
 
 test("sessions.list 只采用目标会话的 OpenClaw fresh 上下文用量", async t => {

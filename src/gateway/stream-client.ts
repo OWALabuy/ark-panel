@@ -2,11 +2,69 @@ import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
-import type { GatewayAttachment } from "./adapter.js";
+import { SUPPORTED_OPENCLAW_VERSION, type GatewayAttachment } from "./adapter.js";
 
 const MAX_TEXT_BYTES = 2 * 1024 * 1024;
 const MAX_FRAME_BYTES = 4 * 1024 * 1024;
 const DEFAULT_URL = "ws://127.0.0.1:18789";
+const GATEWAY_OPERATOR_ROLE = "operator";
+const GATEWAY_OPERATOR_SCOPES = ["operator.read", "operator.write", "operator.admin"] as const;
+
+type GatewayOperatorScope = typeof GATEWAY_OPERATOR_SCOPES[number];
+
+// OpenClaw 2026.6.11 classifies these methods at the scopes below. Keep this
+// closed list aligned with every RPC issued by OpenClawStreamObserver and
+// OpenClawCliClient; a new call site must be reviewed before it can send a frame.
+const GATEWAY_CONTROL_METHOD_SCOPES = {
+  "artifacts.download": "operator.read",
+  "artifacts.list": "operator.read",
+  "commands.list": "operator.read",
+  "sessions.abort": "operator.write",
+  "sessions.compact": "operator.admin",
+  "sessions.create": "operator.write",
+  "sessions.delete": "operator.admin",
+  "sessions.list": "operator.read",
+  "sessions.messages.subscribe": "operator.read",
+  "sessions.messages.unsubscribe": "operator.read",
+  "sessions.patch": "operator.admin",
+  "sessions.send": "operator.write",
+  "sessions.subscribe": "operator.read",
+  "status": "operator.read",
+  "tools.catalog": "operator.read",
+  "tools.effective": "operator.read"
+} as const satisfies Record<string, GatewayOperatorScope>;
+
+export type GatewayControlMethod = keyof typeof GATEWAY_CONTROL_METHOD_SCOPES;
+
+export type GatewayControlErrorCode =
+  | "GATEWAY_CONNECTION_CLOSED"
+  | "GATEWAY_HANDSHAKE_DENIED"
+  | "GATEWAY_REQUEST_DENIED"
+  | "GATEWAY_REQUEST_TIMEOUT"
+  | "GATEWAY_RPC_METHOD_NOT_ALLOWED"
+  | "GATEWAY_SCOPE_CONTRACT_VIOLATION"
+  | "GATEWAY_TRANSPORT_UNAVAILABLE"
+  | "OPENCLAW_VERSION_UNSUPPORTED";
+
+export class GatewayControlError extends Error {
+  constructor(readonly code: GatewayControlErrorCode, safeDetail?: string) {
+    super(safeDetail ? `${code}: ${safeDetail}` : code);
+    this.name = "GatewayControlError";
+  }
+}
+
+export interface GatewayControlTransport {
+  request(method: GatewayControlMethod, params: unknown, timeoutMs?: number): Promise<unknown>;
+}
+
+export function resolveGatewayControlTransport(connection?: GatewayControlTransport): GatewayControlTransport {
+  if (connection) return connection;
+  return Object.freeze({
+    request(): Promise<never> {
+      return Promise.reject(new GatewayControlError("GATEWAY_TRANSPORT_UNAVAILABLE"));
+    }
+  });
+}
 
 export type GatewayStreamEvent =
   | { type: "connection"; state: "connected" | "disconnected" }
@@ -39,13 +97,38 @@ interface ObserverOptions {
   onDiagnostic?: (message: string) => void;
 }
 
-interface PendingRequest { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }
+interface PendingRequest { method: string; resolve: (value: unknown) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }
 
 function object(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
 }
 
 function nonEmpty(value: unknown): string | undefined { return typeof value === "string" && value.trim() ? value : undefined; }
+
+function controlMethodScope(method: string): GatewayOperatorScope | undefined {
+  if (!Object.prototype.hasOwnProperty.call(GATEWAY_CONTROL_METHOD_SCOPES, method)) return undefined;
+  return GATEWAY_CONTROL_METHOD_SCOPES[method as keyof typeof GATEWAY_CONTROL_METHOD_SCOPES];
+}
+
+function normalizedControlError(error: unknown, fallback: GatewayControlErrorCode): GatewayControlError {
+  return error instanceof GatewayControlError ? error : new GatewayControlError(fallback);
+}
+
+function validateGatewayHello(value: unknown): ReadonlySet<GatewayOperatorScope> {
+  const hello = object(value), server = object(hello?.server), auth = object(hello?.auth);
+  if (hello?.type !== "hello-ok") throw new GatewayControlError("GATEWAY_HANDSHAKE_DENIED");
+  if (nonEmpty(server?.version) !== SUPPORTED_OPENCLAW_VERSION) throw new GatewayControlError("OPENCLAW_VERSION_UNSUPPORTED");
+  if (auth?.role !== GATEWAY_OPERATOR_ROLE || !Array.isArray(auth.scopes) ||
+    auth.scopes.some(scope => typeof scope !== "string")) {
+    throw new GatewayControlError("GATEWAY_SCOPE_CONTRACT_VIOLATION");
+  }
+  const granted = new Set(auth.scopes);
+  if (auth.scopes.length !== GATEWAY_OPERATOR_SCOPES.length || granted.size !== GATEWAY_OPERATOR_SCOPES.length ||
+    GATEWAY_OPERATOR_SCOPES.some(scope => !granted.has(scope))) {
+    throw new GatewayControlError("GATEWAY_SCOPE_CONTRACT_VIOLATION");
+  }
+  return granted as ReadonlySet<GatewayOperatorScope>;
+}
 
 function contentText(message: unknown): string | undefined {
   const raw = object(message), content = raw?.content;
@@ -81,7 +164,7 @@ export function normalizeGatewayStreamEvent(eventName: string, rawPayload: unkno
   return undefined;
 }
 
-export class OpenClawStreamObserver {
+export class OpenClawStreamObserver implements GatewayControlTransport {
   private socket: WebSocketLike | undefined;
   private stopped = true;
   private connected = false;
@@ -94,6 +177,8 @@ export class OpenClawStreamObserver {
   private readonly reconnectMinMs: number;
   private readonly reconnectMaxMs: number;
   private readonly factory: (url: string) => WebSocketLike;
+  private grantedScopes: ReadonlySet<GatewayOperatorScope> | undefined;
+  private connectionFailure: GatewayControlError | undefined;
 
   constructor(private readonly options: ObserverOptions) {
     this.requestTimeoutMs = options.requestTimeoutMs ?? 10_000;
@@ -107,7 +192,9 @@ export class OpenClawStreamObserver {
 
   stop(): void {
     this.stopped = true; if (this.reconnectTimer) clearTimeout(this.reconnectTimer); this.reconnectTimer = undefined;
-    this.rejectPending(new Error("gateway stream observer stopped")); this.socket?.close(1000, "stopped"); this.socket = undefined; this.connected = false;
+    const error = new GatewayControlError("GATEWAY_TRANSPORT_UNAVAILABLE");
+    this.connectionFailure = error; this.grantedScopes = undefined;
+    this.rejectPending(error); this.socket?.close(1000, "stopped"); this.socket = undefined; this.connected = false;
   }
 
   async observe(sessionKey: string, listener: GatewayStreamListener): Promise<() => void> {
@@ -133,17 +220,22 @@ export class OpenClawStreamObserver {
   private async waitUntilConnected(): Promise<void> {
     const deadline = Date.now() + this.requestTimeoutMs;
     while (!this.connected) {
-      if (this.stopped) throw new Error("gateway stream observer stopped");
-      if (Date.now() >= deadline) throw new Error("gateway stream observer connection timeout");
+      if (this.connectionFailure) throw this.connectionFailure;
+      if (this.stopped) throw new GatewayControlError("GATEWAY_TRANSPORT_UNAVAILABLE");
+      if (Date.now() >= deadline) throw new GatewayControlError("GATEWAY_REQUEST_TIMEOUT", "connect");
       await new Promise(resolve => setTimeout(resolve, 25));
     }
   }
 
   private connect(): void {
     if (this.stopped || this.socket) return;
+    this.connectionFailure = undefined;
     let socket: WebSocketLike;
     try { socket = this.factory(this.options.url); }
-    catch (error) { this.diagnostic(`connect failed: ${error instanceof Error ? error.message : String(error)}`); this.scheduleReconnect(); return; }
+    catch {
+      const error = new GatewayControlError("GATEWAY_TRANSPORT_UNAVAILABLE");
+      this.connectionFailure = error; this.diagnostic(`gateway control connect failed (${error.code})`); this.scheduleReconnect(); return;
+    }
     this.socket = socket;
     socket.addEventListener("message", event => this.handleMessage(event.data));
     socket.addEventListener("close", event => this.handleClose(socket, event));
@@ -172,22 +264,33 @@ export class OpenClawStreamObserver {
     }
     if (frame.type !== "res" || typeof frame.id !== "string") return;
     const pending = this.pending.get(frame.id); if (!pending) return; this.pending.delete(frame.id); clearTimeout(pending.timer);
-    if (frame.ok === true) pending.resolve(frame.payload); else pending.reject(new Error(nonEmpty(object(frame.error)?.message) ?? "gateway request failed"));
+    if (frame.ok === true) pending.resolve(frame.payload);
+    else pending.reject(new GatewayControlError(pending.method === "connect" ? "GATEWAY_HANDSHAKE_DENIED" : "GATEWAY_REQUEST_DENIED"));
   }
 
-  private async connectHandshake(nonce: string): Promise<void> {
+  private async connectHandshake(_nonce: string): Promise<void> {
+    const socket = this.socket;
+    if (!socket) return;
     try {
       const auth = this.options.token || this.options.password ? { ...(this.options.token ? { token: this.options.token } : {}), ...(this.options.password ? { password: this.options.password } : {}) } : undefined;
-      const hello = object(await this.rawRequest("connect", { minProtocol: 4, maxProtocol: 4,
+      const hello = await this.rawRequest("connect", { minProtocol: 4, maxProtocol: 4,
         client: { id: "gateway-client", displayName: "ark-panel-stream", version: "0.1.0", platform: process.platform, mode: "backend", instanceId: randomUUID() },
-        caps: ["tool-events"], ...(auth ? { auth } : {}), role: "operator", scopes: ["operator.read", "operator.write", "operator.admin"] }));
-      const server = object(hello?.server), version = nonEmpty(server?.version);
-      if (version !== "2026.6.11") throw new Error(`unsupported gateway version ${String(version ?? "unknown")}`);
-      const helloAuth = object(hello?.auth); this.diagnostic(`connected with scopes ${Array.isArray(helloAuth?.scopes) ? helloAuth.scopes.join(",") : "unknown"}`);
+        caps: ["tool-events"], ...(auth ? { auth } : {}), role: GATEWAY_OPERATOR_ROLE, scopes: [...GATEWAY_OPERATOR_SCOPES] });
+      if (this.socket !== socket) throw new GatewayControlError("GATEWAY_CONNECTION_CLOSED");
+      const grantedScopes = validateGatewayHello(hello);
+      this.grantedScopes = grantedScopes;
+      await this.rawRequest("sessions.subscribe", {});
+      if (this.socket !== socket) throw new GatewayControlError("GATEWAY_CONNECTION_CLOSED");
+      this.connectionFailure = undefined;
       this.connected = true; this.reconnectDelay = this.reconnectMinMs; this.subscribed.clear(); this.broadcastConnection("connected");
-      await this.request("sessions.subscribe", {});
+      this.diagnostic(`gateway control connected (${GATEWAY_OPERATOR_SCOPES.join(",")})`);
       for (const key of this.listeners.keys()) await this.subscribe(key);
-    } catch (error) { this.diagnostic(`handshake failed: ${error instanceof Error ? error.message : String(error)}`); this.socket?.close(4001, "handshake failed"); }
+    } catch (error) {
+      const normalized = normalizedControlError(error, "GATEWAY_HANDSHAKE_DENIED");
+      this.connectionFailure = normalized; this.grantedScopes = undefined;
+      this.diagnostic(`gateway control handshake failed (${normalized.code})`);
+      if (this.socket === socket) this.invalidateSocket(socket, normalized, 4001, "handshake failed");
+    }
   }
 
   private async subscribe(sessionKey: string): Promise<void> {
@@ -195,34 +298,47 @@ export class OpenClawStreamObserver {
     await this.request("sessions.messages.subscribe", { key: sessionKey }); this.subscribed.add(sessionKey);
   }
 
-  request(method: string, params: unknown, timeoutMs?: number): Promise<unknown> {
+  request(method: GatewayControlMethod, params: unknown, timeoutMs?: number): Promise<unknown> {
+    const requiredScope = controlMethodScope(method);
+    if (!requiredScope) return Promise.reject(new GatewayControlError("GATEWAY_RPC_METHOD_NOT_ALLOWED"));
     this.start();
-    return this.requestConnected(method, params, timeoutMs);
+    return this.requestConnected(method, requiredScope, params, timeoutMs);
   }
 
-  private async requestConnected(method: string, params: unknown, timeoutMs?: number): Promise<unknown> {
+  private async requestConnected(method: string, requiredScope: GatewayOperatorScope, params: unknown, timeoutMs?: number): Promise<unknown> {
     await this.waitUntilConnected();
+    if (!this.grantedScopes?.has(requiredScope)) throw new GatewayControlError("GATEWAY_SCOPE_CONTRACT_VIOLATION");
     return await this.rawRequest(method, params, timeoutMs);
   }
 
   private rawRequest(method: string, params: unknown, timeoutMs = this.requestTimeoutMs): Promise<unknown> {
-    const socket = this.socket; if (!socket || socket.readyState !== 1) return Promise.reject(new Error("gateway stream is not connected"));
+    if (method !== "connect") {
+      const requiredScope = controlMethodScope(method);
+      if (!requiredScope) return Promise.reject(new GatewayControlError("GATEWAY_RPC_METHOD_NOT_ALLOWED"));
+      if (!this.grantedScopes?.has(requiredScope)) {
+        return Promise.reject(new GatewayControlError("GATEWAY_SCOPE_CONTRACT_VIOLATION"));
+      }
+    }
+    const socket = this.socket;
+    if (!socket || socket.readyState !== 1) return Promise.reject(new GatewayControlError("GATEWAY_TRANSPORT_UNAVAILABLE"));
     const id = randomUUID();
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         if (!this.pending.has(id)) return;
-        const error = new Error(`gateway request timeout for ${method}`);
+        const error = new GatewayControlError("GATEWAY_REQUEST_TIMEOUT", method);
         this.diagnostic(error.message);
         this.invalidateSocket(socket, error, 1011, "request timeout");
       }, timeoutMs); timer.unref();
-      this.pending.set(id, { resolve, reject, timer });
+      this.pending.set(id, { method, resolve, reject, timer });
       try { socket.send(JSON.stringify({ type: "req", id, method, params })); }
-      catch (error) { clearTimeout(timer); this.pending.delete(id); reject(error instanceof Error ? error : new Error(String(error))); }
+      catch { clearTimeout(timer); this.pending.delete(id); reject(new GatewayControlError("GATEWAY_TRANSPORT_UNAVAILABLE")); }
     });
   }
 
-  private handleClose(socket: WebSocketLike, event: WebSocketCloseEvent): void {
-    if (this.socket !== socket) return; this.socket = undefined; this.rejectPending(new Error(`gateway stream closed (${event.code}): ${event.reason}`));
+  private handleClose(socket: WebSocketLike, _event: WebSocketCloseEvent): void {
+    if (this.socket !== socket) return; this.socket = undefined;
+    const error = this.connectionFailure ?? new GatewayControlError("GATEWAY_CONNECTION_CLOSED");
+    this.connectionFailure = error; this.grantedScopes = undefined; this.rejectPending(error);
     if (this.connected) { this.connected = false; this.subscribed.clear(); this.broadcastConnection("disconnected"); }
     if (!this.stopped) this.scheduleReconnect();
   }
@@ -230,7 +346,8 @@ export class OpenClawStreamObserver {
   private invalidateSocket(socket: WebSocketLike, error: Error, code: number, reason: string): void {
     if (this.socket !== socket) return;
     this.socket = undefined;
-    this.rejectPending(error);
+    const normalized = normalizedControlError(error, "GATEWAY_TRANSPORT_UNAVAILABLE");
+    this.connectionFailure = normalized; this.grantedScopes = undefined; this.rejectPending(normalized);
     if (this.connected) { this.connected = false; this.subscribed.clear(); this.broadcastConnection("disconnected"); }
     try { socket.close(code, reason); } catch { /* the connection is already unusable */ }
     if (!this.stopped) this.scheduleReconnect();

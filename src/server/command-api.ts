@@ -3,6 +3,7 @@ import type { JsonObject, TranscriptDocument } from "../domain/transcript.js";
 import { commitPanelTranscript, listPanelSessions, loadPanelSession, updatePanelMetadata, type PanelMetadata } from "../storage/panel-sessions.js";
 import { SessionOperationCoordinator } from "./session-operation.js";
 import { currentTranscriptBranch } from "../domain/branch.js";
+import { GatewayControlError } from "../gateway/stream-client.js";
 
 export const PANEL_COMMAND_ALLOWLIST_VERSION = 3;
 export const PANEL_COMMAND_ALLOWLIST = Object.freeze(["model", "think", "reasoning", "new", "commands", "help", "status", "models", "tools", "usage", "compact"] as const);
@@ -82,7 +83,7 @@ export class PanelCommandApi {
   private async validateOverrides(agentId: string, overrides: { modelOverride?: string; thinkingLevel?: string }): Promise<void> {
     if (!this.providers.validateOverrides) return;
     try { await this.providers.validateOverrides(agentId, overrides); }
-    catch { throw new Error("THINKING_LEVEL_UNSUPPORTED"); }
+    catch (error) { if (error instanceof GatewayControlError) throw error; throw new Error("THINKING_LEVEL_UNSUPPORTED"); }
   }
   async dispatch(recordId: string, request: CommandRequest): Promise<CommandResult> {
     const name = commandName(request.command);

@@ -11,7 +11,7 @@ import { PanelCommandApi } from "./command-api.js";
 import { PanelCompactionApi } from "./compaction-api.js";
 import { SessionOperationCoordinator } from "./session-operation.js";
 import { ExperienceStore } from "./experience-store.js";
-import { loadGatewayStreamAuth, OpenClawStreamObserver } from "../gateway/stream-client.js";
+import { loadGatewayStreamAuth, OpenClawStreamObserver, resolveGatewayControlTransport } from "../gateway/stream-client.js";
 import { PanelAttachmentApi } from "./attachment-api.js";
 import { PanelMemoryApi } from "./memory-api.js";
 import { PanelMemoryConsolidationApi } from "./memory-consolidation-api.js";
@@ -36,12 +36,15 @@ const experienceAgentIds = new Set([...config.readAgents.map(agent => agent.agen
 const experience = config.dataRoot ? new ExperienceStore(config.dataRoot, [...experienceAgentIds]) : undefined;
 let generationApi: PanelGenerationApi | undefined;
 let attachmentMaintenance: NodeJS.Timeout | undefined;
-const gatewayAuth = config.dataRoot && config.runtimes.size ? await loadGatewayStreamAuth(process.env, true) : undefined;
+const gatewayControlRequired = Boolean(config.dataRoot && (config.readAgents.length || config.runtimes.size || config.memoryRuntimes.size));
+const gatewayAuth = gatewayControlRequired ? await loadGatewayStreamAuth(process.env, true) : undefined;
 const gatewayConnection = gatewayAuth ? new OpenClawStreamObserver({ ...gatewayAuth, requestTimeoutMs: 15_000,
   onDiagnostic: message => process.stderr.write(`[ark-panel] gateway stream: ${message}\n`) }) : undefined;
+if (gatewayControlRequired && !gatewayAuth) process.stderr.write("[ark-panel] gateway control unavailable (GATEWAY_TRANSPORT_UNAVAILABLE)\n");
 gatewayConnection?.start();
+const gatewayControl = resolveGatewayControlTransport(gatewayConnection);
 const gateway = new OpenClawCliClient({ sessionsRoots: roots, gatewayRunTimeoutMs: config.gatewayRunTimeoutMs,
-  watcherGraceMs: config.runWatcherGraceMs, memoryIndexAgentIds, ...(gatewayConnection ? { rpc: gatewayConnection } : {}) });
+  watcherGraceMs: config.runWatcherGraceMs, memoryIndexAgentIds, rpc: gatewayControl });
 const streamObserver = process.env.PANEL_OPENCLAW_STREAMING === "0" ? undefined : gatewayConnection;
 const bridge = new BridgeService(gateway, new FileBridgeMaterializer(), roots, streamObserver, gatewayConnection);
 if (config.dataRoot && config.runtimes.size) {

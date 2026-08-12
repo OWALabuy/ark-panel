@@ -120,15 +120,17 @@ ssh -L 8790:127.0.0.1:8790 <用户>@<公网地址>
 - **关键事实**：源码中的 `isPrimarySessionTranscriptFileName` 明确将 `.reset.`、`.deleted.`、`.bak` 和 `.trajectory.` 文件排除在主清单之外。因此，**`sessions.list` 无法返回所有 reset 归档会话**。实测 claude 会话桶中有 12 个 `.reset.` 文件，而索引的历史列表中只有 8 条。
 - **结论**：为完整列出会话，**服务端必须扫描 `sessions/` 目录**，识别活跃会话 `<uuid>.jsonl` 和 reset 归档 `<uuid>.jsonl.reset.<ts>`，并建立自己的只读检索索引，不能只依赖 `sessions.json`。当前 claude agent 的 reset 文件均采用现行 `.reset.` 格式；不兼容的早期 `-topic-N` 文件只存在于 main agent（喵团子）的目录中。
 
-### 4.2 gateway 提供的 RPC（WebSocket `127.0.0.1:18789`，使用点号命名，具有 operator.read / write / admin scope）
-| 能力 | 方法 | 备注 |
+### 4.2 面板使用的 Gateway RPC 与 scope 矩阵
+
+面板只通过一条到 `127.0.0.1:18789` 的持久控制 WebSocket 调用下表方法。OpenClaw `2026.6.11` 的方法分类与面板用途如下；代码中的版本化允许列表必须与此表一致，未登记方法在发帧前本地拒绝。
+
+| scope | 方法 | 面板用途 |
 |---|---|---|
-| 发消息 | `chat.send` | operator.write |
-| 拉历史 | `chat.history` / `chat.startup` / `chat.message.get` | + `sessions.messages.subscribe` 增量订阅;+ HTTP `GET /sessions/<id>/history` |
-| 停止生成 | `chat.abort` / `sessions.abort` | + HTTP `POST /sessions/<id>/kill` |
-| 列会话 | `sessions.list` | **只返回索引中登记的会话，无法覆盖全部 reset 归档和孤立文件**（见 4.1） |
-| fork | **只有** `sessions.compaction.branch` | 只能从 compaction 检查点分支，**不能选择任意消息**（见 §5） |
-| 编辑重发 | **无原生 RPC** | `message.action` 用于编辑或删除 IM 渠道消息，**不能让模型重新生成** |
+| `operator.read` | `status`、`commands.list`、`tools.catalog`、`tools.effective`、`sessions.list`、`sessions.subscribe`、`sessions.messages.subscribe` / `sessions.messages.unsubscribe`、`artifacts.list`、`artifacts.download` | 状态/目录读取、session 与消息观察、run artifact 收集 |
+| `operator.write` | `sessions.create`、`sessions.send`、`sessions.abort` | 创建一次性 session、发送文本或附件、停止 run |
+| `operator.admin` | `sessions.patch`、`sessions.compact`、`sessions.delete` | 临时 override、压缩、注销临时 session |
+
+OpenClaw 中 write 能满足 read、admin 能满足全部 `operator.*`，但面板不能据此放宽握手：请求集合和 `hello.auth.scopes` 都必须恰好是 read、write、admin，缺少、重复或多出 scope 均拒绝。该连接没有 fork/编辑重发 RPC；任意消息 fork 仍由面板权威数据层实现（见 §5）。`sessions.list` 也仍只返回 Gateway 索引中的记录，不能代替 §4.1 的只读磁盘扫描。
 
 ### 4.3 ClawGPT“会话初始化冲突”的原因
 - 具体错误为 `reply session initialization conflicted for ${sessionKey}`（`dist/get-reply-*.js`）。
@@ -136,9 +138,9 @@ ssh -L 8790:127.0.0.1:8790 <用户>@<公网地址>
 - ClawGPT 自行组合 fork 请求时触发了这一竞态。规避方式是：同一 `sessionKey` 的初始化必须串行执行；fork 应通过 gateway 提供的单一存储操作完成，不能组合 `chat.send` 和手动创建会话。
 
 ### 4.4 鉴权方式（修正旧版结论）
-- 核心逻辑为 `roleCanSkipDeviceIdentity(role, sharedAuthOk)`：**operator 角色通过 token 验证后，可以跳过设备身份签名。**
-- 设备身份签名只适用于浏览器类客户端（`openclaw-control-ui`）。面板采用服务端架构，以 operator 角色和 token 从 localhost 连接，因此不需要设备身份签名。旧版提出启用 `dangerouslyDisableDeviceAuth` 的方案不再采用；该开关既无必要，也会降低安全性。
-- token 使用常量时间算法与 `gateway.auth.token` 比较；如果配置缺失，gateway 会在启动时生成一次性 token 并告警。实现时需要确认 `gateway.auth.mode=token`，并配置一个长期使用的 token 供面板服务端连接。
+- OpenClaw `2026.6.11` 对 direct-loopback 的 `gateway-client/backend` + 共享 token/password 提供本机 backend self-pairing 分支，因此面板服务端不需要伪造浏览器设备身份，也不启用 `dangerouslyDisableDeviceAuth`。远程、浏览器或显式 device-token 身份不在这条保证内。
+- 连接角色固定为 `operator`，请求并核验精确的 read/write/admin scope 集合。scope 是同一个受信 Gateway operator 域内的纵深 guardrail，不是 hostile multi-tenant 隔离；共享 token/password 必须视为 owner 级 secret。真正跨用户/机器的隔离需要独立 Gateway/OS 用户，而不是只拆 scope 字符串。
+- token 使用常量时间算法与 `gateway.auth.token` 比较。应配置长期、可轮换的 secret；只存于 Gateway 配置或面板环境，不下发浏览器、不写日志。轮换时同步更新两端并重启，回滚也同步恢复两端。本次 scope 契约不要求重新签发既有凭据。
 
 ---
 
@@ -172,7 +174,7 @@ gateway 的会话索引属于其内部状态：它仅使用进程内锁，也没
 > **面板独占写入 panel transcript/metadata；gateway 独占写入 `sessions.json` 和 active/reset transcript。面板读取索引仅为进程内派生状态，不写共享文件。两个进程不写入同一权威文件，从架构上避免进程内锁无法协调跨进程写入的问题。**
 
 - 实测可行流程是：调用 `sessions.create` 取得 gateway 已登记的一次性 session；覆盖其 transcript，只物化到上一轮完整 run；用 `sessions.send` 提交尚未写入文件的最新用户消息；完成后从临时 transcript 取得新增的完整 entry 组。最新用户消息只出现一次。一次性 session 不复用。
-- 面板复用一条已认证的持久 Gateway WebSocket 执行生成控制 RPC 与接收流式事件，避免每个 `sessions.create/send/delete` 都启动 CLI、重新握手。CLI 仅保留给本地命令和无持久连接的测试/降级场景。
+- 面板复用一条已认证的持久 Gateway WebSocket 执行生成控制 RPC 与接收流式事件，避免每个 `sessions.create/send/delete` 都启动 CLI、重新握手。连接固定请求并精确核验 `operator.read` / `operator.write` / `operator.admin`，且只允许 §4.2 的 RPC。CLI 仅保留给本地命令和显式隔离验收工具；生产无法解析凭据或控制连接断开时注入稳定拒绝 transport，保留面板只读访问，但绝不自动降级为逐次 Gateway CLI RPC。
 - 成功 run 在新增 entries 已写入可恢复的 run record、随后原子提交面板 transcript 后即可向浏览器完成；临时 session 注销与 artifact 清理由后台执行。run record 的 `cleanupPending` 是重启恢复依据，失败路径仍同步 abort/清理，不能把可能仍运行的 session 当作成功释放。
 - `sessions.delete` 能注销索引，但 transcript 只会改名为 `.deleted.*`，trajectory 文件仍会残留。因此 Owl 已选择：每个真实 agent 配置一个无渠道绑定的专用 runtime agent，与目标 agent 共用 workspace、sessions 目录隔离；先用官方 RPC 注销，再在 runtime agent 的 sessions 根目录内执行严格受限的 artifact 清理。不维护 OpenClaw 补丁分支。
 - 清理只接受本轮由服务端创建并记录的 sessionId 和当前版本已知文件类型；拒绝符号链接、路径越界、未知文件和非 allowlist runtime 根目录。OpenClaw 版本不是 `2026.6.11` 时拒绝推理和清理，升级后须重新验证。
@@ -246,9 +248,9 @@ gateway 的会话索引属于其内部状态：它仅使用进程内锁，也没
 - **运行状态流**：浏览器先取得 `runId`，可查询当前快照，也可通过独立 SSE 订阅生命周期。订阅首帧总是当前快照；终态为 completed / failed / aborted。SSE 在终态前 EOF 只表示连接丢失，绝不等价于成功。
 - **多端同步**：会话正文仍靠 revision 轮询同步完整提交；正在运行、失败和取消则以 run 状态为准，不能用「revision 没变化」猜测任务仍在运行。多个浏览器可以观察同一服务端 run。
 - **停止确认**：本地取消 fetch 与停止远端推理是两件事。界面只有在服务端确认 aborting / aborted 后才显示相应状态；停止请求失败时显示「状态未知」并继续查询。
-- **上游预览流**：服务端另建一条到本机 OpenClaw Gateway 的 WebSocket，以 `gateway-client/backend`、共享密钥和最小 `operator.read` scope 连接；连接只在服务端存在，Gateway 密钥不下发浏览器。它订阅 `chat` 与 `session.tool`，按 `sessionKey + runId` 路由到对应面板 run。OpenClaw 2026.6.11 的文本事件是约 150 ms 合并后的完整快照，并非逐 token；工具只展示开始、完成/失败和参数，不逐行转发 stdout，也不展示 reasoning。
+- **上游预览流**：预览复用 §4.2 的单条服务端控制 WebSocket，而不是另建 read-only 凭据。该连接以 `gateway-client/backend`、共享密钥、`operator` 角色和精确 read/write/admin scope 集合连接；密钥只在服务端存在，不下发浏览器。它订阅 `chat` 与 `session.tool`，按 `sessionKey + runId` 路由到对应面板 run。OpenClaw 2026.6.11 的文本事件是约 150 ms 合并后的完整快照，并非逐 token；工具只展示开始、完成/失败和参数，不逐行转发 stdout，也不展示 reasoning。`PANEL_OPENCLAW_STREAMING=0` 只关闭这层预览投影，不关闭控制连接或撤销 scope。
 - **临时预览不入库**：文本和工具状态只保存在进程内 run 快照，经现有 SSE 中转。浏览器重连会先拿当前预览快照；服务重启后预览可以丢失，但权威 run 和生成不会因此丢失。正常完成时 UI 删除预览并加载校验后原子提交的完整 transcript，因此不会产生重复消息或半个 tool group。
-- **断线降级**：上游 WebSocket 自动退避重连并重新订阅；断线只把预览标记为 degraded，不能中止、重发或判定 run 失败。最终完成判断仍来自 trajectory watcher。显式停止仍走原有 abort/release 确认路径，停止后的迟到增量被丢弃。
+- **断线边界**：上游 WebSocket 自动退避重连并重新订阅。已经接受的 run 仍由 trajectory watcher 判断最终完成，预览断线不能中止、重发或判定 run 失败；但新 generation、typed command、附件或 lifecycle RPC 必须等控制连接恢复，否则稳定失败关闭，不会偷偷扩大权限或切到另一份凭据。显式停止仍走原有 abort/release 确认路径，停止后的迟到增量被丢弃。
 
 ### 6.4 消息内容、工具调用与思考过程展示
 - transcript 里 tool_use / tool_result 是独立的 content block，扩展思考块同理。

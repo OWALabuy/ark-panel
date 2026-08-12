@@ -5,6 +5,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { assertSupportedVersion, type CollectedOutput, type CommandArgument, type CommandsCatalog, type ConfiguredToolsCatalog, type CreatedSession, type EffectiveToolsInventory, type GatewayAttachment, type GatewayClient, type GatewayCommand, type GatewayCompactionResult, type GatewayStatus, type ModelsCatalog, type OpenClawModel, type SessionOverrides, type ToolCatalogEntry, type ToolCatalogGroup } from "./adapter.js";
 import type { OpenClawContextUsage } from "../domain/context-usage.js";
+import type { GatewayControlMethod, GatewayControlTransport } from "./stream-client.js";
 
 interface CliOptions {
   executable?: string;
@@ -23,7 +24,7 @@ interface CliOptions {
   memoryIndexAgentIds?: ReadonlySet<string>;
   commandRunner?: (executable: string, args: string[], timeoutMs: number) => Promise<string>;
   /** Persistent gateway transport; CLI remains available for local-only commands. */
-  rpc?: { request(method: string, params: unknown, timeoutMs?: number): Promise<unknown> };
+  rpc?: GatewayControlTransport;
 }
 
 export type GatewayRunErrorCode = "GATEWAY_RUN_TIMEOUT" | "GATEWAY_RUN_ABORTED" | "GATEWAY_RUN_FAILED" |
@@ -239,7 +240,7 @@ export class OpenClawCliClient implements GatewayClient {
   private readonly sessionIdsByKey = new Map<string, string>();
   private readonly memoryIndexAgentIds: ReadonlySet<string>;
   private readonly commandRunner: (executable: string, args: string[], timeoutMs: number) => Promise<string>;
-  private readonly rpc: { request(method: string, params: unknown, timeoutMs?: number): Promise<unknown> } | undefined;
+  private readonly rpc: GatewayControlTransport | undefined;
   constructor(options: CliOptions) {
     this.executable = options.executable ?? "openclaw"; this.sessionsRoots = options.sessionsRoots;
     this.requestTimeoutMs = options.requestTimeoutMs ?? 15_000;
@@ -254,7 +255,7 @@ export class OpenClawCliClient implements GatewayClient {
     }
     if (!Number.isInteger(this.memoryIndexTimeoutMs) || this.memoryIndexTimeoutMs < 1) throw new Error("memoryIndexTimeoutMs 必须是正整数");
   }
-  private async call<T>(method: string, params: unknown, timeout = this.requestTimeoutMs): Promise<T> {
+  private async call<T>(method: GatewayControlMethod, params: unknown, timeout = this.requestTimeoutMs): Promise<T> {
     if (this.rpc) return await this.rpc.request(method, params, timeout) as T;
     const output = await this.commandRunner(this.executable, ["gateway", "call", method, "--json", "--timeout", String(timeout), "--params", payload(params)], timeout + 2_000);
     return JSON.parse(output) as T;

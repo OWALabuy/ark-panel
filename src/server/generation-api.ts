@@ -11,6 +11,7 @@ import { headerWithContextUsage } from "../domain/context-usage.js";
 import { SessionOperationCoordinator } from "./session-operation.js";
 import { PanelRunStore, publicRun, terminalRunStatuses, type PanelRunRecord, type PublicPanelRun, type PublicRunStream, type PublicRunTool } from "./run-store.js";
 import { GatewayRunError } from "../gateway/cli-client.js";
+import { GatewayControlError } from "../gateway/stream-client.js";
 import { assignSessionAttachments, garbageCollectAttachments, getSessionAttachment, pruneSessionAttachments,
   readSessionAttachmentBytes, removeSessionAttachments, storeSessionAttachment } from "../storage/attachments.js";
 import { currentTranscriptBranch } from "../domain/branch.js";
@@ -237,7 +238,7 @@ export class PanelGenerationApi implements GenerationApi {
       recoverable = await this.runStore.get(accepted.runId);
       const committedAfterRecovery = recoverable?.plannedUserEntryId ? await this.committedRevision(recoverable.recordId, recoverable.plannedUserEntryId) : undefined;
       if (recoverable && committedAfterRecovery) { await this.transition(recoverable, { status: "completed", finishedAt: new Date().toISOString(), revision: committedAfterRecovery }); return; }
-      const gatewayCode = error instanceof GatewayRunError ? error.code : undefined;
+      const gatewayCode = error instanceof GatewayRunError ? error.code : error instanceof GatewayControlError ? error.code : undefined;
       const abortUnconfirmed = gatewayCode === "GATEWAY_ABORT_RELEASE_TIMEOUT" || error instanceof Error && error.message === "RUN_ABORT_UNCONFIRMED";
       const aborted = error instanceof Error && error.message === "BRIDGE_ABORTED";
       const code = abortUnconfirmed ? "RUN_ABORT_UNCONFIRMED" : aborted ? "RUN_ABORTED" : gatewayCode ?? (error instanceof ContextBudgetExceededError ? error.code : error instanceof Error &&
@@ -249,6 +250,14 @@ export class PanelGenerationApi implements GenerationApi {
         ATTACHMENTS_INVALID: "附件列表无效，请重新选择。", ATTACHMENTS_TOO_LARGE: "单次附件总量不能超过 15 MiB。",
         ATTACHMENT_ALREADY_ASSIGNED: "附件已属于历史消息，请重新上传后发送。", ATTACHMENT_NOT_OWNED_BY_SESSION: "附件不属于当前会话，请重新选择。",
         GATEWAY_ATTACHMENT_TRANSPORT_UNAVAILABLE: "附件传输通道不可用，请检查 OpenClaw Gateway 认证配置。",
+        GATEWAY_CONNECTION_CLOSED: "OpenClaw Gateway 控制连接已断开，请稍后重试。",
+        GATEWAY_HANDSHAKE_DENIED: "OpenClaw Gateway 拒绝了控制连接，请检查认证配置。",
+        GATEWAY_REQUEST_DENIED: "OpenClaw Gateway 拒绝了控制请求。",
+        GATEWAY_REQUEST_TIMEOUT: "OpenClaw Gateway 控制请求超时，请稍后重试。",
+        GATEWAY_RPC_METHOD_NOT_ALLOWED: "该 Gateway 方法未在当前版本允许列表中。",
+        GATEWAY_SCOPE_CONTRACT_VIOLATION: "OpenClaw Gateway 权限契约不匹配。",
+        GATEWAY_TRANSPORT_UNAVAILABLE: "OpenClaw Gateway 控制通道不可用，请检查认证配置。",
+        OPENCLAW_VERSION_UNSUPPORTED: "OpenClaw 版本不受支持。",
         GATEWAY_RUN_ABORTED: "OpenClaw 中止了本次运行，请重试。", GATEWAY_RUN_FAILED: "OpenClaw 运行失败，请检查服务日志后重试。",
         GATEWAY_RUN_NOT_STARTED: "任务已被 OpenClaw 接受，但在等待期限内未观察到开始执行，请重试。",
         GATEWAY_ABORT_RELEASE_TIMEOUT: "已请求 OpenClaw 停止运行，但未能确认资源释放，请稍后再试。",

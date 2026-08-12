@@ -3,6 +3,7 @@ import test, { type TestContext } from "node:test";
 import { commitPanelTranscript, createPanelSession, loadPanelSession } from "../src/storage/panel-sessions.js";
 import { PANEL_COMMAND_ALLOWLIST_VERSION, PanelCommandApi, transcriptUsage } from "../src/server/command-api.js";
 import { tempFixture } from "./test-helpers.js";
+import { GatewayControlError } from "../src/gateway/stream-client.js";
 
 async function fixture(t: TestContext) {
   const root = await tempFixture(t, "panel-command-"), agentId = "agent", recordId = "record";
@@ -50,6 +51,17 @@ test("思考档在派发时通过真实 override provider 校验，切模型会�
   assert.deepEqual(seen.at(-1), { modelOverride: "provider/model", thinkingLevel: "high" });
   await assert.rejects(api.dispatch(x.recordId, { command: "model", args: ["provider/other"] }), /THINKING_LEVEL_UNSUPPORTED/);
   assert.equal((await loadPanelSession(x.root, x.agentId, x.recordId)).metadata.modelOverride, "provider/model");
+});
+
+test("override 校验保留已脱敏的 Gateway 控制错误", async t => {
+  const x = await fixture(t);
+  const api = new PanelCommandApi(x.root, [x.agentId], {
+    async models() { return [{ key: "provider/model", available: true }]; }, async commands() { return []; },
+    async status() { return {}; }, async createPanel() { return {}; },
+    async validateOverrides() { throw new GatewayControlError("GATEWAY_SCOPE_CONTRACT_VIOLATION", "fixture-private-detail"); }
+  });
+  await assert.rejects(api.dispatch(x.recordId, { command: "think", args: ["high"] }), error =>
+    error instanceof GatewayControlError && error.code === "GATEWAY_SCOPE_CONTRACT_VIOLATION");
 });
 
 test("C 类命令只读，new 复用面板会话创建能力", async t => {

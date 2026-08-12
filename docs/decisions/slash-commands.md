@@ -31,7 +31,7 @@
 - gateway **没有** `commands.execute` / `command.dispatch` 之类的命令执行 RPC。命令的唯一执行方式，是把 `/xxx` 当作**普通消息文本**提交给 `chat.send` / `sessions.send`，send 处理路径在内部识别 `/` 前缀并走命令分派（`handleCommands`）。
 - `sessions.send` 直接委托给 `chat.send`。因此**面板推理桥接的那条 `sessions.send`，只要提交文本以 `/` 开头，命令就会被真的执行**，且被 gateway 标为 `authorized: true`。
 - 但它作用的对象是那个**一次性临时 session**：`/compact` 压缩的是即将被删的副本，`/model` 改的是临时 entry 的 override。`sessions.delete` 一删，这些状态全部消失，对面板持久 transcript 零影响。
-- **安全事实（划重点）**：面板当前以 `operator.admin` scope 连接 gateway（清理用的 `sessions.delete` 需要 admin）。owner 判定 `senderIsOwnerByScope` 只要求「内部 channel + 连接持有 `operator.admin`」即成立。这意味着：**任何 `/` 文本一旦漏进推理桥接，`/bash`、`/restart` 这类命令会被 gateway 自动授权执行。** v1 在服务端拒绝一切 `/` 开头输入，不是保守，是必需的隔离防线。
+- **安全事实（划重点）**：面板采用一条精确请求 `operator.read` / `operator.write` / `operator.admin` 的本机控制连接；`sessions.patch`、`sessions.compact`、`sessions.delete` 需要 admin。owner 判定 `senderIsOwnerByScope` 只要求「内部 channel + 连接持有 `operator.admin`」即成立。这意味着：**任何 `/` 文本一旦漏进推理桥接，`/bash`、`/restart` 这类命令会被 gateway 自动授权执行。** v1 在服务端拒绝一切 `/` 开头输入，不是保守，是必需的隔离防线。scope 精确握手与 RPC 允许列表只缩小意外调用面，不能替代这条内容隔离。
 
 ### 由此确立的两条设计原则
 
@@ -70,7 +70,7 @@
 - Owl 已定：输入框敲 `/` 触发命令，而非纯下拉列表。理由是 **skill 命令是动态注册的**（`skill:<name>`），数量与名称随装配变化，列表点选不实用；打字补全更顺手。
 - 客户端在输入框敲 `/` 时做**命令补全**（来源 `commands.list` + 面板原生命令）。allowlist 内命令可选择执行；其余命令灰显并标注「仅 OpenClaw 原生渠道可用」，客户端不派发。
 - 选中命令后，**走独立的命令派发 API**（例如 `POST /api/v1/sessions/<id>/command`），**不是**普通消息发送接口。这条独立路径在服务端按四分类校验并映射到原生操作或 typed RPC。
-- **不变量**：普通消息发送接口永远拒绝 `/`；命令永远从独立派发路径进入。两条路径的隔离，是「admin 连接不成为脚枪」的结构性保证——只要隔离守住，就无需为安全而降权连接（降权记为后续可选加固，非必需）。
+- **不变量**：普通消息发送接口永远拒绝 `/`；命令永远从独立派发路径进入。两条路径的隔离，是「admin 连接不成为脚枪」的结构性保证。当前架构决定接受单条带 admin 的本机控制连接并精确限制其 role/scopes/RPC；若未来拆成观察、写入与管理连接，必须作为带凭据迁移和固定版本验收的独立工作项，不能在命令实现中静默换身份。
 
 ### 仍需遵守（沿用并细化原「原则」）
 
@@ -80,6 +80,7 @@
 4. A 类会话设置持久化在**面板会话 metadata**，而不是依赖临时 session 或长期 runtime session。
 5. `/stop` 用 `sessions.abort` 对当前活动 run 的 sessionKey 调用（面板已有停止生成能力，可直接复用）。
 6. OpenClaw 升级后重新拉取 `commands.list` 并复核分派机制（见 engineering-decisions「版本控制与升级维护」软耦合面第 3 项）。
+7. Gateway transport 只发送 `engineering-decisions.md` 已登记的版本化 RPC；新增 typed RPC 必须同时核实对应 scope、更新允许列表与 fake WebSocket 契约测试。
 
 ### 源码依据（OpenClaw 2026.6.11）
 

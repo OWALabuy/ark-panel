@@ -64,7 +64,7 @@ openclaw agents add paneltest --non-interactive \
 - `~/.openclaw/agents/paneltest/sessions/` 目录存在，且与 `claude` 的会话目录是不同路径。
 - `openclaw.json` 里 `claude` agent 的配置项逐字未变（改动前后 diff 只多出 `paneltest`）。
 
-gateway 连接凭证：读 `~/.openclaw/openclaw.json` 的 `gateway.auth.token`。若为空，说明 gateway 用的是启动时生成的临时 token，此时**停下**，在任务清单里记一条“需要 Owl 配置固定 token”，先做不依赖 gateway 的部分（见 §6 分段）。
+Gateway 连接凭证：读 `~/.openclaw/openclaw.json` 的 `gateway.auth.token` / `gateway.auth.password`，也可由显式的面板环境变量覆盖。共享 secret 必须长期可轮换且只留在服务端；若 Gateway 要求认证而没有可解析的固定凭据，就**停下**，先做不依赖 Gateway 的部分（见 §6 分段），不能把 secret 写进仓库或日志。
 
 ---
 
@@ -314,14 +314,21 @@ fork 和编辑重发共用底层（见 §5.0）：都是「从目标 entry 回�
 ### 5.2 连接 gateway 的方式
 
 - 通过 localhost WebSocket 连 `127.0.0.1:18789`。
-- 握手用 operator 角色 + token（`gateway.auth.token`）。**不需要设备身份签名**（operator + token 通过后可跳过，依据见方案文档 §4.4）。
-- 连接 `client` 字段的具体填法见 §7 待实测项。
+- 固定 OpenClaw `2026.6.11` 的握手身份为 `client.id=gateway-client`、`client.mode=backend`、`role=operator`，使用共享 token/password。direct-loopback backend self-pairing 不需要伪造浏览器设备身份；远程或浏览器身份不继承该保证。
+- 请求 scope 必须恰好是 `operator.read`、`operator.write`、`operator.admin`；`hello` 必须是 `hello-ok`、版本仍为 `2026.6.11`、角色仍为 operator，且授权 scope 集合逐项精确相同。缺项、额外/未知项、重复项或错误角色一律 fail closed，不能利用 admin 蕴含关系放宽 `hello` 校验。
+- RPC 采用版本化 default-deny 允许列表：read 仅有 `status`、`commands.list`、`tools.catalog`、`tools.effective`、`sessions.list`、`sessions.subscribe`、`sessions.messages.subscribe` / `unsubscribe`、`artifacts.list` / `download`；write 仅有 `sessions.create` / `send` / `abort`；admin 仅有 `sessions.patch` / `compact` / `delete`。任何未登记方法都必须在建立连接或发帧前返回 `GATEWAY_RPC_METHOD_NOT_ALLOWED`。
+- scope/role/hello 违反契约返回 `GATEWAY_SCOPE_CONTRACT_VIOLATION`（版本不符仍用 `OPENCLAW_VERSION_UNSUPPORTED`）；上游握手拒绝与 RPC 拒绝分别归一为 `GATEWAY_HANDSHAKE_DENIED` / `GATEWAY_REQUEST_DENIED`。错误、close reason 与诊断日志不得带 token/password、上游原始 payload、消息正文、prompt 或私有路径。
+- `PANEL_OPENCLAW_STREAMING=0` 只关闭临时文本/工具预览；同一控制连接与 read/write/admin scope 仍用于生成、typed 命令、附件和临时 session 生命周期。连接断开后，已接受 run 的终态继续由 trajectory watcher 判定；新的控制 RPC 不自动改走不同凭据或扩大 scope。
+- 共享 secret 是单一 trusted-local operator 的 owner 级凭据，不是多租户隔离。轮换时同步更新 Gateway 与面板并重启两端，回滚时也同步恢复；本次 scope 契约不要求重新签发凭据或迁移存储。生产无法解析固定凭据时保留只读面板，并让所有 Gateway 控制调用稳定返回 `GATEWAY_TRANSPORT_UNAVAILABLE`；不能把缺凭据解释为允许逐请求 CLI RPC。拆分观察/写入/admin 连接需要独立身份模型、部署迁移/回滚与版本门禁验收，另立工作项。
 
-验收（连 gateway 的部分，跑在测试 agent 上）：
-- 能成功握手连上 gateway，不报设备身份错误。
-- 发一条测试消息，能拿到模型回复（证明推理桥接通）。
-- 确认这条测试消息**没有**发到任何 IM（因为测试 agent 没绑渠道）。
-- 推理用过的 gateway 工作区会话，事后被正确清理。
+确定性契约验收（fake WebSocket，不接真实 runtime）：
+- 精确的 role/scope `hello` 可连接；缺项、额外/未知项、重复项和错误角色均在任何业务 RPC 前拒绝。
+- read/write/admin 三组现用方法都在允许列表；未登记方法不创建 socket、不发送帧。
+- 握手拒绝、权限不足、恶意上游 message/details 与 close reason 只产生上述稳定错误和脱敏诊断。
+- 重连后重新做同一精确握手并恢复订阅，不能沿用旧连接的授权状态。
+- `PANEL_OPENCLAW_STREAMING=0` 仍装配控制 transport；缺失凭据装配稳定拒绝 transport，二者均不得触发逐请求 CLI fallback。
+
+真实 runtime 的消息、IM 隔离和清理验收仍只在无渠道绑定的测试 agent 上显式执行，不属于每次普通单元测试，也不由本次文档宣称已复验。
 
 ### 5.3 向活会话发送消息的安全边界 ⚠️
 
@@ -577,7 +584,7 @@ fork 和编辑重发共用底层（见 §5.0）：都是「从目标 entry 回�
 这些是侦察没有查到底、但实现时一试便知的细节。Codex 遇到时先在测试 agent 上实测，把结果记进代码注释或一个 `实测记录.md`：
 
 1. **已确认：推理 RPC** 使用 `sessions.create` 登记一次性 session，再覆盖 transcript，并用 `sessions.send` 提交最新用户消息。实现时只需把复现脚本中的参数收束进适配层。
-2. **已确认：connect 握手身份**。OpenClaw 2026.6.11 会清空无设备身份 CLI 的 scopes；本机服务端集成使用 `client.id=gateway-client`、`client.mode=backend`、共享密钥和 `operator.read`，命中官方本机 backend self-pairing 分支。远程 Gateway 不假设可跳过设备配对，连接失败时只关闭预览。
+2. **已确认：connect 握手与权限契约**。OpenClaw 2026.6.11 的本机服务端集成使用 `client.id=gateway-client`、`client.mode=backend`、共享密钥与 operator 角色，命中官方 direct-loopback backend self-pairing 分支。生产控制连接请求并精确核验 `operator.read` / `operator.write` / `operator.admin`，RPC 矩阵见 §5.2；远程 Gateway 不假设可跳过设备配对。`PANEL_OPENCLAW_STREAMING=0` 只关闭预览，不能据此把控制连接描述为 read-only。
 3. **`resolveContextInjectionMode` 的行为**：确认 `SOUL/USER/MEMORY` 等文件在面板发起的推理里确实被注入（发一条能触发记忆的测试消息，看回复是否体现）。
 4. **`memory_search` 的 recall 落盘**：跑一次推理后，确认测试 workspace 的 recall store 有新数据写入（验证自动记忆归档的前提成立）。
 5. **browser / canvas / skills 等工具**是否随推理自动带上。

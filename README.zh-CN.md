@@ -154,7 +154,9 @@ export PANEL_MEMORY_RUNTIMES='{
 
 长时间运行的智能体工作默认有 30 分钟的 OpenClaw 执行上限(`PANEL_GATEWAY_RUN_TIMEOUT_MS`)。面板随后会额外等待 30 秒(`PANEL_RUN_WATCHER_GRACE_MS`)以接收终止的轨迹事件，这样上游的超时或中止能被准确报告，而不会被面板同时发生的超时所掩盖。
 
-实时预览通过服务器端一条独立的 WebSocket 连接连到本地的 OpenClaw 网关，同时让浏览器保持在面板已认证的 SSE 端点上;网关凭据绝不会发送到浏览器。默认情况下，面板从 `~/.openclaw/openclaw.json` 读取本地 URL 和令牌/密码。`PANEL_OPENCLAW_GATEWAY_URL`、`PANEL_OPENCLAW_GATEWAY_TOKEN` 和 `PANEL_OPENCLAW_GATEWAY_PASSWORD` 会覆盖这些值，`PANEL_OPENCLAW_STREAMING=0` 则关闭预览。该连接请求 `operator.read` 用于观测，`operator.write` 用于结构化附件发送;Base64 文件通过 WebSocket 发送，而不是走有大小限制的命令行参数。如果观测连接断开，普通文本生成仍会通过既有的 CLI/轨迹路径继续，界面回退到非流式的等待状态;附件发送则需要已认证的 WebSocket 传输。经过校验的完整对话记录始终是权威版本，并以原子方式替换预览。
+面板复用服务器端一条到本机 OpenClaw Gateway 的控制 WebSocket，同时让浏览器只连接面板已认证的 SSE 端点；Gateway 凭据绝不会发送到浏览器。对固定适配的 OpenClaw `2026.6.11`，连接身份为 `gateway-client/backend`、角色为 `operator`，且只请求 `operator.read`、`operator.write`、`operator.admin` 这三个 scope；`hello` 授权缺项、重复或多出任何 scope 都会被拒绝。read 用于状态/目录/session 观察和 artifact 收集，write 用于创建临时 session、发送消息（包括 Base64 附件）与停止，admin 用于 session override、压缩和删除。显式、版本化的 RPC 允许列表会在发帧前本地拒绝任何未经评审的方法。
+
+默认情况下，面板从 `~/.openclaw/openclaw.json` 读取本机 URL 和令牌/密码；`PANEL_OPENCLAW_GATEWAY_URL`、`PANEL_OPENCLAW_GATEWAY_TOKEN` 和 `PANEL_OPENCLAW_GATEWAY_PASSWORD` 可覆盖这些值。这份共享密钥是单一受信 operator 的 owner 级凭据，不是多租户隔离边界，并应保留默认 loopback。显式配置的同一 owner 可信私网 URL 仍保持解析兼容，但不会继承 direct-loopback self-pairing；在另行完成上游配对与验收前，它不属于本机连接保证。轮换时必须同步更新 Gateway 与面板并重启两端，回滚时也同步恢复两端；本次发布不要求重新签发凭据。若服务端无法解析出可用的 Gateway 凭据，面板只读访问仍可用，所有 Gateway 控制操作以稳定的 `GATEWAY_TRANSPORT_UNAVAILABLE` 失败；生产不会回落为逐请求 Gateway CLI 连接。`PANEL_OPENCLAW_STREAMING=0` 只关闭临时文本/工具预览，同一控制 WebSocket 和三个 scope 仍用于生成、typed 命令、附件和临时 session 生命周期。预览失败不能决定 run 是否完成，但控制连接不可用时，需要 Gateway RPC 的操作会失败。经过校验的完整 transcript 始终是权威版本，并以原子方式替换任何预览。
 
 构建并启动:
 
