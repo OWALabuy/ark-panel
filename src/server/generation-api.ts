@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { lstat } from "node:fs/promises";
 import { basename, join } from "node:path";
 import type { JsonObject, TranscriptDocument } from "../domain/transcript.js";
@@ -14,6 +14,7 @@ import { GatewayRunError } from "../gateway/cli-client.js";
 import { assignSessionAttachments, garbageCollectAttachments, getSessionAttachment, pruneSessionAttachments,
   readSessionAttachmentBytes, removeSessionAttachments, storeSessionAttachment } from "../storage/attachments.js";
 import { currentTranscriptBranch } from "../domain/branch.js";
+import { generationRequestFingerprint, generationRequestFingerprintMatches } from "../domain/generation-request.js";
 
 interface BridgeRunner { generate(request: BridgeRequest): Promise<BridgeResult>; cleanupOrphanedSession?(request: BridgeOrphanCleanupRequest): Promise<string[]> }
 export interface GenerationConfig { dataRoot: string; runtimeByAgent: ReadonlyMap<string, string>; workspaceByAgent?: ReadonlyMap<string, string>; completedCacheLimit?: number; contextBudget?: ContextBudgetEstimator; operations?: SessionOperationCoordinator }
@@ -68,8 +69,8 @@ export async function materializeOpenClawHistory(dataRoot: string, agentId: stri
 export class PanelGenerationApi implements GenerationApi {
   private static readonly MAX_COMPLETED = 512;
   private readonly operations: SessionOperationCoordinator;
-  private readonly completed = new Map<string, { recordId: string; message: string; requestOutputs: boolean; value: { runId: string; entries: unknown[]; revision?: string } }>();
-  private readonly inflight = new Map<string, { recordId: string; message: string; requestOutputs: boolean; promise: Promise<{ runId: string; entries: unknown[]; revision?: string }> }>();
+  private readonly completed = new Map<string, { requestHash: string; value: { runId: string; entries: unknown[]; revision?: string } }>();
+  private readonly inflight = new Map<string, { requestHash: string; promise: Promise<{ runId: string; entries: unknown[]; revision?: string }> }>();
   private readonly controllers = new Map<string, AbortController>();
   private readonly runStore: PanelRunStore;
   private readonly executions = new Map<string, Promise<void>>();
@@ -152,28 +153,22 @@ export class PanelGenerationApi implements GenerationApi {
   }
 
   async create(recordId: string, message: string, runId: string = randomUUID(), expectedRevision?: string, attachmentIds: readonly string[] = [], requestOutputs = false): Promise<PublicPanelRun & { newlyCreated?: boolean }> {
-    if (typeof requestOutputs !== "boolean") throw new Error("REQUEST_OUTPUTS_INVALID");
     const normalizedAttachments = [...attachmentIds];
-    const requestHash = this.requestHash(recordId, message, expectedRevision, normalizedAttachments, requestOutputs);
+    const requestHash = generationRequestFingerprint({ recordId, message, expectedRevision,
+      attachmentIds: normalizedAttachments, requestOutputs });
     const pending = this.creations.get(runId); if (pending) { if (pending.requestHash !== requestHash) throw new Error("IDEMPOTENCY_KEY_REUSED"); return { ...await pending.promise, newlyCreated: false }; }
     const creation = this.createOnce(recordId, message, runId, expectedRevision, normalizedAttachments, requestOutputs).finally(() => this.creations.delete(runId));
     this.creations.set(runId, { requestHash, promise: creation }); return await creation;
   }
 
-  private requestHash(recordId: string, message: string, expectedRevision: string | undefined, attachmentIds: readonly string[], requestOutputs: boolean): string {
-    // Keep the false/omitted shape compatible with durable runs created before requestOutputs existed.
-    return createHash("sha256").update(JSON.stringify({ recordId, message, expectedRevision: expectedRevision ?? null, attachmentIds,
-      ...(requestOutputs ? { requestOutputs: true } : {}) })).digest("hex");
-  }
-
   private async createOnce(recordId: string, message: string, runId: string, expectedRevision?: string, attachmentIds: readonly string[] = [], requestOutputs = false): Promise<PublicPanelRun & { newlyCreated?: boolean }> {
     await this.initialize();
-    const requestHash = this.requestHash(recordId, message, expectedRevision, attachmentIds, requestOutputs);
+    const requestHash = generationRequestFingerprint({ recordId, message, expectedRevision, attachmentIds, requestOutputs });
     let release!: () => void; const previous = this.creationGate; this.creationGate = new Promise<void>(resolve => { release = resolve; }); await previous;
     let accepted: PanelRunRecord;
     try {
       const existing = await this.runStore.get(runId);
-      if (existing) { if (existing.recordId !== recordId || existing.requestHash !== requestHash) throw new Error("IDEMPOTENCY_KEY_REUSED"); return { ...this.visible(existing), newlyCreated: false }; }
+      if (existing) { if (existing.recordId !== recordId || !generationRequestFingerprintMatches({ recordId, message, expectedRevision, attachmentIds, requestOutputs }, existing.requestHash)) throw new Error("IDEMPOTENCY_KEY_REUSED"); return { ...this.visible(existing), newlyCreated: false }; }
       const active = await this.runStore.activeForRecord(recordId);
       if (active) throw new Error("SESSION_BUSY");
       const now = new Date().toISOString(), plannedUserEntryId = randomUUID();
@@ -380,12 +375,14 @@ export class PanelGenerationApi implements GenerationApi {
   }
 
   async generate(recordId: string, message: string, signal: AbortSignal, runId: string = randomUUID(), expectedRevision?: string, attachmentIds: readonly string[] = [], requestOutputs = false): Promise<{ runId: string; entries: unknown[]; revision?: string; runtimeAgentId?: string; temporarySessionId?: string; gatewayRunId?: string }> {
-    if (typeof requestOutputs !== "boolean") throw new Error("REQUEST_OUTPUTS_INVALID");
+    const normalizedAttachments = [...attachmentIds];
+    const requestHash = generationRequestFingerprint({ recordId, message, expectedRevision,
+      attachmentIds: normalizedAttachments, requestOutputs });
     const done = this.completed.get(runId); if (done) {
-      if (done.recordId !== recordId || done.message !== message || done.requestOutputs !== requestOutputs) throw new Error("IDEMPOTENCY_KEY_REUSED"); return done.value;
+      if (done.requestHash !== requestHash) throw new Error("IDEMPOTENCY_KEY_REUSED"); return done.value;
     }
     const running = this.inflight.get(runId); if (running) {
-      if (running.recordId !== recordId || running.message !== message || running.requestOutputs !== requestOutputs) throw new Error("IDEMPOTENCY_KEY_REUSED"); return await running.promise;
+      if (running.requestHash !== requestHash) throw new Error("IDEMPOTENCY_KEY_REUSED"); return await running.promise;
     }
     // 每个 run 拥有自己的 AbortController，按 runId 登记，供显式 abort() 中断。
     // 外部传入的 signal（HTTP 连接、测试）转发进来，但连接断开本身已不再触发 abort。
@@ -393,10 +390,10 @@ export class PanelGenerationApi implements GenerationApi {
     if (this.abortRequested.has(runId)) controller.abort();
     if (signal?.aborted) controller.abort(); else signal?.addEventListener("abort", forward, { once: true });
     this.controllers.set(runId, controller);
-    const promise = this.generateOnce(recordId, message, controller.signal, runId, expectedRevision, attachmentIds, requestOutputs);
-    this.inflight.set(runId, { recordId, message, requestOutputs, promise });
+    const promise = this.generateOnce(recordId, message, controller.signal, runId, expectedRevision, normalizedAttachments, requestOutputs);
+    this.inflight.set(runId, { requestHash, promise });
     try {
-      const value = await promise; this.completed.set(runId, { recordId, message, requestOutputs, value });
+      const value = await promise; this.completed.set(runId, { requestHash, value });
       while (this.completed.size > (this.config.completedCacheLimit ?? PanelGenerationApi.MAX_COMPLETED)) this.completed.delete(this.completed.keys().next().value as string);
       return value;
     }

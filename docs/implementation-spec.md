@@ -291,7 +291,7 @@ fork 和编辑重发共用底层（见 §5.0）：都是「从目标 entry 回�
 
 #### 正确性细节四：后台 run、断线与崩溃恢复
 
-- 创建顺序固定为：校验请求与 revision → 计算请求指纹 → 以 `0600` 原子持久化 accepted run → 才允许启动 OpenClaw bridge。请求正文只在非终态恢复确有需要时暂存，进入终态即清除；终态保留指纹以维持幂等。
+- 创建顺序固定为：校验请求与 revision → 计算请求指纹 → 以 `0600` 原子持久化 accepted run → 才允许启动 OpenClaw bridge。durable create、执行中合并和完成态缓存共用同一 SHA-256 指纹：按固定顺序编码 `recordId`、消息、`expectedRevision`（未提供时为 `null`）、有序附件 ID 和仅在为真时出现的 `requestOutputs`；因此属性声明顺序与显式 `undefined` 不影响身份，附件顺序、revision、消息或产出意图变化均冲突，同时保持既有 `requestOutputs: false` 指纹不变。附件支持之前的 durable run 仅在重试仍无附件且不请求产出时兼容早期不含 `attachmentIds` 的 hash；新 run 始终只写入当前形状，不重写旧权威记录。请求正文只在非终态恢复确有需要时暂存，进入终态即清除；终态保留指纹以维持幂等。结构化 compact 不接受 idempotency key，也不维护请求缓存，继续由会话独占锁与 revision CAS 保证一致性。
 - run 使用创建时持久化的 `plannedUserEntryId`。若进程在 transcript rename 后、completed 状态落盘前退出，启动恢复通过该 ID 核验 transcript 已提交并补写 completed，绝不重复追加。
 - bridge 在临时 session 创建、历史物化、gateway 接受 send、entries 物化四个边界回调 run manager。完整 entries 必须先持久化，随后才允许清理临时 session，避免「临时结果已删、面板尚未接住」的永久丢失窗口。
 - SSE 订阅首帧发送最新快照，每个状态版本带单调序号。浏览器在终态前遇到 EOF 或网络错误时保留 runId，重新查询并订阅；只有明确 completed 才清对应草稿。

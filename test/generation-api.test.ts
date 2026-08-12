@@ -188,11 +188,40 @@ test("同一 idempotency key 共享并缓存结果，其他并发写被拒绝", 
   ] }; } }, { dataRoot: root, runtimeByAgent: new Map([["claude", "runtime"]]) });
   const signal = new AbortController().signal, runId = "11111111-1111-4111-8111-111111111111";
   const first = api.generate(metadata.recordId, "same", signal, runId); const retry = api.generate(metadata.recordId, "same", signal, runId);
+  await assert.rejects(api.generate(metadata.recordId, "same", signal, runId, "different-revision"), /IDEMPOTENCY_KEY_REUSED/);
+  await assert.rejects(api.generate(metadata.recordId, "same", signal, runId, undefined, ["att_fixture"]), /IDEMPOTENCY_KEY_REUSED/);
   await assert.rejects(api.generate(metadata.recordId, "other", signal, "22222222-2222-4222-8222-222222222222"), /SESSION_BUSY/);
   release(); assert.deepEqual(await first, await retry); assert.equal(calls, 1);
-  await api.generate(metadata.recordId, "same", signal, runId); assert.equal(calls, 1);
+  await api.generate(metadata.recordId, "same", signal, runId, undefined, [], false); assert.equal(calls, 1);
   await assert.rejects(api.generate(metadata.recordId, "different", signal, runId), /IDEMPOTENCY_KEY_REUSED/);
+  await assert.rejects(api.generate(metadata.recordId, "same", signal, runId, "different-revision"), /IDEMPOTENCY_KEY_REUSED/);
+  await assert.rejects(api.generate(metadata.recordId, "same", signal, runId, undefined, ["att_fixture"]), /IDEMPOTENCY_KEY_REUSED/);
+  await assert.rejects(api.generate(metadata.recordId, "same", signal, runId, undefined,
+    ["att_invalid", "att_invalid"]), /IDEMPOTENCY_KEY_REUSED/);
   await assert.rejects(api.generate(metadata.recordId, "same", signal, runId, undefined, [], true), /IDEMPOTENCY_KEY_REUSED/);
+  assert.equal(calls, 1);
+});
+
+test("既有 requestOutputs false 与早期无附件 durable 指纹仍可幂等读取", async t => {
+  const root = await mkdtemp(join(tmpdir(), "generation-legacy-fingerprint-")); t.after(() => rm(root, { recursive: true, force: true }));
+  const runId = "35353535-3535-4535-8535-353535353535", legacyRunId = "36363636-3636-4636-8636-363636363636";
+  const now = "2026-08-12T00:00:00.000Z";
+  const store = new PanelRunStore(root); await store.put({ version: 1, runId, recordId: "panel_fixture",
+    requestHash: "33849afc1675c631d17f2cebee94781e24a4f8a128bdb200d6db26ca5f317147", sequence: 2,
+    status: "completed", createdAt: now, updatedAt: now, finishedAt: now });
+  await store.put({ version: 1, runId: legacyRunId, recordId: "panel_fixture",
+    requestHash: "7719d1290bca44758cb9b4800f5067cac0072c346b968bfb7b95554cd1d4ae0e", sequence: 2,
+    status: "completed", createdAt: now, updatedAt: now, finishedAt: now });
+  let calls = 0;
+  const api = new PanelGenerationApi({ async generate() { calls++; throw new Error("bridge must not run"); } },
+    { dataRoot: root, runtimeByAgent: new Map() });
+  const retry = await api.create("panel_fixture", "hello", runId, undefined, [], false);
+  assert.equal(retry.newlyCreated, false); assert.equal(retry.status, "completed"); assert.equal(calls, 0);
+  const legacyRetry = await api.create("panel_fixture", "hello", legacyRunId);
+  assert.equal(legacyRetry.newlyCreated, false); assert.equal(legacyRetry.status, "completed"); assert.equal(calls, 0);
+  await assert.rejects(api.create("panel_fixture", "hello", runId, "different-revision"), /IDEMPOTENCY_KEY_REUSED/);
+  await assert.rejects(api.create("panel_fixture", "hello", legacyRunId, undefined, ["att_fixture"]), /IDEMPOTENCY_KEY_REUSED/);
+  await assert.rejects(api.create("panel_fixture", "hello", legacyRunId, undefined, [], true), /IDEMPOTENCY_KEY_REUSED/);
 });
 
 test("revision 冲突在调用 bridge 前被拒绝", async t => {
