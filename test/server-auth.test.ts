@@ -23,7 +23,7 @@ test("附件上传下载要求登录与 CSRF，并保持 Office 原始字节", a
   const original = Buffer.from("raw-docx-bytes"), previewBytes = Buffer.from("safe-preview"); let uploaded: Buffer | undefined;
   const attachments: AttachmentApi = { async upload(recordId, input) { assert.equal(recordId, "record"); assert.equal(input.fileName, "报告.docx"); uploaded = Buffer.from(input.bytes); return { id: "att_fixture", fileName: input.fileName, mimeType: input.mimeType, sizeBytes: input.bytes.byteLength }; },
     async download(id) { assert.equal(id, "att_fixture"); return { fileName: "报告.docx", mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", bytes: original }; },
-    async preview(id) { assert.equal(id, "att_fixture"); return { mimeType: "image/png", bytes: previewBytes }; } };
+    async preview(id) { if (id === "att_unsupported") throw new Error("ATTACHMENT_PREVIEW_UNSUPPORTED"); assert.equal(id, "att_fixture"); return { mimeType: "image/png", bytes: previewBytes }; } };
   const x = await fixture(undefined, undefined, undefined, attachments); t.after(() => x.server.close());
   assert.equal((await fetch(`${x.base}/api/v1/files/att_fixture/download`)).status, 401);
   const login = await fetch(`${x.base}/api/v1/auth/login`, { method: "POST", headers: { origin: x.base, "content-type": "application/json" }, body: JSON.stringify({ username: "owl", password: "correct" }) });
@@ -39,6 +39,9 @@ test("附件上传下载要求登录与 CSRF，并保持 Office 原始字节", a
   assert.equal(preview.status, 200); assert.equal(preview.headers.get("content-type"), "image/png");
   assert.equal(preview.headers.get("content-disposition"), "inline"); assert.equal(preview.headers.get("x-content-type-options"), "nosniff");
   assert.equal(preview.headers.get("cache-control"), "private, no-store"); assert.deepEqual(Buffer.from(await preview.arrayBuffer()), previewBytes);
+  const unsupported = await fetch(`${x.base}/api/v1/files/att_unsupported/preview`, { headers: { cookie: cookies } });
+  assert.equal(unsupported.status, 415); const unsupportedError = (await unsupported.json()).error;
+  assert.equal(unsupportedError.code, "ATTACHMENT_PREVIEW_UNSUPPORTED"); assert.equal(unsupportedError.message, "该附件不是可安全预览的 PNG、JPEG 或 WebP 图片");
 });
 test("API rejects unauthenticated requests", async t => { const x = await fixture(); t.after(()=>x.server.close()); const r = await fetch(`${x.base}/api/v1/agents`); assert.equal(r.status, 401); });
 test("记忆中心要求登录并只委托 agentId 与相对标识", async t => {

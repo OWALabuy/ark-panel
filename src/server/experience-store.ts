@@ -1,8 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import { chmod, lstat, mkdir, readFile, rename, rm, open } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
-import sharp from "sharp";
 import { assertNotSymlink, assertWithin, atomicWrite } from "../storage/atomic.js";
+import { sharp, type Metadata } from "./safe-raster.js";
 
 export const THEMES = ["system", "light", "dark", "gruvbox-dark-hard", "gruvbox-dark-medium", "gruvbox-dark-soft", "gruvbox-light-hard", "gruvbox-light-medium", "gruvbox-light-soft"] as const;
 export const ACCENTS = ["default", "blue", "green", "red", "yellow", "magenta", "cyan"] as const;
@@ -124,7 +124,7 @@ export class ExperienceStore {
   async putAvatar(agentId: string, input: Buffer): Promise<StoredAvatar> {
     const path = this.avatarPath(agentId);
     if (!input.length || input.length > MAX_AVATAR_BYTES) throw new Error("AVATAR_INVALID");
-    let metadata: sharp.Metadata;
+    let metadata: Metadata;
     try { metadata = await sharp(input, { animated: false, limitInputPixels: MAX_AVATAR_PIXELS }).metadata(); }
     catch { throw new Error("AVATAR_INVALID"); }
     if (!metadata.format || !["png", "jpeg", "webp"].includes(metadata.format) || !metadata.width || !metadata.height || metadata.width > 4096 || metadata.height > 4096 || (metadata.pages ?? 1) !== 1) throw new Error("AVATAR_INVALID");

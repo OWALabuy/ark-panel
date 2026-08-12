@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
-import sharp from "sharp";
 import { listPanelSessions } from "../storage/panel-sessions.js";
 import { getSessionAttachment, readSessionAttachmentBytes, storeSessionAttachment,
   type AttachmentManifest } from "../storage/attachments.js";
+import { sharp, type Metadata } from "./safe-raster.js";
 
 export interface PublicAttachment {
   id: string;
@@ -55,7 +55,7 @@ export class PanelAttachmentApi {
 
   async preview(attachmentId: string): Promise<{ mimeType: string; bytes: Buffer } | undefined> {
     const file = await this.download(attachmentId); if (!file) return undefined;
-    let metadata: sharp.Metadata;
+    let metadata: Metadata;
     try { metadata = await sharp(file.bytes, { animated: true, limitInputPixels: MAX_PREVIEW_PIXELS }).metadata(); }
     catch { throw new Error("ATTACHMENT_PREVIEW_UNSUPPORTED"); }
     const mimeType = metadata.format ? previewMimeByFormat.get(metadata.format) : undefined;

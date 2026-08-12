@@ -55,18 +55,23 @@ test("损坏或符号链接 settings 不会被静默覆盖", async () => {
 
 test("头像真实解码后统一裁切为 256x256 WebP，并可删除", async () => {
   const { root, store } = await fixture();
-  const input = await sharp({ create: { width: 640, height: 320, channels: 3, background: "#cc8844" } }).png().toBuffer();
-  const saved = await store.putAvatar("claude", input);
-  assert.match(saved.etag, /^"[A-Za-z0-9_-]+"$/); assert.equal(saved.etag, `"${createHash("sha256").update(saved.bytes).digest("base64url")}"`);
-  const metadata = await sharp(saved.bytes).metadata(); assert.equal(metadata.format, "webp"); assert.equal(metadata.width, 256); assert.equal(metadata.height, 256);
+  const source = { create: { width: 640, height: 320, channels: 3 as const, background: "#cc8844" } };
+  const inputs = [await sharp(source).png().toBuffer(), await sharp(source).jpeg().toBuffer(), await sharp(source).webp().toBuffer()];
+  let saved;
+  for (const input of inputs) {
+    saved = await store.putAvatar("claude", input);
+    assert.match(saved.etag, /^"[A-Za-z0-9_-]+"$/); assert.equal(saved.etag, `"${createHash("sha256").update(saved.bytes).digest("base64url")}"`);
+    const metadata = await sharp(saved.bytes).metadata(); assert.equal(metadata.format, "webp"); assert.equal(metadata.width, 256); assert.equal(metadata.height, 256);
+  }
   const path = join(root, "avatars", createHash("sha256").update("claude").digest("hex") + ".webp"); assert.equal((await lstat(path)).mode & 0o777, 0o600); assert.equal((await lstat(join(root, "avatars"))).mode & 0o777, 0o700);
-  assert.deepEqual(await store.avatar("claude"), saved); assert.equal(await store.deleteAvatar("claude"), true); assert.equal(await store.avatar("claude"), undefined); assert.equal(await store.deleteAvatar("claude"), false);
+  assert.ok(saved); assert.deepEqual(await store.avatar("claude"), saved); assert.equal(await store.deleteAvatar("claude"), true); assert.equal(await store.avatar("claude"), undefined); assert.equal(await store.deleteAvatar("claude"), false);
 });
 
 test("头像拒绝非 allowlist、伪图片、SVG、动图和超大尺寸", async () => {
   const { store } = await fixture(); const one = await sharp({ create: { width: 1, height: 1, channels: 3, background: "red" } }).png().toBuffer();
   await assert.rejects(store.putAvatar("unknown", one), /AGENT_NOT_ALLOWED/);
   await assert.rejects(store.putAvatar("claude", Buffer.from("not an image")), /AVATAR_INVALID/);
+  await assert.rejects(store.putAvatar("claude", Buffer.from("89504e470d0a1a0a00000000", "hex")), /AVATAR_INVALID/);
   await assert.rejects(store.putAvatar("claude", Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>')), /AVATAR_INVALID/);
   const gif = Buffer.from("R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==", "base64"); await assert.rejects(store.putAvatar("claude", gif), /AVATAR_INVALID/);
   const tooWide = await sharp({ create: { width: 4097, height: 1, channels: 3, background: "red" } }).png().toBuffer(); await assert.rejects(store.putAvatar("claude", tooWide), /AVATAR_INVALID/);
