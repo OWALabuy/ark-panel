@@ -19,19 +19,32 @@ npm run test:browser
 `selenium-webdriver` 不下载浏览器；CI 使用 runner 已安装的 Firefox 和
 geckodriver，并执行同一条 npm script。
 
-实现验收当天使用 Firefox 153.0.1 与 geckodriver 0.37.0 连续执行三次完整
+2026-08-12 的初始浏览器自动化验收使用 Firefox 153.0.1 与 geckodriver 0.37.0 连续执行三次完整
 suite，三次均为 2/2 通过；结束后未留下监听进程、浏览器进程、截图或 fixture
-目录。这是本次变更的日期化证据，不替代后续 CI 结果。
+目录。这是初始浏览器自动化变更的日期化证据，不替代后续 CI 结果。
+
+2026-08-13 的外部图片网络边界验收使用 Node.js 22.22.0、Firefox 153.0.1 与
+geckodriver 0.37.0，有界执行三轮完整 suite。三轮的桌面与移动测试主体均完成，
+其中一轮为 2/2 clean；另外两轮分别在移动、桌面主体完成后命中既有
+`DRIVER_QUIT_FAILED` 清理抖动，不能记为连续三轮全绿。三次桌面主体均确认：
+渲染前后跨主机与同主机异端口 probe 请求均为 0；点击唯一跨主机链接后仅对应
+路径变为 1，请求不含 Referer 或 panel Cookie，新标签 `opener` 为空；同主机异
+端口路径仍为 0。失败轮的 driver service fallback 与 fixture close 未报告失败，
+验收结束后未留下该 fixture 拥有的 listener、geckodriver 或截图产物。这是 #43
+的日期化证据，不把 stock teardown 抖动冒充功能成功或连续全绿，也不替代后续
+CI 结果。
 
 ## 自动化矩阵
 
 | 视口 | 输入能力 | 覆盖 |
 | --- | --- | --- |
-| 桌面 | fine pointer、hover、键盘 | 登录/退出、Origin 与 CSRF 拒绝、会话选择、新建、发送、fork、编辑重发、只读来源、会话级运行锁、停止、上下文 `k` 展示、三点菜单边界 |
+| 桌面 | fine pointer、hover、键盘 | 登录/退出、Origin 与 CSRF 拒绝、会话选择、新建、发送、fork、编辑重发、只读来源、会话级运行锁、停止、上下文 `k` 展示、三点菜单边界；外部图片渲染前后零请求，只有跨主机显式链接可脱敏新标签导航，同主机异端口不可导航 |
 | 移动 | 500px 以内、coarse pointer、无 hover | Agent → 会话 → 对话导航、真实点击、44px “本轮需要文件”开关、Enter 换行不发送、三点菜单边界、Escape 关闭并恢复焦点、点击发送 |
 | 两者共享 | 真实 Firefox DOM、网络与 SSE | 安全 Markdown 不执行 HTML/`javascript:`，附件图片只走已认证同源预览，SSE 文本与工具阶段、终态替换、终态前断线后的查询恢复 |
 
-fixture 的会话、消息、路径、附件和工具结果均为固定虚构值；服务端通过监听事件
+fixture 的会话、消息、路径、附件和工具结果均为固定虚构值；桌面外部图片网络断言使用
+另一条仅监听 loopback 临时端口的计数 server，只保存精确测试路径的请求次数和
+Referer/panel Cookie 是否出现的布尔值，不保存原始请求头。服务端通过监听事件
 报告 readiness，测试不依赖固定端口或 readiness sleep。每个场景都会关闭
 WebDriver 和 HTTP server，运行中未启动真实 OpenClaw。失败时只在
 `browser-artifacts/` 保留包含上述脱敏 fixture 的截图；成功运行不产生截图或

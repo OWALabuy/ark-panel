@@ -573,6 +573,7 @@ fork 和编辑重发共用底层（见 §5.0）：都是「从目标 entry 回�
 - HTTPS 反代只通过启动时严格校验的单一 canonical `PANEL_PUBLIC_ORIGIN` 和精确 Host allowlist 扩展入口；监听地址不变，不信任 `Forwarded` / `X-Forwarded-*`，不根据请求学习 origin。Host 失败为 `421 HOST_REJECTED`；登录和 mutation 的 Origin 缺失、`null` 或跨源继续失败，mutation 仍同时要求 CSRF token。
 - gateway token **绝不下发到浏览器、绝不写进日志**。
 - **日志默认不记录消息正文和提示词**（会话内容和记忆一样敏感）。
+- 所有 Markdown surface 默认不得为外部 HTTP(S) 图片创建 `<img>`、`fetch` 或代理请求；页面 CSP 的 `img-src` 只允许 `'self' blob:`。允许的显式跨主机导航必须去除 Referer；面板同 hostname 异 origin 不得成为可导航入口。
 - 所有修改类接口要有 CSRF 防护或严格同源检查。
 - 登录做了之后：密码用慢哈希（如 argon2/bcrypt）保存、不进仓库；cookie 设 `HttpOnly` + `SameSite=Strict`；登录尝试限速。
 - **不接受客户端传任意路径**：agent 用 allowlist，会话文件路径由服务端从 agentId + recordId 推导，防目录穿越和符号链接绕过。
@@ -681,6 +682,7 @@ fork 和编辑重发共用底层（见 §5.0）：都是「从目标 entry 回�
 
 - **Markdown 渲染（已实现）**：user 与 assistant 的 text block 进入同一渲染管线；当前支持标题、粗体/斜体/删除线、有序/无序列表、代码块（行内与围栏）、表格、链接和引用。未列出的 Markdown 扩展不应假定已支持，原始 HTML 始终按文本处理。
 - **安全第一**：渲染必须走安全 DOM，禁止执行任意 HTML / 脚本，链接不自动跳转到危险协议。这与 §6.4 工具调用/思考块的安全渲染是同一条硬要求（v1 已有安全 DOM 渲染，MD 渲染沿用同一管线，不新开不受信任的 `innerHTML` 路径）。选库时优先选默认转义、可配置 allowlist 的方案；若库自带代码高亮与复制按钮，可直接复用。
+- **外部图片隐私默认**：最终消息、stream preview、memory viewer 与 memory candidate 必须复用同一个 renderer。任意外部绝对 HTTP(S) 图片在用户动作前只生成含 alt 与规范化 origin 的可访问占位，不生成 `<img>`、`fetch` 或服务端代理。仅当 URL hostname 与面板不同，才提供文字明确的“打开外部图片”链接；链接固定新标签、`noopener noreferrer` 与 `no-referrer`。面板同 hostname 但 scheme/port 不同的 origin 不提供链接，因为 host-only Cookie 不按端口隔离。只有精确同源、无 query/fragment 且匹配 `/api/v1/files/<id>/preview` 的既有认证附件预览可继续内联；其它同源 URL、相对路径、`file:`、`data:`、`blob:`、`javascript:` 均显示为不可操作原文。页面 CSP 固定 `img-src 'self' blob:`，不得为 Markdown 恢复全局 `http:` / `https:`。
 - **整条消息复制（已实现）**：每条含正文的 user 或 assistant 消息提供“复制消息”动作，复制原始 Markdown 文本到剪贴板（不是渲染后的 HTML），便于粘贴他处仍保留 Markdown 与 LaTeX 源码。
 - **代码块单独复制**：每个围栏代码块右上角提供复制按钮，复制该块原始代码。很多 Markdown / 高亮库自带此能力，优先复用。
 - **代码块样式**：等宽字体，语言标签可选显示，长代码横向滚动不撑破布局（回应 v1 已修的 `constrain conversation layout`）。
@@ -693,6 +695,7 @@ fork 和编辑重发共用底层（见 §5.0）：都是「从目标 entry 回�
 验收（纯本地，可完整自测）：
 - 用含各类已支持语法（标题、强调、列表、表格、引用、多语言代码块）的样本消息渲染，视觉正确、无布局溢出。
 - 构造含 `<script>`、`onerror=`、`javascript:` 链接的恶意 Markdown 样本，渲染后不执行、不产生可点击的危险协议链接（安全回归测试）。
+- 用真实 Firefox 与本地计数 server 覆盖外部图片：渲染前后两个 probe 路径请求数均为 0；唯一跨主机显式链接点击后只对应路径变为 1，且请求没有 Referer 或 panel Cookie；面板同 hostname 异端口路径继续为 0。DOM 同时确认没有外部 `<img>`、只有跨主机占位有导航链接，并保留认证同源附件预览。
 - 复制整条消息得到的是原始 Markdown 文本；复制代码块得到的是该块原始代码。
 - 用四种定界符分别验证行内与块公式进入 KaTeX，块公式启用 display mode；验证金额文本与行内代码不进入 KaTeX。
 - 让 KaTeX 对非法公式抛错，确认界面保留原始公式且后续内容继续渲染；在窄屏检查长块公式可横向滚动。

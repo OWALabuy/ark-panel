@@ -1,5 +1,6 @@
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { resolve } from "node:path";
+import { createServer } from "node:http";
 import { createPanelServer } from "../dist/src/server/app.js";
 import { passwordHash } from "../dist/src/server/auth.js";
 
@@ -30,12 +31,12 @@ function initialConversation(recordId, sourceKind, title, entries) {
   };
 }
 
-function createFixtureState() {
+function createFixtureState(externalImages) {
   const conversations = new Map([
     ["fixture-1", initialConversation("fixture-1", "panel", "脱敏浏览器验收", [
       { type: "message", id: "u1", parentId: null, timestamp: "2030-01-02T03:03:00.000Z", message: { role: "user", content: "请检查完全虚构的项目。" } },
       { type: "message", id: "a1", parentId: "u1", timestamp: "2030-01-02T03:04:00.000Z", stopReason: "stop", message: { role: "assistant", content: [
-        { type: "text", text: "## 脱敏安全正文\n\n<script>globalThis.__fixtureXss = true</script>\n\n[危险链接](javascript:globalThis.__fixtureXss=true)\n\n内联公式 $x^2$。" },
+        { type: "text", text: `## 脱敏安全正文\n\n<script>globalThis.__fixtureXss = true</script>\n\n[危险链接](javascript:globalThis.__fixtureXss=true)\n\n内联公式 $x^2$。\n\n![虚构外部图片](${externalImages.allowedUrl})\n\n![同主机异端口图片](${externalImages.sameHostUrl})` },
         { type: "attachment", attachmentId: "fixture-image", fileName: "fictional-pixel.png", mimeType: "image/png", sizeBytes: PREVIEW_PNG.length, disposition: "input" }
       ] } }
     ])],
@@ -54,7 +55,37 @@ function snapshotConversation(value) {
 }
 
 export async function startBrowserFixture({ port = 0 } = {}) {
-  const state = createFixtureState();
+  const requests = {
+    allowed: { count: 0, refererPresent: false, panelCookiePresent: false },
+    sameHost: { count: 0 }
+  };
+  const probe = createServer((req, res) => {
+    const pathname = new URL(req.url || "/", "http://fixture.invalid").pathname;
+    if (pathname === "/allowed.png") {
+      requests.allowed.count++;
+      requests.allowed.refererPresent ||= typeof req.headers.referer === "string";
+      requests.allowed.panelCookiePresent ||= /(?:^|;\s*)panel_(?:session|csrf)=/.test(req.headers.cookie || "");
+    } else if (pathname === "/same-host.png") requests.sameHost.count++;
+    else { res.writeHead(404, { "cache-control": "no-store" }); res.end(); return; }
+    res.writeHead(200, { "content-type": "image/png", "content-length": PREVIEW_PNG.length,
+      "cache-control": "no-store", "x-content-type-options": "nosniff" });
+    res.end(PREVIEW_PNG);
+  });
+  await new Promise((resolveListen, reject) => {
+    probe.once("error", reject);
+    probe.listen(0, "127.0.0.1", resolveListen);
+  });
+  const probeAddress = probe.address();
+  if (!probeAddress || typeof probeAddress === "string") {
+    await new Promise(resolveClose => probe.close(() => resolveClose()));
+    throw new Error("Fixture probe did not expose a TCP address");
+  }
+  const externalImages = {
+    allowedUrl: `http://localhost:${probeAddress.port}/allowed.png`,
+    sameHostUrl: `http://127.0.0.1:${probeAddress.port}/same-host.png`,
+    requests
+  };
+  const state = createFixtureState(externalImages);
   const stamp = () => new Date(FIXED_NOW + state.nextTick++ * 1000).toISOString();
   const sessionRef = value => ({ recordId: value.recordId, agentId: value.agentId, sourceKind: "panel", revision: value.revision });
   const createPanel = (agentId, title) => {
@@ -254,10 +285,15 @@ export async function startBrowserFixture({ port = 0 } = {}) {
     allowedHosts,
     publicOrigins
   });
-  await new Promise((resolveListen, reject) => {
-    server.once("error", reject);
-    server.listen(port, "127.0.0.1", resolveListen);
-  });
+  try {
+    await new Promise((resolveListen, reject) => {
+      server.once("error", reject);
+      server.listen(port, "127.0.0.1", resolveListen);
+    });
+  } catch (error) {
+    await new Promise(resolveClose => probe.close(() => resolveClose()));
+    throw error;
+  }
   const address = server.address();
   if (!address || typeof address === "string") throw new Error("Fixture server did not expose a TCP address");
   const origin = `http://127.0.0.1:${address.port}`;
@@ -268,6 +304,7 @@ export async function startBrowserFixture({ port = 0 } = {}) {
   return {
     origin,
     state,
+    externalImages,
     activeRun: recordId => { const run = activeRun(recordId); return run ? publicRun(run) : undefined; },
     advanceRun,
     completeRun,
@@ -275,7 +312,8 @@ export async function startBrowserFixture({ port = 0 } = {}) {
       if (closing) return closing;
       closing = (async () => {
         for (const run of state.runs.values()) if (!terminal(run.status)) await generation.abortRun(run.runId);
-        await new Promise((resolveClose, reject) => server.close(error => error ? reject(error) : resolveClose()));
+        const closeServer = value => new Promise((resolveClose, reject) => value.close(error => error ? reject(error) : resolveClose()));
+        await Promise.all([closeServer(server), closeServer(probe)]);
       })();
       return closing;
     }

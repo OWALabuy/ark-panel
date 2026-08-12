@@ -40,6 +40,36 @@ function appendMath(root,formula,displayMode,raw){
   root.append(node);
 }
 
+function currentOrigin(){try{return globalThis.location?.origin||""}catch{return""}}
+function markdownImage(raw){
+  const value=String(raw||"").trim();if(!value||/[\u0000-\u001f\u007f]/.test(value)||value.startsWith("//"))return{kind:"unsafe"};
+  let url;try{url=new URL(value)}catch{return{kind:"unsafe"}}
+  if((url.protocol!=="https:"&&url.protocol!=="http:")||url.username||url.password)return{kind:"unsafe"};
+  const origin=currentOrigin();
+  if(origin&&url.origin===origin){
+    if(/^\/api\/v1\/files\/[^/]+\/preview$/.test(url.pathname)&&!/[?#]/.test(value))return{kind:"attachment",href:url.href};
+    return{kind:"unsafe"};
+  }
+  let panel;try{panel=origin?new URL(origin):null}catch{panel=null}
+  if(panel&&url.hostname===panel.hostname)return{kind:"blocked",origin:url.origin};
+  return{kind:"external",href:url.href,origin:url.origin};
+}
+
+function appendMarkdownImage(root,alt,raw,source){
+  const image=markdownImage(raw);
+  if(image.kind==="attachment"){
+    const node=document.createElement("img");node.src=image.href;node.alt=alt;node.loading="lazy";node.decoding="async";node.referrerPolicy="no-referrer";root.append(node);return;
+  }
+  if(image.kind==="unsafe"){root.append(document.createTextNode(source));return}
+  const placeholder=document.createElement("span"),label=document.createElement("span"),origin=document.createElement("code");
+  placeholder.className="markdown-external-image";label.className="markdown-external-image-alt";origin.className="markdown-external-image-origin";
+  label.textContent=alt||t("message.externalImage");origin.textContent=image.origin;placeholder.append(label,origin);
+  if(image.kind==="external"){
+    const link=document.createElement("a");link.textContent=t("message.openExternalImage");link.href=image.href;link.target="_blank";link.rel="noopener noreferrer";link.referrerPolicy="no-referrer";placeholder.append(link);
+  }
+  root.append(placeholder);
+}
+
 function appendInline(root,text){
   const pattern=/(`+)([\s\S]*?)\1|!\[([^\]]*)\]\(([^\s)]+)(?:\s+["'][^"']*["'])?\)|\[([^\]]+)\]\(([^\s)]+)(?:\s+["'][^"']*["'])?\)|\*\*([^*]+)\*\*|__([^_]+)__|~~([^~]+)~~|(?<!\*)\*([^*\n]+)\*(?!\*)|(?<!_)_([^_\n]+)_(?!_)/g;
   let cursor=0;
@@ -49,7 +79,7 @@ function appendInline(root,text){
     if(!match)break;
     if(match.index>cursor)root.append(document.createTextNode(text.slice(cursor,match.index)));
     if(match[1]){const code=document.createElement("code");code.textContent=match[2];root.append(code)}
-    else if(match[3]!==undefined){const src=safeRemoteImageHref(match[4]);if(!src)root.append(document.createTextNode(match[0]));else{const image=document.createElement("img");image.src=src;image.alt=match[3];image.loading="lazy";image.decoding="async";image.referrerPolicy="no-referrer";root.append(image)}}
+    else if(match[3]!==undefined){appendMarkdownImage(root,match[3],match[4],match[0])}
     else if(match[5]!==undefined){
       const href=safeHref(match[6]);
       if(!href){root.append(document.createTextNode(match[5]))}
@@ -66,11 +96,6 @@ export function safeHref(raw){
   if(value.startsWith("//"))return null;
   if(value.startsWith("#")||value.startsWith("./")||value.startsWith("../")||value.startsWith("/")&&!value.startsWith("//"))return value;
   try{const url=new URL(value,"https://panel.invalid/");return SAFE_PROTOCOLS.has(url.protocol)?value:null}catch{return null}
-}
-
-export function safeRemoteImageHref(raw){
-  const value=String(raw||"").trim();if(!value||/[\u0000-\u001f\u007f]/.test(value))return null;
-  try{const url=new URL(value);return url.protocol==="https:"||url.protocol==="http:"?url.href:null}catch{return null}
 }
 
 function codeBlock(lines,start){

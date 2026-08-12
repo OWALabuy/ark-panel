@@ -1,6 +1,6 @@
 # 会话面板工程决定
 
-更新日期：2026-08-12
+更新日期：2026-08-13
 
 ## 技术栈
 
@@ -28,6 +28,15 @@ API 统一位于 `/api/v1`。成功响应是 `{ "data": ... }`；失败响应是
 生成接口使用 SSE，事件固定为 `run.started`、`run.delta`、`run.completed`、`run.failed`、`run.aborted`。每个事件的 `data` 是 JSON，并带 `runId`。SSE 只负责显示；权威 transcript 只在完整 run 校验通过后提交。
 
 服务只监听 `127.0.0.1`。修改请求必须通过严格同源检查；实现登录后再加双重提交 CSRF token。日志不记录消息正文、提示词、token 或完整路径。
+
+## Markdown 外部图片网络边界（2026-08-13）
+
+- 所有不受信任 Markdown——最终消息、临时 stream preview、记忆中心与记忆候选——复用一条 renderer。外部绝对 HTTP(S) 图片默认只显示 alt 与规范化 origin 的占位，绝不创建 `<img>`、`fetch` 或服务端 proxy/cache 请求。
+- 只有 hostname 与面板不同的目标显示显式“打开外部图片”链接。它固定为 `target="_blank"`、`rel="noopener noreferrer"`、`referrerPolicy="no-referrer"`；用户点击是一次独立的新标签导航，不把第三方内容嵌入面板。
+- scheme/port 不同但 hostname 相同的 URL 不提供导航。浏览器 Cookie 不按端口隔离，`SameSite=Strict` 也不能把同 hostname 异端口变成安全的匿名访问边界。
+- 精确同源只保留现有 `/api/v1/files/<id>/preview` 认证附件预览路径，且 URL 不得含 query/fragment；这不新增通用同源 URL 或 host 文件读取能力。相对路径以及 `file:`、`data:`、`blob:`、`javascript:` 等图片目标显示为不可操作原文。
+- 页面 CSP 收紧为 `img-src 'self' blob:`。`'self'` 保留认证附件、头像与其它面板资源，`blob:` 只保留本地草稿/裁剪预览；不再全局允许 `http:` / `https:` 图片。该决定不新增配置、依赖或存储格式，回滚代码即可恢复旧 UI，但会同时恢复旧的隐式网络请求风险。
+- 真实 Firefox 验收使用两个本地 loopback origin 和脱敏计数器：默认渲染请求为 0；明确跨主机点击只产生一次对应请求且无 Referer/panel Cookie；同 hostname 异端口路径始终为 0。计数器不保存原始请求头或页面内容。
 
 ## HTTPS 反向代理信任边界（2026-08-13）
 

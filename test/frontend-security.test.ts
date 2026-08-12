@@ -415,7 +415,23 @@ test("agent avatars are cropped client-side and uploaded with CSRF protection", 
   assert.match(source,/fetch\(avatarUrl\(agentId\),\{method,body,headers:\{"x-csrf-token":csrf/);
   assert.match(source,/avatarRequest\(agentId,"PUT",blob\)/);
   assert.match(source,/avatarRequest\(agentId,"DELETE"\)/);
-  assert.match(server,/img-src 'self' blob: https: http:/);
+  assert.match(server,/img-src 'self' blob:;/);
+  assert.doesNotMatch(server,/img-src[^;]*(?:https:|http:)/);
+});
+
+test("all Markdown surfaces share the external-image privacy renderer", async () => {
+  const source=await readFile("src/frontend/app.js","utf8");
+  const markdown=await readFile("src/frontend/markdown.js","utf8");
+
+  assert.match(source,/openMemoryFile[\s\S]*content\.append\(renderMarkdown\(String\(file\.content\|\|""\)\)\)/);
+  assert.match(source,/renderStreamPreview[\s\S]*if\(stream\.text\)body\.append\(renderMarkdown\(String\(stream\.text\)\)\)/);
+  assert.match(source,/showPendingMemoryCandidate[\s\S]*content\.append\(renderMarkdown\(String\(candidate\.content\|\|""\)\)\)/);
+  assert.match(source,/renderMessagesWithoutTimes[\s\S]*article\.append\(renderMarkdown\(text\)\)/);
+  assert.match(markdown,/className="markdown-external-image"/);
+  assert.match(markdown,/target="_blank"/);
+  assert.match(markdown,/rel="noopener noreferrer"/);
+  assert.match(markdown,/referrerPolicy="no-referrer"/);
+  assert.doesNotMatch(markdown,/safeRemoteImageHref/);
 });
 
 test("composer uploads raw attachments and preserves their ids for idempotent run recovery", async () => {

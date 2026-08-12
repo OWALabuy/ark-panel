@@ -20,7 +20,7 @@ Panel-owned sessions support `/model`, `/think`, `/reasoning`, `/new`, `/command
 
 Generation runs are server-owned resources rather than properties of one browser request. The panel persists their lifecycle and idempotency state, lets browsers query or re-subscribe after a dropped SSE connection, and only clears a draft after a confirmed completed run. While OpenClaw is running, the panel also relays its coalesced assistant-text updates and tool start/completion events as an ephemeral live preview. This is upstream event streaming, not a promise of one event per token.
 
-Message text is rendered as safe Markdown with raw HTML disabled. Inline and display LaTeX math is rendered locally with KaTeX; no CDN is required. Whole messages and individual fenced code blocks can be copied from the conversation view.
+Message text is rendered as safe Markdown with raw HTML disabled. External HTTP(S) Markdown images are never fetched automatically: the panel shows their alt text and normalized origin, and offers an explicit no-referrer new-tab link only when the hostname differs from the panel. A URL on the panel hostname but a different origin is not navigable because browser cookies are not isolated by port. Only the existing exact-same-origin authenticated attachment preview route may remain inline; relative and other unsafe image targets stay inert. Inline and display LaTeX math is rendered locally with KaTeX; no CDN is required. Whole messages and individual fenced code blocks can be copied from the conversation view.
 
 Messages show local date/time. All session sources can be renamed and moved into or out of the archive; metadata for read-only OpenClaw sources is stored in panel-owned sidecars and never written back to source transcripts.
 
@@ -57,7 +57,7 @@ Legend: ✅ available · 🚧 scheduled · 💡 candidate (not scheduled) · ⛔
 | Sessions | Pin and group sessions by project | ✅ | Accessible quick menu assigns existing groups or creates one inline; active and archived sessions share the catalog, groups remain locally collapsible |
 | Branching | Fork from a valid message boundary | ✅ | Preserves tool-call groups and never mutates the source transcript |
 | Branching | Edit a user message and resend as a new branch | ✅ | The original branch remains available |
-| Messages | Safe Markdown rendering | ✅ | Headings, lists, quotes, tables, links, inline code and fenced code; raw HTML is not executed |
+| Messages | Safe Markdown rendering | ✅ | Headings, lists, quotes, tables, links, inline and fenced code; raw HTML is inert. Cross-host HTTP(S) images require an explicit no-referrer navigation, same-host cross-origin and unsafe targets stay inert, and only the exact authenticated same-origin attachment preview may render inline |
 | Messages | LaTeX math rendering | ✅ | KaTeX renders `$...$`, `\(...\)`, `$$...$$`, and `\[...\]` from same-origin assets with safe fallback |
 | Messages | Fenced-code syntax highlighting | ✅ | Uses explicit language tags, displays the language, and safely falls back to plain text |
 | Messages | Copy a whole message or fenced code block | ✅ | Available directly in the conversation view |

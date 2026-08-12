@@ -241,6 +241,10 @@ async function scenario(name, options, run) {
 
 test("desktop browser acceptance covers security and session lifecycle", { timeout: 60_000 }, async () => {
   await scenario("desktop", { mobile: false }, async ({ driver, fixture }) => {
+    assert.deepEqual(fixture.externalImages.requests, {
+      allowed: { count: 0, refererPresent: false, panelCookiePresent: false },
+      sameHost: { count: 0 }
+    });
     const unauthenticatedPreview = await fetch(`${fixture.origin}/api/v1/files/fixture-image/preview`);
     assert.equal(unauthenticatedPreview.status, 401);
     assert.equal((await unauthenticatedPreview.json()).error.code, "AUTH_REQUIRED");
@@ -251,8 +255,13 @@ test("desktop browser acceptance covers security and session lifecycle", { timeo
     });
     assert.equal(rejectedOrigin.status, 403);
     assert.equal((await rejectedOrigin.json()).error.code, "ORIGIN_REJECTED");
+    const staticPage = await fetch(fixture.origin);
+    assert.equal(staticPage.status, 200);
+    assert.match(staticPage.headers.get("content-security-policy") || "", /(?:^|;)\s*img-src 'self' blob:;/);
+    assert.doesNotMatch(staticPage.headers.get("content-security-policy") || "", /img-src[^;]*(?:https:|http:)/);
 
     await login(driver, fixture.origin);
+    assert.equal((await driver.manage().getCookies()).some(cookie => cookie.name === "panel_session"), true);
     assert.equal(await driver.executeScript("return matchMedia('(hover:none), (pointer:coarse)').matches"), false);
     const rejectedCsrf = await authenticatedFetch(driver, "/api/v1/sessions", {
       method: "POST",
@@ -280,6 +289,59 @@ test("desktop browser acceptance covers security and session lifecycle", { timeo
     assert.equal(preview.headers["x-content-type-options"], "nosniff");
     const resourceOrigins = await driver.executeScript("return performance.getEntriesByType('resource').map(entry => new URL(entry.name).origin)");
     assert.deepEqual([...new Set(resourceOrigins)], [fixture.origin]);
+
+    await waitScript(driver, "return document.querySelectorAll('#messages .markdown-external-image').length === 2");
+    assert.deepEqual(fixture.externalImages.requests, {
+      allowed: { count: 0, refererPresent: false, panelCookiePresent: false },
+      sameHost: { count: 0 }
+    });
+    assert.equal(await driver.executeScript(`
+      return [...document.querySelectorAll('#messages .markdown img')]
+        .some(image => new URL(image.src).origin !== location.origin)
+    `), false);
+    const externalImageUi = await driver.executeScript(`
+      const placeholders = [...document.querySelectorAll('#messages .markdown-external-image')];
+      const links = placeholders.flatMap(node => [...node.querySelectorAll('a')]);
+      return { count: placeholders.length, linkCount: links.length,
+        unlinkedCount: placeholders.filter(node => !node.querySelector('a')).length,
+        origins: placeholders.map(node => node.querySelector('.markdown-external-image-origin')?.textContent || ''),
+        link: links[0] ? { href: links[0].href, target: links[0].target, rel: links[0].rel,
+          referrerPolicy: links[0].referrerPolicy, text: links[0].textContent } : null };
+    `);
+    assert.deepEqual(externalImageUi, {
+      count: 2,
+      linkCount: 1,
+      unlinkedCount: 1,
+      origins: [new URL(fixture.externalImages.allowedUrl).origin, new URL(fixture.externalImages.sameHostUrl).origin],
+      link: { href: fixture.externalImages.allowedUrl, target: "_blank", rel: "noopener noreferrer",
+        referrerPolicy: "no-referrer", text: "打开外部图片" }
+    });
+
+    const panelHandle = await driver.getWindowHandle();
+    const originalHandles = new Set(await driver.getAllWindowHandles());
+    await (await visible(driver, "#messages .markdown-external-image a")).click();
+    let externalHandle = "";
+    await driver.wait(async () => {
+      externalHandle = (await driver.getAllWindowHandles()).find(handle => !originalHandles.has(handle)) || "";
+      return Boolean(externalHandle);
+    }, WAIT_MS, "Timed out waiting for the explicit external-image tab");
+    await driver.wait(() => fixture.externalImages.requests.allowed.count >= 1, WAIT_MS,
+      "Timed out waiting for the explicit external-image navigation");
+    assert.deepEqual(fixture.externalImages.requests, {
+      allowed: { count: 1, refererPresent: false, panelCookiePresent: false },
+      sameHost: { count: 0 }
+    });
+    await driver.switchTo().window(externalHandle);
+    await driver.wait(async () => await driver.getCurrentUrl() === fixture.externalImages.allowedUrl, WAIT_MS,
+      "Timed out waiting for the external image document");
+    assert.equal(await driver.executeScript("return window.opener === null"), true);
+    await driver.close();
+    await driver.switchTo().window(panelHandle);
+    await driver.wait(async () => {
+      const handles = await driver.getAllWindowHandles();
+      return handles.length === originalHandles.size && handles.every(handle => originalHandles.has(handle));
+    }, WAIT_MS, "Timed out waiting for the external-image tab to close");
+    assert.equal(fixture.externalImages.requests.sameHost.count, 0);
 
     const quickToggle = await visible(driver, '.session-row[data-record-id="fixture-1"] .session-quick-menu summary');
     await quickToggle.click();
