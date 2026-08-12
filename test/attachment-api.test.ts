@@ -9,9 +9,19 @@ import { createPanelSession } from "../src/storage/panel-sessions.js";
 
 const emptyDocument = { header: { type: "session", version: 3 }, entries: [] };
 
+async function fixture() {
+  const root = await mkdtemp(join(tmpdir(), "panel-attachment-preview-"));
+  const session = await createPanelSession(root, "agent", emptyDocument);
+  return { root, session, api: new PanelAttachmentApi(root, ["agent"]) };
+}
+
+async function assertUnsupported(api: PanelAttachmentApi, recordId: string, bytes: Buffer) {
+  const uploaded = await api.upload(recordId, { fileName: "picture.bin", mimeType: "application/octet-stream", bytes });
+  await assert.rejects(api.preview(uploaded.id), error => error instanceof Error && error.message === "ATTACHMENT_PREVIEW_UNSUPPORTED");
+}
+
 test("图片预览只内联真实、单帧且有界的 PNG/JPEG/WebP", async t => {
-  const root = await mkdtemp(join(tmpdir(), "panel-attachment-preview-")); t.after(() => rm(root, { recursive: true, force: true }));
-  const session = await createPanelSession(root, "agent", emptyDocument), api = new PanelAttachmentApi(root, ["agent"]);
+  const { root, session, api } = await fixture(); t.after(() => rm(root, { recursive: true, force: true }));
   const source = { create: { width: 32, height: 20, channels: 3 as const, background: "#336699" } };
   const images = [
     { bytes: await sharp(source).png().toBuffer(), mimeType: "image/png" },
@@ -35,4 +45,34 @@ test("图片预览只内联真实、单帧且有界的 PNG/JPEG/WebP", async t =
   const tooWideBytes = await sharp({ create: { width: 8193, height: 1, channels: 3, background: "red" } }).png().toBuffer();
   const tooWide = await api.upload(session.recordId, { fileName: "too-wide.png", mimeType: "image/png", bytes: tooWideBytes });
   await assert.rejects(api.preview(tooWide.id), /ATTACHMENT_PREVIEW_UNSUPPORTED/);
+});
+
+test("图片预览完整解码并拒绝 metadata 可读的截尾 PNG", async t => {
+  const { root, session, api } = await fixture(); t.after(() => rm(root, { recursive: true, force: true }));
+  const png = await sharp({ create: { width: 64, height: 32, channels: 3, background: "#336699" } }).png().toBuffer();
+  const truncated = png.subarray(0, png.length - 30);
+  const metadata = await sharp(truncated).metadata(); assert.equal(metadata.format, "png");
+  await assert.rejects(sharp(truncated).stats());
+  await assertUnsupported(api, session.recordId, truncated);
+});
+
+test("图片预览拒绝双帧 animated WebP", async t => {
+  const { root, session, api } = await fixture(); t.after(() => rm(root, { recursive: true, force: true }));
+  const width = 4, pageHeight = 4, channels = 4;
+  const first = Buffer.alloc(width * pageHeight * channels), second = Buffer.alloc(width * pageHeight * channels);
+  for (let offset = 0; offset < first.length; offset += channels) {
+    first[offset] = 255; first[offset + 3] = 255;
+    second[offset + 2] = 255; second[offset + 3] = 255;
+  }
+  const animated = await sharp(Buffer.concat([first, second]), {
+    raw: { width, height: pageHeight * 2, channels, pageHeight }
+  }).webp({ loop: 0, delay: [100, 100] }).toBuffer();
+  const metadata = await sharp(animated, { animated: true }).metadata(); assert.equal(metadata.pages, 2);
+  await assertUnsupported(api, session.recordId, animated);
+});
+
+test("图片预览拒绝单边合规但总像素超过 40M 的图片", async t => {
+  const { root, session, api } = await fixture(); t.after(() => rm(root, { recursive: true, force: true }));
+  const oversized = await sharp({ create: { width: 8000, height: 6000, channels: 3, background: "#336699" } }).png().toBuffer();
+  await assertUnsupported(api, session.recordId, oversized);
 });

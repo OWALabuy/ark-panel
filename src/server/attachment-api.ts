@@ -55,13 +55,19 @@ export class PanelAttachmentApi {
 
   async preview(attachmentId: string): Promise<{ mimeType: string; bytes: Buffer } | undefined> {
     const file = await this.download(attachmentId); if (!file) return undefined;
-    let metadata: Metadata;
-    try { metadata = await sharp(file.bytes, { animated: true, limitInputPixels: MAX_PREVIEW_PIXELS }).metadata(); }
-    catch { throw new Error("ATTACHMENT_PREVIEW_UNSUPPORTED"); }
-    const mimeType = metadata.format ? previewMimeByFormat.get(metadata.format) : undefined;
-    if (!mimeType || !metadata.width || !metadata.height || metadata.width > MAX_PREVIEW_DIMENSION || metadata.height > MAX_PREVIEW_DIMENSION || (metadata.pages ?? 1) !== 1) {
+    try {
+      const image = sharp(file.bytes, { animated: true, limitInputPixels: MAX_PREVIEW_PIXELS });
+      const metadata: Metadata = await image.metadata();
+      const mimeType = metadata.format ? previewMimeByFormat.get(metadata.format) : undefined;
+      if (!mimeType || !metadata.width || !metadata.height || metadata.width > MAX_PREVIEW_DIMENSION || metadata.height > MAX_PREVIEW_DIMENSION || (metadata.pages ?? 1) !== 1) {
+        throw new Error("ATTACHMENT_PREVIEW_UNSUPPORTED");
+      }
+      // metadata() does not decode compressed pixels. stats() forces a complete decode
+      // without materialising the bounded-but-large raw image in a JavaScript Buffer.
+      await image.stats();
+      return { mimeType, bytes: file.bytes };
+    } catch {
       throw new Error("ATTACHMENT_PREVIEW_UNSUPPORTED");
     }
-    return { mimeType, bytes: file.bytes };
   }
 }
