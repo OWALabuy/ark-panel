@@ -1,10 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { SessionReadData } from "../src/server/read-data.js";
 import { ConservativeContextBudget } from "../src/domain/context-budget.js";
 import { commitPanelTranscript, createPanelSession, loadPanelSession, updatePanelMetadata } from "../src/storage/panel-sessions.js";
+import { listSessionAttachments, storeSessionAttachment } from "../src/storage/attachments.js";
+import type { TranscriptDocument } from "../src/domain/transcript.js";
 import { tempFixture } from "./test-helpers.js";
 
 const header = { type: "session", version: 3, id: "11111111-1111-4111-8111-111111111111", timestamp: "2026-07-11T00:00:00Z", cwd: "/private/workspace", unknownSecret: "must-not-leak" };
@@ -75,6 +77,67 @@ test("记忆整理从原生会话分支继承有效模型与思考等级", async
   const reads = new SessionReadData([{ agentId: "fixture", sessionsRoot: sessions }], data, new ConservativeContextBudget(10_000));
   const record = (await reads.sessions("fixture"))[0]!, source = await reads.memorySource(record.recordId);
   assert.deepEqual(source?.overrides, { modelOverride: "fixture-provider/fixture-model", thinkingLevel: "high" });
+});
+
+test("panel fork 与 edit-and-fork 原子发布目标实际引用的附件且不修改源记录", async t => {
+  const root = await tempFixture(t, "panel-read-attachment-fork-"), sessions = join(root, "source"), data = join(root, "data");
+  await mkdir(sessions); await mkdir(data, { mode: 0o700 });
+  const source = await createPanelSession(data, "fixture", { header, entries: [] }, { recordId: "panel-source" });
+  const keep = await storeSessionAttachment(data, { fileName: "keep.txt", mimeType: "text/plain", bytes: Buffer.from("keep") },
+    { agentId: "fixture", recordId: source.recordId, messageId: "u1", role: "user" });
+  const unreferenced = await storeSessionAttachment(data, { fileName: "unreferenced.txt", mimeType: "text/plain", bytes: Buffer.from("unreferenced") },
+    { agentId: "fixture", recordId: source.recordId, messageId: "u1", role: "user" });
+  const later = await storeSessionAttachment(data, { fileName: "later.txt", mimeType: "text/plain", bytes: Buffer.from("later") },
+    { agentId: "fixture", recordId: source.recordId, messageId: "u2", role: "user" });
+  const document: TranscriptDocument = { header, entries: [
+    { type: "message", id: "u1", parentId: null, message: { role: "user", content: [
+      { type: "text", text: "first" }, { type: "attachment", attachmentId: keep.manifest.attachmentId }
+    ] } },
+    { type: "message", id: "a1", parentId: "u1", message: { role: "assistant", content: "reply" } },
+    { type: "message", id: "u2", parentId: "a1", message: { role: "user", content: [
+      { type: "text", text: "second" }, { type: "attachment", attachmentId: later.manifest.attachmentId }
+    ] } }
+  ] };
+  await commitPanelTranscript(data, source, document);
+  const sourceIndexPath = join(data, "sessions", "fixture", source.recordId, "attachments.json");
+  const sourceTranscriptPath = join(data, "sessions", "fixture", source.recordId, "transcript.jsonl");
+  const before = { index: await readFile(sourceIndexPath), transcript: await readFile(sourceTranscriptPath) };
+  const reads = new SessionReadData([{ agentId: "fixture", sessionsRoot: sessions }], data);
+  const forked = await reads.fork(source.recordId, "a1") as { recordId: string };
+  const edited = await reads.editAndFork(source.recordId, "u2", "replacement") as { recordId: string };
+  for (const target of [forked.recordId, edited.recordId]) {
+    const inherited = await listSessionAttachments(data, "fixture", target);
+    assert.deepEqual(inherited.map(item => item.manifest.attachmentId), [keep.manifest.attachmentId]);
+    assert.equal((await reads.conversation(target) as { memoryDisposition: string }).memoryDisposition, "scratch");
+  }
+  assert.deepEqual((await listSessionAttachments(data, "fixture", source.recordId)).map(item => item.manifest.attachmentId),
+    [keep.manifest.attachmentId, unreferenced.manifest.attachmentId, later.manifest.attachmentId]);
+  assert.deepEqual(await readFile(sourceIndexPath), before.index);
+  assert.deepEqual(await readFile(sourceTranscriptPath), before.transcript);
+});
+
+test("损坏的源附件索引在 fork staging 创建前以脱敏错误失败", async t => {
+  const root = await tempFixture(t, "panel-read-attachment-corrupt-"), sessions = join(root, "source"), data = join(root, "data");
+  await mkdir(sessions); await mkdir(data, { mode: 0o700 });
+  const source = await createPanelSession(data, "fixture", { header, entries: [] }, { recordId: "panel-source" });
+  const stored = await storeSessionAttachment(data, { fileName: "fixture.txt", mimeType: "text/plain", bytes: Buffer.from("fixture") },
+    { agentId: "fixture", recordId: source.recordId, messageId: "u1", role: "user" });
+  await commitPanelTranscript(data, source, { header, entries: [
+    { type: "message", id: "u1", parentId: null, message: { role: "user", content: [
+      { type: "attachment", attachmentId: stored.manifest.attachmentId }
+    ] } },
+    { type: "message", id: "u2", parentId: "u1", message: { role: "user", content: "fixture" } }
+  ] });
+  await writeFile(join(data, "sessions", "fixture", source.recordId, "attachments.json"), "{private fixture index body");
+  const reads = new SessionReadData([{ agentId: "fixture", sessionsRoot: sessions }], data);
+  const invalid = (error: unknown) => {
+    assert.equal((error as Error).message, "FORK_ATTACHMENT_SOURCE_INVALID");
+    assert.equal(String(error).includes(root), false); assert.doesNotMatch(String(error), /private fixture index body/); return true;
+  };
+  await assert.rejects(reads.fork(source.recordId, "u2"), invalid);
+  await assert.rejects(reads.editAndFork(source.recordId, "u2", "replacement"), invalid);
+  assert.deepEqual(await readdir(join(data, "sessions", "fixture")), [source.recordId], "预检失败不得创建 target 或 staging");
+  assert.deepEqual((await reads.sessions("fixture")).map(item => item.recordId), [source.recordId]);
 });
 
 test("面板会话要求显式确认并先归档才可永久删除", async t => {

@@ -1,14 +1,16 @@
 import assert from "node:assert/strict";
-import { link, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { link, lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import {
-  garbageCollectAttachments, forkSessionAttachmentReferences, listSessionAttachments,
+  garbageCollectAttachments, listSessionAttachments,
   MAX_ATTACHMENT_BYTES, pruneSessionAttachments, readAttachmentBytes, readSessionAttachmentBytes, removeSessionAttachmentReferences,
   storeSessionAttachment, storeSessionAttachmentFile
 } from "../src/storage/attachments.js";
-import { createPanelSession, deletePanelSession, updatePanelMetadata } from "../src/storage/panel-sessions.js";
+import { commitPanelTranscript, createPanelSession, createPanelSessionFork, deletePanelSession, listPanelSessions, updatePanelMetadata,
+  type PanelSessionPublishStep } from "../src/storage/panel-sessions.js";
+import { tempFixture } from "./test-helpers.js";
 
 const emptyDocument = { header: { type: "session", version: 3 }, entries: [] };
 
@@ -74,15 +76,28 @@ test("从模型产出路径采集时拒绝 symlink、hardlink 和非普通文件
 test("fork 仅复制纳入消息的引用，GC 尊重跨会话及内容去重引用", async () => {
   const root = await mkdtemp(join(tmpdir(), "panel-attachment-fork-"));
   try {
-    const source = await createPanelSession(root, "agent", emptyDocument), target = await createPanelSession(root, "agent", emptyDocument);
+    const source = await createPanelSession(root, "agent", emptyDocument, { recordId: "source" });
     const keep = await storeSessionAttachment(root, { fileName: "keep.txt", mimeType: "text/plain", bytes: Buffer.from("same") }, { agentId: "agent", recordId: source.recordId, messageId: "keep", role: "user" });
+    const unreferenced = await storeSessionAttachment(root, { fileName: "unreferenced.txt", mimeType: "text/plain", bytes: Buffer.from("unreferenced") }, { agentId: "agent", recordId: source.recordId, messageId: "keep", role: "user" });
     const omit = await storeSessionAttachment(root, { fileName: "omit.txt", mimeType: "text/plain", bytes: Buffer.from("omit") }, { agentId: "agent", recordId: source.recordId, messageId: "omit", role: "assistant" });
-    assert.equal(await forkSessionAttachmentReferences(root, { agentId: "agent", recordId: source.recordId }, { agentId: "agent", recordId: target.recordId }, new Set(["keep"])), 1);
+    const sourceDocument = { header: emptyDocument.header, entries: [
+      { type: "message", id: "keep", parentId: null, message: { role: "user", content: [
+        { type: "text", text: "fixture" }, { type: "attachment", attachmentId: keep.manifest.attachmentId }
+      ] } },
+      { type: "message", id: "omit", parentId: "keep", message: { role: "assistant", content: [
+        { type: "attachment", attachmentId: omit.manifest.attachmentId }
+      ] } }
+    ] };
+    await commitPanelTranscript(root, source, sourceDocument);
+    const targetDocument = { header: { ...emptyDocument.header, panel: { recordId: "target" } }, entries: [sourceDocument.entries[0]!] };
+    const target = await createPanelSessionFork(root, "agent", targetDocument,
+      { parentRecordId: source.recordId, forkedFromMessageId: "keep", recordId: "target" },
+      { agentId: "agent", recordId: source.recordId });
     assert.deepEqual((await listSessionAttachments(root, "agent", target.recordId)).map((item) => item.manifest.attachmentId), [keep.manifest.attachmentId]);
 
     await removeSessionAttachmentReferences(root, "agent", source.recordId);
     const firstGc = await garbageCollectAttachments(root);
-    assert.deepEqual(firstGc.removedAttachments, [omit.manifest.attachmentId]);
+    assert.deepEqual(firstGc.removedAttachments, [omit.manifest.attachmentId, unreferenced.manifest.attachmentId].sort());
     assert.equal((await readAttachmentBytes(root, keep.manifest.attachmentId)).toString(), "same");
     await removeSessionAttachmentReferences(root, "agent", target.recordId);
     const secondGc = await garbageCollectAttachments(root);
@@ -90,6 +105,90 @@ test("fork 仅复制纳入消息的引用，GC 尊重跨会话及内容去重引
     assert.equal(secondGc.removedBlobs.length, 1);
     await assert.rejects(readAttachmentBytes(root, keep.manifest.attachmentId), /ENOENT/);
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("fork 的附件索引与 transcript/metadata 共用一次目录发布，任一故障均可安全重试", async t => {
+  const root = await tempFixture(t, "panel-attachment-fork-publish-");
+  const source = await createPanelSession(root, "agent", emptyDocument, { recordId: "source" });
+  const stored = await storeSessionAttachment(root, { fileName: "fixture.txt", mimeType: "text/plain", bytes: Buffer.from("fixture bytes") },
+    { agentId: "agent", recordId: source.recordId, messageId: "message", role: "user" });
+  const sourceDocument = { header: emptyDocument.header, entries: [
+    { type: "message", id: "message", parentId: null, message: { role: "user", content: [
+      { type: "attachment", attachmentId: stored.manifest.attachmentId }
+    ] } }
+  ] };
+  await commitPanelTranscript(root, source, sourceDocument);
+  const sourceIndexPath = join(root, "sessions", "agent", source.recordId, "attachments.json");
+  const manifestPath = join(root, "files", "manifests", `${stored.manifest.attachmentId}.json`);
+  const blobPath = join(root, "files", "blobs", "sha256", stored.manifest.sha256.slice(0, 2), stored.manifest.sha256);
+  const before = { index: await readFile(sourceIndexPath), manifest: await readFile(manifestPath), blob: await readFile(blobPath) };
+  const failingSteps: PanelSessionPublishStep[] = ["metadata-write", "metadata-sync", "transcript-write", "transcript-sync",
+    "attachments-write", "attachments-sync", "staging-directory-sync", "publish-rename", "published-directory-sync"];
+  for (const [position, failingStep] of failingSteps.entries()) await t.test(failingStep, async () => {
+    const recordId = `target-${position}`, targetDocument = { header: { ...emptyDocument.header, panel: { recordId } }, entries: sourceDocument.entries };
+    const create = (fail: boolean) => createPanelSessionFork(root, "agent", targetDocument,
+      { parentRecordId: source.recordId, forkedFromMessageId: "message", recordId },
+      { agentId: "agent", recordId: source.recordId }, fail ? { beforeStep(step) {
+        if (step === failingStep) throw new Error(`injected ${step}`);
+      } } : undefined);
+    await assert.rejects(create(true), new RegExp(`injected ${failingStep}`));
+    assert.equal((await readdir(join(root, "sessions", "agent"))).includes(recordId), false);
+    assert.equal((await listPanelSessions(root, "agent", () => {})).some(item => item.recordId === recordId), false);
+    await create(false);
+    assert.deepEqual((await listSessionAttachments(root, "agent", recordId)).map(item => item.manifest.attachmentId), [stored.manifest.attachmentId]);
+  });
+  assert.deepEqual(await readFile(sourceIndexPath), before.index);
+  assert.deepEqual(await readFile(manifestPath), before.manifest);
+  assert.deepEqual(await readFile(blobPath), before.blob);
+  assert.deepEqual(await garbageCollectAttachments(root), { removedAttachments: [], removedBlobs: [] }, "GC 必须忽略故障证据 staging");
+});
+
+test("fork 预检拒绝不安全附件且同一 target 并发只发布一条完整记录", async t => {
+  const root = await tempFixture(t, "panel-attachment-fork-safety-"), source = await createPanelSession(root, "agent", emptyDocument, { recordId: "source" });
+  const stored = await storeSessionAttachment(root, { fileName: "fixture.txt", mimeType: "text/plain", bytes: Buffer.from("fixture") },
+    { agentId: "agent", recordId: source.recordId, messageId: "message", role: "user" });
+  const document = { header: { ...emptyDocument.header, panel: { recordId: "target" } }, entries: [
+    { type: "message", id: "message", parentId: null, message: { role: "user", content: [
+      { type: "attachment", attachmentId: stored.manifest.attachmentId }
+    ] } }
+  ] };
+  await commitPanelTranscript(root, source, { ...document, header: emptyDocument.header });
+  const blob = join(root, "files", "blobs", "sha256", stored.manifest.sha256.slice(0, 2), stored.manifest.sha256), alias = join(root, "blob-alias");
+  await link(blob, alias);
+  const create = () => createPanelSessionFork(root, "agent", document,
+    { parentRecordId: source.recordId, forkedFromMessageId: "message", recordId: "target" },
+    { agentId: "agent", recordId: source.recordId });
+  await assert.rejects(create(), /FORK_ATTACHMENT_SOURCE_INVALID/);
+  assert.deepEqual(await readdir(join(root, "sessions", "agent")), [source.recordId], "预检失败不得创建 target 或 staging");
+  await rm(alias);
+  const attempts = await Promise.allSettled([create(), create()]);
+  assert.equal(attempts.filter(result => result.status === "fulfilled").length, 1);
+  assert.match(String(attempts.find(result => result.status === "rejected")?.reason), /PANEL_SESSION_EXISTS/);
+  assert.deepEqual((await listSessionAttachments(root, "agent", "target")).map(item => item.manifest.attachmentId), [stored.manifest.attachmentId]);
+  assert.deepEqual((await listPanelSessions(root, "agent")).map(item => item.recordId), [source.recordId, "target"]);
+});
+
+test("失败 fork 的 staging 不会被附件 GC 当成可见 owner", async t => {
+  const root = await tempFixture(t, "panel-attachment-fork-gc-"), source = await createPanelSession(root, "agent", emptyDocument, { recordId: "source" });
+  const stored = await storeSessionAttachment(root, { fileName: "fixture.txt", mimeType: "text/plain", bytes: Buffer.from("fixture") },
+    { agentId: "agent", recordId: source.recordId, messageId: "message", role: "user" });
+  const document = { header: { ...emptyDocument.header, panel: { recordId: "target" } }, entries: [
+    { type: "message", id: "message", parentId: null, message: { role: "user", content: [
+      { type: "attachment", attachmentId: stored.manifest.attachmentId }
+    ] } }
+  ] };
+  await commitPanelTranscript(root, source, { ...document, header: emptyDocument.header });
+  await assert.rejects(createPanelSessionFork(root, "agent", document,
+    { parentRecordId: source.recordId, forkedFromMessageId: "message", recordId: "target" },
+    { agentId: "agent", recordId: source.recordId }, { beforeStep(step) {
+      if (step === "attachments-sync") throw new Error("injected attachments-sync");
+    } }), /injected attachments-sync/);
+  await removeSessionAttachmentReferences(root, "agent", source.recordId);
+  const result = await garbageCollectAttachments(root);
+  assert.deepEqual(result.removedAttachments, [stored.manifest.attachmentId]); assert.equal(result.removedBlobs.length, 1);
+  assert.deepEqual((await listPanelSessions(root, "agent", () => {})).map(item => item.recordId), [source.recordId]);
+  assert.equal((await readdir(join(root, "sessions", "agent"))).some(name => name.startsWith(".panel-session-staging-")), true,
+    "故障证据 staging 保留但不构成 owner");
 });
 
 test("blob 被替换、硬链接或篡改后拒绝读取，归档会话可安全删除附件引用", async () => {

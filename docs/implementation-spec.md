@@ -107,9 +107,10 @@ gateway 连接凭证：读 `~/.openclaw/openclaw.json` 的 `gateway.auth.token`�
       <recordId>/
         metadata.json         # 可变会话属性与 fork 来源
         transcript.jsonl      # 权威完整 transcript
+        attachments.json      # 可选；该会话实际拥有的附件引用
 ```
 
-`metadata.json` 与 `transcript.jsonl` 共同构成一条可见的权威记录，不得逐文件直接发布。创建时在同一 `<agentId>/` 下以保留前缀 staging 目录写入：两个 `0600` 文件分别写完并 `fsync`，再 `fsync` staging 目录，单次 rename 为 `<recordId>/`，最后 `fsync` `<agentId>/`。创建或复用 `sessions/` 与 agent 子目录时都重新 `fsync` 各自父目录，避免前一次父目录同步失败后由重试跳过 durability。发布失败时回退为不可枚举的 staging；若回退本身也失败则必须明确报告 durability 不确定，不得宣称创建成功。已有 staging 或其他半成品作为故障证据保守报告，不自动删除。列表、读取与搜索忽略 staging，并对每条已发布记录独立校验；缺文件、损坏 JSON、非普通文件、硬/符号链接或不安全权限只隔离当前记录，结构化诊断不得含正文或私密绝对路径。只有 `sessions/` 或 agent 子目录不存在可解释为空；配置的数据根缺失、不安全或不可达必须以脱敏的 `PANEL_SESSION_STORAGE_UNAVAILABLE` 失败。这不改变现有 metadata/transcript schema，也不对历史数据做静默迁移或删除。
+`metadata.json`、`transcript.jsonl` 与存在时的 `attachments.json` 共同构成一条可见的权威记录，不得逐文件直接发布。创建时在同一 `<agentId>/` 下以保留前缀 staging 目录写入：各 `0600` 文件分别写完并 `fsync`，再 `fsync` staging 目录，单次 rename 为 `<recordId>/`，最后 `fsync` `<agentId>/`。panel fork/edit-and-fork 在创建任何 staging 前解析完整源附件索引，并只选择目标 transcript 中真实 `attachment` block 对应、owner 一致且 manifest/blob 完整的引用；附件存储互斥锁一直持有到目标目录发布完成，因此 GC、上传分配或删除不能在预检与发布之间使引用失效。源 session、源附件索引、manifest 与 blob 不修改、不复制、不删除。创建或复用 `sessions/` 与 agent 子目录时都重新 `fsync` 各自父目录，避免前一次父目录同步失败后由重试跳过 durability。发布失败时回退为不可枚举的 staging；若回退本身也失败则必须明确报告 durability 不确定，不得宣称创建成功。已有 staging 或其他半成品作为故障证据保守报告，不自动删除；列表、读取、搜索与附件 GC 均忽略 staging。已发布记录仍逐条独立校验；缺文件、损坏 JSON、非普通文件、硬/符号链接或不安全权限只隔离当前记录，结构化诊断不得含正文或私密绝对路径。只有 `sessions/` 或 agent 子目录不存在可解释为空；配置的数据根缺失、不安全或不可达必须以脱敏的 `PANEL_SESSION_STORAGE_UNAVAILABLE` 失败。这不改变现有 metadata/transcript/attachment schema，也不对历史数据做静默迁移或删除。
 
 参考样本：可以把 `~/.openclaw/agents/claude/sessions/` 里的文件**拷贝出来**做解析测试样本，绝不直接读写原目录。
 

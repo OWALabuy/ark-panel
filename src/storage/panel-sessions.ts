@@ -5,7 +5,8 @@ import { join, resolve } from "node:path";
 import { newPanelRecordId } from "../domain/record-id.js";
 import { parseTranscript, serializeTranscript, type TranscriptDocument } from "../domain/transcript.js";
 import { assertWithin, atomicWrite } from "./atomic.js";
-import { removeSessionAttachmentReferences } from "./attachments.js";
+import { removeSessionAttachmentReferences, withForkedSessionAttachmentIndex, type SessionAttachmentIndex } from "./attachments.js";
+import { PANEL_SESSION_STAGING_PREFIX } from "./panel-session-layout.js";
 
 export interface PanelMetadata {
   version: 1; recordId: string; agentId: string; createdAt: string;
@@ -17,11 +18,11 @@ export interface PanelMetadata {
 
 const metadataUpdates = new Map<string, Promise<void>>();
 const sessionCreates = new Map<string, Promise<void>>();
-const STAGING_PREFIX = ".panel-session-staging-";
 const STORAGE_UNAVAILABLE = "PANEL_SESSION_STORAGE_UNAVAILABLE";
 
 export type PanelSessionPublishStep = "sessions-parent-sync" | "agent-parent-sync" |
   "metadata-write" | "metadata-sync" | "transcript-write" | "transcript-sync" |
+  "attachments-write" | "attachments-sync" |
   "staging-directory-sync" | "publish-rename" | "published-directory-sync";
 export interface PanelSessionPublishOptions { beforeStep?: (step: PanelSessionPublishStep) => void | Promise<void> }
 
@@ -41,7 +42,7 @@ class PanelSessionScanError extends Error {
 }
 
 function opaqueComponent(value: string, label: string): string {
-  if (!value || value.length > 200 || value === "." || value === ".." || value.startsWith(STAGING_PREFIX) || /[\u0000-\u001f\u007f/\\]/.test(value)) throw new Error(`${label} 格式无效`);
+  if (!value || value.length > 200 || value === "." || value === ".." || value.startsWith(PANEL_SESSION_STAGING_PREFIX) || /[\u0000-\u001f\u007f/\\]/.test(value)) throw new Error(`${label} 格式无效`);
   return value;
 }
 
@@ -166,11 +167,12 @@ async function scanRecord(directory: string, agentId: string, recordId: string):
   return { metadata, document, revision: `${transcript.stat.size}:${transcript.stat.mtimeMs}`, updatedAt: transcript.stat.mtime.toISOString() };
 }
 
-export async function createPanelSession(dataRoot: string, agentId: string, document: TranscriptDocument,
+async function publishPanelSession(dataRoot: string, agentId: string, document: TranscriptDocument,
   source?: { parentRecordId?: string; forkedFromMessageId?: string; recordId?: string; createdAt?: string; title?: string; project?: string },
-  options: PanelSessionPublishOptions = {}): Promise<PanelMetadata> {
+  options: PanelSessionPublishOptions = {}, attachmentIndex?: SessionAttachmentIndex): Promise<PanelMetadata> {
   const recordId = source?.recordId ?? newPanelRecordId(); const createdAt = source?.createdAt ?? new Date().toISOString();
   opaqueComponent(agentId, "agentId"); opaqueComponent(recordId, "recordId");
+  if (attachmentIndex && (attachmentIndex.version !== 1 || attachmentIndex.agentId !== agentId || attachmentIndex.recordId !== recordId || !attachmentIndex.references.length)) throw new Error("fork 附件索引与目标会话不一致");
   const metadata = validateMetadata({ version: 1, recordId, agentId, createdAt,
     archived: false, hidden: false, memoryDisposition: "scratch", ...(source?.title ? { title: source.title } : {}), ...(source?.project ? { project: source.project } : {}),
     ...(source?.parentRecordId && source.forkedFromMessageId ? { parentRecordId: source.parentRecordId, forkedFromMessageId: source.forkedFromMessageId } : {}) }, agentId, recordId);
@@ -179,7 +181,7 @@ export async function createPanelSession(dataRoot: string, agentId: string, docu
     const agentRoot = await prepareAgentRoot(dataRoot, agentId, options), directory = assertWithin(agentRoot, join(agentRoot, recordId));
     try { await lstat(directory); throw new Error("PANEL_SESSION_EXISTS"); }
     catch (error) { if (!isMissing(error)) throw error; }
-    const staging = assertWithin(agentRoot, join(agentRoot, `${STAGING_PREFIX}${randomUUID()}`));
+    const staging = assertWithin(agentRoot, join(agentRoot, `${PANEL_SESSION_STAGING_PREFIX}${randomUUID()}`));
     await mkdir(staging, { mode: 0o700 }); assertPrivateDirectory(await lstat(staging), "panel staging");
     const write = async (name: string, data: string, writeStep: PanelSessionPublishStep, syncStep: PanelSessionPublishStep) => {
       const handle = await open(join(staging, name), "wx", 0o600);
@@ -190,6 +192,7 @@ export async function createPanelSession(dataRoot: string, agentId: string, docu
     };
     await write("metadata.json", JSON.stringify(metadata, null, 2) + "\n", "metadata-write", "metadata-sync");
     await write("transcript.jsonl", serializeTranscript(document), "transcript-write", "transcript-sync");
+    if (attachmentIndex) await write("attachments.json", JSON.stringify(attachmentIndex, null, 2) + "\n", "attachments-write", "attachments-sync");
     await options.beforeStep?.("staging-directory-sync"); await syncDirectory(staging);
     try { await lstat(directory); throw new Error("PANEL_SESSION_EXISTS"); }
     catch (error) { if (!isMissing(error)) throw error; }
@@ -204,6 +207,22 @@ export async function createPanelSession(dataRoot: string, agentId: string, docu
   });
 }
 
+export async function createPanelSession(dataRoot: string, agentId: string, document: TranscriptDocument,
+  source?: { parentRecordId?: string; forkedFromMessageId?: string; recordId?: string; createdAt?: string; title?: string; project?: string },
+  options: PanelSessionPublishOptions = {}): Promise<PanelMetadata> {
+  return publishPanelSession(dataRoot, agentId, document, source, options);
+}
+
+export async function createPanelSessionFork(dataRoot: string, agentId: string, document: TranscriptDocument,
+  source: { parentRecordId: string; forkedFromMessageId: string; recordId: string; createdAt?: string; title?: string; project?: string },
+  attachmentSource?: { agentId: string; recordId: string }, options: PanelSessionPublishOptions = {}): Promise<PanelMetadata> {
+  opaqueComponent(agentId, "agentId"); opaqueComponent(source.recordId, "recordId"); await validatedDataRoot(dataRoot);
+  if (attachmentSource && attachmentSource.agentId !== agentId) throw new Error("FORK_ATTACHMENT_SOURCE_INVALID");
+  if (!attachmentSource) return publishPanelSession(dataRoot, agentId, document, source, options);
+  return withForkedSessionAttachmentIndex(dataRoot, attachmentSource, { agentId, recordId: source.recordId }, document,
+    async attachmentIndex => publishPanelSession(dataRoot, agentId, document, source, options, attachmentIndex));
+}
+
 export async function scanPanelSessions(dataRoot: string, agentId: string,
   onDiagnostic: PanelSessionDiagnosticSink = defaultDiagnostic): Promise<ScannedPanelSession[]> {
   const root = await existingAgentRoot(dataRoot, agentId); if (!root) return [];
@@ -211,7 +230,7 @@ export async function scanPanelSessions(dataRoot: string, agentId: string,
   try { names = (await readdir(root)).sort(); }
   catch { throw storageUnavailable(); }
   for (const name of names) {
-    if (name.startsWith(STAGING_PREFIX)) { diagnostic(onDiagnostic, agentId, name, "STAGING_DIRECTORY"); continue; }
+    if (name.startsWith(PANEL_SESSION_STAGING_PREFIX)) { diagnostic(onDiagnostic, agentId, name, "STAGING_DIRECTORY"); continue; }
     try { opaqueComponent(name, "recordId"); }
     catch { diagnostic(onDiagnostic, agentId, name, "ENTRY_UNSAFE"); continue; }
     const directory = assertWithin(root, join(root, name));

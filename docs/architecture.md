@@ -224,7 +224,7 @@ gateway 的会话索引属于其内部状态：它仅使用进程内锁，也没
 **面板自建会话（在面板中新建或 fork 产生）**
 - 文件由面板自己拥有，走 §5.3 的推理桥接，在固定 workspace 里跑推理。
 - 从活会话某条消息 fork，产出的就是这类会话。
-- 权威记录是同一 `sessions/<agentId>/<recordId>/` 下的 `metadata.json` 与 `transcript.jsonl`。新建时先在同父目录的保留 staging 名称空间写完并 `fsync` 两个文件及目录，再用单次目录 rename 发布并 `fsync` 父目录；发布前记录不得进入列表、读取或搜索。扫描遇到历史半成品或单条损坏记录时只输出不含正文和私密绝对路径的结构化诊断并隔离该条，不自动删除，也不隐藏其他健康会话。
+- 权威记录是同一 `sessions/<agentId>/<recordId>/` 下的 `metadata.json`、`transcript.jsonl` 与可选 `attachments.json`。新建时先在同父目录的保留 staging 名称空间写完并逐文件 `fsync`，再 `fsync` staging 目录，用单次目录 rename 发布并 `fsync` 父目录；发布前记录不得进入列表、读取、搜索或附件 GC。panel 会话 fork 会在附件存储互斥区内先校验源索引及目标分支实际引用的 manifest/blob，再把目标附件索引放入同一个 staging；源会话、源索引和内容寻址文件保持不变。扫描遇到历史半成品或单条损坏记录时只输出不含正文和私密绝对路径的结构化诊断并隔离该条，不自动删除，也不隐藏其他健康会话。
 
 这个两层模型统一支撑了需求 1、3、4、6。
 

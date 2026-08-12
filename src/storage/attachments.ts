@@ -1,8 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { chmod, link, lstat, mkdir, open, readdir, realpath, rename, rmdir, unlink } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
+import type { JsonObject, TranscriptDocument } from "../domain/transcript.js";
 import { assertWithin } from "./atomic.js";
+import { PANEL_SESSION_STAGING_PREFIX } from "./panel-session-layout.js";
 
 export const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 export const MAX_ATTACHMENT_FILENAME_BYTES = 255;
@@ -58,14 +60,14 @@ const MIME = /^[a-z0-9][a-z0-9!#$&^_.+-]{0,62}\/[a-z0-9][a-z0-9!#$&^_.+-]{0,62}$
 const updates = new Map<string, Promise<void>>();
 
 async function serialized<T>(dataRoot: string, operation: () => Promise<T>): Promise<T> {
-  const previous = updates.get(dataRoot) ?? Promise.resolve();
+  const key = resolve(dataRoot), previous = updates.get(key) ?? Promise.resolve();
   let release!: () => void;
   const current = new Promise<void>((resolve) => { release = resolve; });
   const queued = previous.then(() => current);
-  updates.set(dataRoot, queued);
+  updates.set(key, queued);
   await previous;
   try { return await operation(); }
-  finally { release(); if (updates.get(dataRoot) === queued) updates.delete(dataRoot); }
+  finally { release(); if (updates.get(key) === queued) updates.delete(key); }
 }
 
 function validateOpaqueId(value: string, label: string): string {
@@ -289,15 +291,46 @@ export async function assignSessionAttachments(dataRoot: string, agentId: string
   });
 }
 
-export async function forkSessionAttachmentReferences(dataRoot: string, source: { agentId: string; recordId: string }, target: { agentId: string; recordId: string }, includedMessageIds: ReadonlySet<string>): Promise<number> {
+function documentAttachmentOwners(document: TranscriptDocument): Array<Pick<AttachmentReference, "attachmentId" | "messageId" | "role">> {
+  const references: Array<Pick<AttachmentReference, "attachmentId" | "messageId" | "role">> = [], seen = new Set<string>();
+  for (const entry of document.entries) {
+    const message = entry.message;
+    if (!message || typeof message !== "object" || Array.isArray(message)) continue;
+    const content = (message as JsonObject).content;
+    if (!Array.isArray(content)) continue;
+    for (const block of content) {
+      if (!block || typeof block !== "object" || Array.isArray(block) || (block as JsonObject).type !== "attachment") continue;
+      const attachmentId = (block as JsonObject).attachmentId, messageId = entry.id, ownerRole = (message as JsonObject).role;
+      if (typeof attachmentId !== "string" || !ATTACHMENT_ID.test(attachmentId) || typeof messageId !== "string" ||
+          !["user", "assistant"].includes(String(ownerRole)) || seen.has(attachmentId)) throw new Error("fork 附件引用无效");
+      validateOpaqueId(messageId, "messageId"); seen.add(attachmentId);
+      references.push({ attachmentId, messageId, role: ownerRole as "user" | "assistant" });
+    }
+  }
+  return references;
+}
+
+/** Keep source ownership and GC stable until the complete target record has crossed its publish boundary. */
+export async function withForkedSessionAttachmentIndex<T>(dataRoot: string,
+  source: { agentId: string; recordId: string }, target: { agentId: string; recordId: string }, document: TranscriptDocument,
+  publish: (index: SessionAttachmentIndex | undefined) => Promise<T>): Promise<T> {
   return serialized(dataRoot, async () => {
-    const sourceIndex = await readIndex(dataRoot, source.agentId, source.recordId), targetPath = indexPath(dataRoot, target.agentId, target.recordId);
-    await assertSessionDirectory(dataRoot, target.agentId, target.recordId);
-    const references = sourceIndex.references.filter((item) => includedMessageIds.has(item.messageId));
-    for (const item of references) await readManifestAt(dataRoot, item.attachmentId);
-    const targetIndex: SessionAttachmentIndex = { version: 1, agentId: target.agentId, recordId: target.recordId, references: references.map((item) => ({ ...item })) };
-    if (references.length > 0) await writeMutable(targetPath, Buffer.from(JSON.stringify(targetIndex, null, 2) + "\n"));
-    return references.length;
+    let targetIndex: SessionAttachmentIndex | undefined;
+    try {
+      validateOpaqueId(source.agentId, "agentId"); validateOpaqueId(source.recordId, "recordId");
+      validateOpaqueId(target.agentId, "agentId"); validateOpaqueId(target.recordId, "recordId");
+      const sourceIndex = await readIndex(dataRoot, source.agentId, source.recordId), required = documentAttachmentOwners(document);
+      const byId = new Map(sourceIndex.references.map(reference => [reference.attachmentId, reference]));
+      const references: AttachmentReference[] = [];
+      for (const expected of required) {
+        const owned = byId.get(expected.attachmentId);
+        if (!owned || owned.messageId !== expected.messageId || owned.role !== expected.role) throw new Error("fork 附件不属于源消息");
+        await readAttachmentBytes(dataRoot, expected.attachmentId);
+        references.push({ ...owned });
+      }
+      if (references.length) targetIndex = { version: 1, agentId: target.agentId, recordId: target.recordId, references };
+    } catch { throw new Error("FORK_ATTACHMENT_SOURCE_INVALID"); }
+    return await publish(targetIndex);
   });
 }
 
@@ -347,6 +380,7 @@ async function collectLiveAttachmentIds(dataRoot: string): Promise<Set<string>> 
     const agentPath = assertWithin(sessionsRoot, join(sessionsRoot, agentId)), agentStat = await lstat(agentPath);
     if (!agentStat.isDirectory() || agentStat.isSymbolicLink()) throw new Error("会话附件扫描遇到不安全 agent 目录");
     for (const recordId of await readdir(agentPath)) {
+      if (recordId.startsWith(PANEL_SESSION_STAGING_PREFIX)) continue;
       const recordPath = assertWithin(agentPath, join(agentPath, recordId)), recordStat = await lstat(recordPath);
       if (!recordStat.isDirectory() || recordStat.isSymbolicLink()) throw new Error("会话附件扫描遇到不安全会话目录");
       const index = await readIndex(dataRoot, agentId, recordId);

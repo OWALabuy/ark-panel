@@ -5,14 +5,14 @@ import { deriveFork } from "../domain/fork.js";
 import { externalRecordId } from "../domain/record-id.js";
 import { parseTranscript, TranscriptError, type JsonObject, type TranscriptDocument } from "../domain/transcript.js";
 import { assertWithin } from "../storage/atomic.js";
-import { createPanelSession, deletePanelSession, loadPanelSession, scanPanelSessions } from "../storage/panel-sessions.js";
+import { createPanelSession, createPanelSessionFork, deletePanelSession, loadPanelSession, scanPanelSessions } from "../storage/panel-sessions.js";
 import { loadReadonlyMetadata, updateReadonlyMetadata, type ReadonlySourceIdentity } from "../storage/readonly-metadata.js";
 import { updatePanelMetadata } from "../storage/panel-sessions.js";
 import { currentTranscriptBranch } from "../domain/branch.js";
 import { exportTranscriptMarkdown, markdownFilename } from "../domain/markdown-export.js";
 import { ConservativeContextBudget, type ContextBudgetEstimator } from "../domain/context-budget.js";
 import { contextUsageAtCurrentTip, type OpenClawContextUsage } from "../domain/context-usage.js";
-import { forkSessionAttachmentReferences, garbageCollectAttachments } from "../storage/attachments.js";
+import { garbageCollectAttachments } from "../storage/attachments.js";
 
 export interface ReadAgentConfig { agentId: string; sessionsRoot: string; label?: string }
 export interface ConversationRecord {
@@ -277,10 +277,9 @@ export class SessionReadData {
     const createdAt = new Date().toISOString(); const newId = randomUUID();
     const inherited = { title: loaded.record.title, ...(loaded.record.project ? { project: loaded.record.project } : {}) };
     const document = deriveFork(loaded.document, messageId, { recordId: newId, parentRecordId: recordId, forkedFromMessageId: messageId, createdAt, ...inherited });
-    const metadata = await createPanelSession(this.dataRoot, loaded.record.agentId, document, { parentRecordId: recordId, forkedFromMessageId: messageId, recordId: newId, createdAt, ...inherited });
-    if (loaded.record.sourceKind === "panel") await forkSessionAttachmentReferences(this.dataRoot,
-      { agentId: loaded.record.agentId, recordId }, { agentId: loaded.record.agentId, recordId: newId },
-      new Set(document.entries.flatMap(entry => typeof entry.id === "string" ? [entry.id] : [])));
+    const metadata = await createPanelSessionFork(this.dataRoot, loaded.record.agentId, document,
+      { parentRecordId: recordId, forkedFromMessageId: messageId, recordId: newId, createdAt, ...inherited },
+      loaded.record.sourceKind === "panel" ? { agentId: loaded.record.agentId, recordId } : undefined);
     return { recordId: metadata.recordId, agentId: metadata.agentId, sourceKind: "panel" };
   }
 
@@ -294,11 +293,9 @@ export class SessionReadData {
     if (parent) base = deriveFork(loaded.document, parent, { recordId: newId, parentRecordId: recordId, forkedFromMessageId: messageId, createdAt, ...inherited });
     else base = { header: { ...loaded.document.header, id: randomUUID(), timestamp: createdAt,
       panel: { recordId: newId, parentRecordId: recordId, forkedFromMessageId: messageId, createdAt, ...inherited } }, entries: [] };
-    const metadata = await createPanelSession(this.dataRoot, loaded.record.agentId, base,
-      { parentRecordId: recordId, forkedFromMessageId: messageId, recordId: newId, createdAt, ...inherited });
-    if (loaded.record.sourceKind === "panel") await forkSessionAttachmentReferences(this.dataRoot,
-      { agentId: loaded.record.agentId, recordId }, { agentId: loaded.record.agentId, recordId: newId },
-      new Set(base.entries.flatMap(entry => typeof entry.id === "string" ? [entry.id] : [])));
+    const metadata = await createPanelSessionFork(this.dataRoot, loaded.record.agentId, base,
+      { parentRecordId: recordId, forkedFromMessageId: messageId, recordId: newId, createdAt, ...inherited },
+      loaded.record.sourceKind === "panel" ? { agentId: loaded.record.agentId, recordId } : undefined);
     return { recordId: metadata.recordId, agentId: metadata.agentId, sourceKind: "panel" };
   }
 }
