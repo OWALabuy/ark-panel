@@ -289,7 +289,7 @@ fork 和编辑重发共用底层（见 §5.0）：都是「从目标 entry 回�
 - bridge 在临时 session 创建、历史物化、gateway 接受 send、entries 物化四个边界回调 run manager。完整 entries 必须先持久化，随后才允许清理临时 session，避免「临时结果已删、面板尚未接住」的永久丢失窗口。
 - SSE 订阅首帧发送最新快照，每个状态版本带单调序号。浏览器在终态前遇到 EOF 或网络错误时保留 runId，重新查询并订阅；只有明确 completed 才清对应草稿。
 - 服务重启时：accepted 且恢复负载完整的 run 可以重新调度；已提交但未标终态的 run 补成 completed；已有暂存 entries 的 run按基线 revision精确补提交；无法证明可以安全续跑的 gateway run 标为 `RUN_ORPHANED_AFTER_RESTART`，绝不盲目重发可能已经产生工具副作用的任务。
-- 服务启动或首次活跃查询会全量扫描权威 run JSON，并据此重建仅存在于进程内的 active-run 派生索引。accepted 只有在 run 文件原子落盘并完成目录 durability 后才加入索引，终态也只有持久化成功后才移除；创建占用检查、活跃查询和附件维护不再扫描全部历史终态 run。该索引没有独立持久格式，删除内存状态或重启后仍完全由 run 文件恢复。
+- 服务启动或首次活跃查询会全量扫描权威 run JSON，并据此重建仅存在于进程内的 active-run 派生索引。accepted 只有在 run 文件原子落盘并完成目录 durability 后才加入索引，终态也只有持久化成功后才移除；任一 run 原子写返回失败时，因 rename 可能已经发生而必须作废派生索引，下一次查询按磁盘当前可见的权威文件重建。创建占用检查、活跃查询和附件维护不再扫描全部历史终态 run。该索引没有独立持久格式，删除内存状态或重启后仍完全由 run 文件恢复。
 - run 查询、订阅和停止均受登录态约束；停止必须等待服务端确认。内部临时 session / gateway 标识仅用于受限持久化和日志诊断，不下发给浏览器。
 - 长程任务的 OpenClaw 执行上限与面板 watcher 分离：`PANEL_GATEWAY_RUN_TIMEOUT_MS` 默认 30 分钟，随后以 `PANEL_RUN_WATCHER_GRACE_MS`（默认 30 秒）继续等待 terminal trajectory。watcher 增量读取 trajectory，并区分上游 timeout、abort、普通失败、未观察到启动和 watcher 自身超时。停止或超时后的清理必须等到 terminal 且 gateway 报告 `no-active-run`；无法确认释放时保留 artifact 与 `cleanupPending`，不得删除仍可能运行的 session。
 - 失败日志只记录结构化标识和经过白名单筛选的 trajectory 状态（panel run、record、runtime、临时 session、gateway run、等待时长和布尔终止标记），不记录 prompt、模型输出或 CLI stderr。

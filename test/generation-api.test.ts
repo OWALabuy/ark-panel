@@ -10,7 +10,7 @@ import { ConservativeContextBudget } from "../src/domain/context-budget.js";
 import type { BridgeRequest } from "../src/gateway/adapter.js";
 import { listSessionAttachments, readSessionAttachmentBytes, storeSessionAttachment } from "../src/storage/attachments.js";
 import { PanelRunStore, type PanelRunRecord } from "../src/server/run-store.js";
-import { deferred, tempFixture, waitFor, withTimeout } from "./test-helpers.js";
+import { deferred, tempFixture, waitFor, withTimeout, writeThenFailBeforeDirectorySync } from "./test-helpers.js";
 
 test("附件原样交给 OpenClaw，输入与本轮模型产出作为消息块持久化", async t => {
   const root = await mkdtemp(join(tmpdir(), "generation-attachments-")); t.after(() => rm(root, { recursive: true, force: true }));
@@ -281,6 +281,24 @@ test("大量终态 run 不增加创建、活跃查询或附件维护的目录扫
   release.resolve();
   await waitFor(async () => await api.activeForRecord(metadata.recordId) === undefined, "indexed run completion");
   assert.equal(observed.scans, 1);
+});
+
+test("accepted 已 rename 但目录 sync 失败后，下一 runId 仍由权威文件判定 SESSION_BUSY", async t => {
+  const root = await mkdtemp(join(tmpdir(), "generation-post-rename-busy-")); t.after(() => rm(root, { recursive: true, force: true }));
+  const metadata = await createPanelSession(root, "claude", { header: { type: "session" }, entries: [] });
+  let bridgeCalls = 0, writerCalls = 0, scans = 0;
+  const firstRunId = "23232323-2323-4323-8323-232323232323";
+  const api = new PanelGenerationApi({ async generate() { bridgeCalls++; throw new Error("bridge must not run"); } }, {
+    dataRoot: root, runtimeByAgent: new Map([["claude", "runtime"]]),
+    runStoreInstrumentation: { onDirectoryScan() { scans++; } },
+    async runStoreWriter(path, data) { writerCalls++; await writeThenFailBeforeDirectorySync(path, data); }
+  });
+
+  await assert.rejects(api.create(metadata.recordId, "private fixture prompt", firstRunId), /parent directory sync failed/);
+  const visible = JSON.parse(await readFile(join(root, "runs", `${firstRunId}.json`), "utf8"));
+  assert.equal(visible.status, "accepted"); assert.equal(bridgeCalls, 0); assert.equal(writerCalls, 1);
+  await assert.rejects(api.create(metadata.recordId, "second fixture prompt", "24242424-2424-4424-8424-242424242424"), /SESSION_BUSY/);
+  assert.equal(bridgeCalls, 0); assert.equal(writerCalls, 1); assert.equal(scans, 2);
 });
 
 test("后台 run 将停止未确认记录为 failed 而不是 aborted", async t => {

@@ -9,14 +9,14 @@ import { ConservativeContextBudget, type ContextBudgetEstimator } from "../domai
 import { ContextBudgetExceededError } from "../domain/context-budget.js";
 import { headerWithContextUsage } from "../domain/context-usage.js";
 import { SessionOperationCoordinator } from "./session-operation.js";
-import { PanelRunStore, publicRun, terminalRunStatuses, type PanelRunRecord, type PanelRunStoreInstrumentation, type PublicPanelRun, type PublicRunStream, type PublicRunTool } from "./run-store.js";
+import { PanelRunStore, publicRun, terminalRunStatuses, type PanelRunRecord, type PanelRunStoreInstrumentation, type PanelRunStoreWriter, type PublicPanelRun, type PublicRunStream, type PublicRunTool } from "./run-store.js";
 import { GatewayRunError } from "../gateway/cli-client.js";
 import { assignSessionAttachments, garbageCollectAttachments, getSessionAttachment, pruneSessionAttachments,
   readSessionAttachmentBytes, removeSessionAttachments, storeSessionAttachment } from "../storage/attachments.js";
 import { currentTranscriptBranch } from "../domain/branch.js";
 
 interface BridgeRunner { generate(request: BridgeRequest): Promise<BridgeResult>; cleanupOrphanedSession?(request: BridgeOrphanCleanupRequest): Promise<string[]> }
-export interface GenerationConfig { dataRoot: string; runtimeByAgent: ReadonlyMap<string, string>; workspaceByAgent?: ReadonlyMap<string, string>; completedCacheLimit?: number; contextBudget?: ContextBudgetEstimator; operations?: SessionOperationCoordinator; runStoreInstrumentation?: PanelRunStoreInstrumentation }
+export interface GenerationConfig { dataRoot: string; runtimeByAgent: ReadonlyMap<string, string>; workspaceByAgent?: ReadonlyMap<string, string>; completedCacheLimit?: number; contextBudget?: ContextBudgetEstimator; operations?: SessionOperationCoordinator; runStoreInstrumentation?: PanelRunStoreInstrumentation; runStoreWriter?: PanelRunStoreWriter }
 interface InternalRunStream { public: PublicRunStream; lastAssistantSeq: number; toolSeq: Map<string, number> }
 const MAX_GATEWAY_ATTACHMENT_BYTES = 15 * 1024 * 1024;
 
@@ -84,7 +84,7 @@ export class PanelGenerationApi implements GenerationApi {
   constructor(private readonly bridge: BridgeRunner, private readonly config: GenerationConfig) {
     if (config.completedCacheLimit !== undefined && (!Number.isInteger(config.completedCacheLimit) || config.completedCacheLimit < 1)) throw new Error("completedCacheLimit 必须是正整数");
     this.operations = config.operations ?? new SessionOperationCoordinator();
-    this.runStore = new PanelRunStore(config.dataRoot, config.runStoreInstrumentation);
+    this.runStore = new PanelRunStore(config.dataRoot, config.runStoreInstrumentation, config.runStoreWriter);
   }
   completedCacheSize(): number { return this.completed.size; }
 

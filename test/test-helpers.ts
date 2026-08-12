@@ -1,10 +1,23 @@
 import assert from "node:assert/strict";
 import type { ChildProcess } from "node:child_process";
 import { once } from "node:events";
-import { lstat, mkdtemp, rm } from "node:fs/promises";
+import { lstat, mkdtemp, open, rename, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { TestContext } from "node:test";
+
+let postRenameFailureSequence = 0;
+
+/** Test seam for atomic-write ambiguity: the file is synced and renamed, then the operation
+ * rejects at the point where production would open/fsync the parent directory. */
+export async function writeThenFailBeforeDirectorySync(path: string, data: string): Promise<void> {
+  const temporary = `${path}.post-rename-fixture.${process.pid}.${++postRenameFailureSequence}.tmp`;
+  const handle = await open(temporary, "wx", 0o600);
+  try { await handle.writeFile(data, "utf8"); await handle.sync(); }
+  finally { await handle.close(); }
+  await rename(temporary, path);
+  throw new Error("fixture parent directory sync failed");
+}
 
 export async function tempFixture(t: TestContext, prefix: string): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), prefix));
