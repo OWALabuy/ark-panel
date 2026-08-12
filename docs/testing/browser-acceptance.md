@@ -35,7 +35,10 @@ fixture 的会话、消息、路径、附件和工具结果均为固定虚构值
 报告 readiness，测试不依赖固定端口或 readiness sleep。每个场景都会关闭
 WebDriver 和 HTTP server，运行中未启动真实 OpenClaw。失败时只在
 `browser-artifacts/` 保留包含上述脱敏 fixture 的截图；成功运行不产生截图或
-持久状态。
+持久状态。CI 失败后只上传固定的 `desktop.png` / `mobile.png`，保留 3 天；
+截图不可用时 action 明确告警，而真正的上传失败仍会使上传步骤失败。截图或
+WebDriver 清理失败会以不含页面正文、URL、凭据或主机路径的诊断码附加到原始
+测试失败，不会覆盖或静默吞掉主错误。
 
 ## 验证边界
 

@@ -46,6 +46,17 @@ jobs:
       - name: Run browser fixture acceptance
         run: npm run test:browser
 
+      - name: Upload sanitized browser failure screenshots
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: browser-fixture-failure-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            browser-artifacts/desktop.png
+            browser-artifacts/mobile.png
+          if-no-files-found: warn
+          retention-days: 3
+
   coverage:
     name: Node 22 coverage baseline
     runs-on: ubuntu-latest

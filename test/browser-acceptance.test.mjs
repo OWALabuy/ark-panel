@@ -1,13 +1,21 @@
 import assert from "node:assert/strict";
-import { accessSync, constants, mkdirSync, writeFileSync } from "node:fs";
+import { accessSync, constants, lstatSync, mkdirSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { Builder, By, Key } from "selenium-webdriver";
+import { By, Key } from "selenium-webdriver";
 import firefox from "selenium-webdriver/firefox.js";
+import { withTimeout } from "../dist/test/test-helpers.js";
 import { startBrowserFixture } from "./browser-fixture.mjs";
 
 const WAIT_MS = 10_000;
+const CLEANUP_MS = 5_000;
+const FAILURE_ROOT = fileURLToPath(new URL("../browser-artifacts/", import.meta.url));
+const FAILURE_SCREENSHOTS = Object.freeze({
+  desktop: resolve(FAILURE_ROOT, "desktop.png"),
+  mobile: resolve(FAILURE_ROOT, "mobile.png")
+});
 
 function executable(path) {
   if (!path) return false;
@@ -29,7 +37,36 @@ function configuredExecutable(environmentName, candidates, command) {
   return [...candidates, commandPath(command)].find(executable) || "";
 }
 
-async function buildDriver({ mobile }) {
+function failureScreenshotPath(name) {
+  const path = FAILURE_SCREENSHOTS[name];
+  if (!path) throw new Error("BROWSER_ARTIFACT_NAME_INVALID");
+  return path;
+}
+
+function safeFailureRoot({ create = false } = {}) {
+  if (create) mkdirSync(FAILURE_ROOT, { recursive: true, mode: 0o700 });
+  let stat;
+  try { stat = lstatSync(FAILURE_ROOT); }
+  catch (error) {
+    if (error?.code === "ENOENT") return false;
+    throw new Error("BROWSER_ARTIFACT_ROOT_UNSAFE");
+  }
+  if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("BROWSER_ARTIFACT_ROOT_UNSAFE");
+  return true;
+}
+
+function clearFailureScreenshot(name) {
+  const path = failureScreenshotPath(name);
+  if (!safeFailureRoot()) return;
+  try { unlinkSync(path); }
+  catch (error) { if (error?.code !== "ENOENT") throw new Error("BROWSER_ARTIFACT_RESET_FAILED"); }
+  try { rmdirSync(FAILURE_ROOT); }
+  catch (error) { if (error?.code !== "ENOENT" && error?.code !== "ENOTEMPTY") throw new Error("BROWSER_ARTIFACT_RESET_FAILED"); }
+}
+
+for (const name of Object.keys(FAILURE_SCREENSHOTS)) clearFailureScreenshot(name);
+
+async function buildDriver({ mobile }, diagnostics) {
   const firefoxBinary = configuredExecutable("PANEL_FIREFOX_BINARY", [
     "/snap/firefox/current/usr/lib/firefox/firefox",
     "/usr/local/bin/firefox",
@@ -41,12 +78,18 @@ async function buildDriver({ mobile }) {
     .setPreference("ui.primaryPointerCapabilities", mobile ? 1 : 6)
     .setPreference("ui.allPointerCapabilities", mobile ? 1 : 6);
   if (firefoxBinary) options.setBinary(firefoxBinary);
-  let builder = new Builder().forBrowser("firefox").setFirefoxOptions(options);
-  if (geckodriverBinary) builder = builder.setFirefoxService(new firefox.ServiceBuilder(geckodriverBinary));
-  const driver = await builder.build();
-  await driver.manage().setTimeouts({ implicit: 0, pageLoad: WAIT_MS, script: WAIT_MS });
-  await driver.manage().window().setRect(mobile ? { width: 390, height: 844, x: 0, y: 0 } : { width: 1440, height: 900, x: 0, y: 0 });
-  return driver;
+  const service = new firefox.ServiceBuilder(geckodriverBinary || undefined).build();
+  const driver = firefox.Driver.createSession(options, service);
+  try {
+    await withTimeout(driver.getSession(), "Firefox WebDriver startup", WAIT_MS);
+    await driver.manage().setTimeouts({ implicit: 0, pageLoad: WAIT_MS, script: WAIT_MS });
+    await driver.manage().window().setRect(mobile ? { width: 390, height: 844, x: 0, y: 0 } : { width: 1440, height: 900, x: 0, y: 0 });
+    return { driver, service };
+  } catch (error) {
+    try { await withTimeout(service.kill(), "Firefox WebDriver startup cleanup", CLEANUP_MS); }
+    catch { diagnostics.push("DRIVER_STARTUP_CLEANUP_FAILED"); }
+    throw error;
+  }
 }
 
 async function visible(driver, selector, timeout = WAIT_MS) {
@@ -140,28 +183,60 @@ function assertInsideViewport(box) {
   assert.ok(box.bottom <= box.viewportBottom + 0.5, `bottom edge escaped viewport: ${JSON.stringify(box)}`);
 }
 
-async function retainFailureScreenshot(driver, name) {
-  if (!driver) return;
+async function retainFailureScreenshot(driver, name, diagnostics) {
+  if (!driver) { diagnostics.push("SCREENSHOT_DRIVER_UNAVAILABLE"); return; }
+  let screenshot;
+  try { screenshot = await withTimeout(driver.takeScreenshot(), "sanitized browser screenshot", CLEANUP_MS); }
+  catch { diagnostics.push("SCREENSHOT_CAPTURE_FAILED"); return; }
   try {
-    const root = resolve(process.env.PANEL_BROWSER_ARTIFACT_DIR || "browser-artifacts");
-    mkdirSync(root, { recursive: true });
-    writeFileSync(resolve(root, `${name}.png`), await driver.takeScreenshot(), "base64");
-  } catch {}
+    safeFailureRoot({ create: true });
+    writeFileSync(failureScreenshotPath(name), screenshot, { encoding: "base64", flag: "wx", mode: 0o600 });
+  } catch { diagnostics.push("SCREENSHOT_WRITE_FAILED"); }
+}
+
+function asError(error) {
+  return error instanceof Error ? error : new Error("Browser scenario rejected with a non-Error value");
+}
+
+function reportDiagnostics(error, name, diagnostics) {
+  if (!diagnostics.length) return;
+  Object.defineProperty(error, "browserDiagnostics", { configurable: true, enumerable: true, value: [...diagnostics] });
+  process.stderr.write(`[browser-acceptance] ${name} diagnostics: ${diagnostics.join(",")}\n`);
 }
 
 async function scenario(name, options, run) {
-  const fixture = await startBrowserFixture();
-  let driver;
+  const diagnostics = [];
+  let fixture;
+  let browser;
+  let primaryError;
   try {
-    driver = await buildDriver(options);
-    await run({ driver, fixture });
+    clearFailureScreenshot(name);
+    fixture = await startBrowserFixture();
+    browser = await buildDriver(options, diagnostics);
+    await run({ driver: browser.driver, fixture });
   } catch (error) {
-    await retainFailureScreenshot(driver, name);
-    throw error;
+    primaryError = asError(error);
+    await retainFailureScreenshot(browser?.driver, name, diagnostics);
   } finally {
-    if (driver) await driver.quit().catch(() => {});
-    await fixture.close();
+    if (browser) {
+      try { await withTimeout(browser.driver.quit(), "Firefox WebDriver quit", CLEANUP_MS); }
+      catch {
+        diagnostics.push("DRIVER_QUIT_FAILED");
+        try { await withTimeout(browser.service.kill(), "Firefox WebDriver service fallback", CLEANUP_MS); }
+        catch { diagnostics.push("DRIVER_SERVICE_FALLBACK_FAILED"); }
+      }
+    }
+    if (fixture) {
+      try { await withTimeout(fixture.close(), "browser fixture close", CLEANUP_MS); }
+      catch { diagnostics.push("FIXTURE_CLOSE_FAILED"); }
+    }
+    if (!primaryError && diagnostics.length) primaryError = new Error("Browser scenario cleanup failed");
+    if (!primaryError) {
+      try { clearFailureScreenshot(name); }
+      catch { diagnostics.push("ARTIFACT_CLEANUP_FAILED"); primaryError = new Error("Browser scenario artifact cleanup failed"); }
+    }
   }
+  if (primaryError) { reportDiagnostics(primaryError, name, diagnostics); throw primaryError; }
 }
 
 test("desktop browser acceptance covers security and session lifecycle", { timeout: 60_000 }, async () => {
