@@ -140,7 +140,9 @@ OpenClaw 中 write 能满足 read、admin 能满足全部 `operator.*`，但面�
 ### 4.4 鉴权方式（修正旧版结论）
 - OpenClaw `2026.6.11` 对 direct-loopback 的 `gateway-client/backend` + 共享 token/password 提供本机 backend self-pairing 分支，因此面板服务端不需要伪造浏览器设备身份，也不启用 `dangerouslyDisableDeviceAuth`。远程、浏览器或显式 device-token 身份不在这条保证内。
 - 连接角色固定为 `operator`，请求并核验精确的 read/write/admin scope 集合。scope 是同一个受信 Gateway operator 域内的纵深 guardrail，不是 hostile multi-tenant 隔离；共享 token/password 必须视为 owner 级 secret。真正跨用户/机器的隔离需要独立 Gateway/OS 用户，而不是只拆 scope 字符串。
-- token 使用常量时间算法与 `gateway.auth.token` 比较。应配置长期、可轮换的 secret；只存于 Gateway 配置或面板环境，不下发浏览器、不写日志。虽然上游可允许 direct-loopback 的 `auth.mode=none`，面板对同一本机端点的该 mode 无条件拒绝 admin 控制连接，不能由配置遗留 secret 或 `PANEL_*` secret 绕过。`token` / `password` mode 只取同名字段，`trusted-proxy` 只取同机 fallback password；mode 未配置时仅可从配置中唯一一种凭据推导，同时存在 token 和 password 则因歧义拒绝。面板环境凭据组只覆盖该已知 mode 选中的值，整组全为空白时不回落。`gateway.remote` 凭据独立于本机 `gateway.auth.mode`；只有显式 `PANEL_OPENCLAW_GATEWAY_URL` 改变 WebSocket origin 且同时提供非空面板凭据时，才视为另一个端点的操作员断言，URL 单独变化不能带走配置 secret。该断言不改变目标端服务端 mode，必须同步配置并在 #48 验证。轮换时同步更新两端并重启，回滚也同步恢复两端。本次 scope 契约不要求重新签发既有凭据。
+- token 使用常量时间算法与 `gateway.auth.token` 比较。应配置长期、可轮换的 secret；只存于 Gateway 配置或面板环境，不下发浏览器、不写日志。虽然上游可允许 direct-loopback 的 `auth.mode=none`，面板对同一本机端点的该 mode 无条件拒绝 admin 控制连接。`token` / `password` mode 只取同名字段；`trusted-proxy` 只允许同机 fallback password，配置 token（包括 SecretRef presence）即拒绝；mode 未配置时仅可从配置中唯一一种凭据推导，同时存在两种则因歧义拒绝。面板环境凭据组只覆盖该已知 mode 选中的值，整组全为空白时不回落。
+- `gateway.remote` 凭据独立于本机 `gateway.auth.mode`；remote mode 必须有有效 URL 和显式 `transport: "direct"`。面板不创建 SSH tunnel，也不实现 remote `tlsFingerprint` pin，遇到二者均拒绝；显式 panel URL 则是自带非空 panel credential group 的独立边界，不能继承磁盘 secret/pin。本机 URL 从 port 与 `gateway.tls.enabled` 得到；origin 以 scheme、port 及带类型 host 比较，loopback 别名与普通 DNS hostname 永不共用字符串 sentinel。公网必须使用 `wss://`，`ws://` 只允许固定版本定义的 loopback/private/link-local/CGNAT/ULA、`.local` 和 `.ts.net`。TLS 证书验证不得关闭。
+- SecretRef 字符串或对象会参与凭据 presence、mode 与互斥判断，但面板不执行 env/file/exec provider。选中的 ref 若没有对应非空 `PANEL_*` 明文覆盖就稳定 fail closed；完整 provider resolution 需要独立的权限与版本门禁评审。独立端点凭据只是 operator assertion，不改变服务端 mode，必须同步配置并在 #48 验证。轮换与回滚都同步更新两端；本批不要求重新签发既有凭据。
 
 ---
 

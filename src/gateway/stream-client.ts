@@ -7,11 +7,18 @@ import { SUPPORTED_OPENCLAW_VERSION, type GatewayAttachment } from "./adapter.js
 
 const MAX_TEXT_BYTES = 2 * 1024 * 1024;
 const MAX_FRAME_BYTES = 4 * 1024 * 1024;
-const DEFAULT_URL = "ws://127.0.0.1:18789";
 const LOOPBACK_ENDPOINTS = new BlockList();
+const PRIVATE_ENDPOINTS = new BlockList();
 LOOPBACK_ENDPOINTS.addSubnet("127.0.0.0", 8, "ipv4");
 LOOPBACK_ENDPOINTS.addAddress("::1", "ipv6");
 LOOPBACK_ENDPOINTS.addSubnet("::ffff:127.0.0.0", 104, "ipv6");
+for (const [address, prefix] of [["10.0.0.0", 8], ["100.64.0.0", 10], ["169.254.0.0", 16],
+  ["172.16.0.0", 12], ["192.168.0.0", 16]] as const) {
+  PRIVATE_ENDPOINTS.addSubnet(address, prefix, "ipv4");
+  PRIVATE_ENDPOINTS.addSubnet(`::ffff:${address}`, 96 + prefix, "ipv6");
+}
+PRIVATE_ENDPOINTS.addSubnet("fc00::", 7, "ipv6");
+PRIVATE_ENDPOINTS.addSubnet("fe80::", 10, "ipv6");
 const GATEWAY_OPERATOR_ROLE = "operator";
 const GATEWAY_OPERATOR_SCOPES = ["operator.read", "operator.write", "operator.admin"] as const;
 
@@ -203,7 +210,10 @@ export class OpenClawStreamObserver implements GatewayControlTransport {
     this.reconnectMinMs = options.reconnectMinMs ?? 500;
     this.reconnectMaxMs = options.reconnectMaxMs ?? 30_000;
     this.reconnectDelay = this.reconnectMinMs;
-    this.factory = options.webSocketFactory ?? (url => new WebSocket(url) as unknown as WebSocketLike);
+    this.factory = options.webSocketFactory ?? (url => {
+      if (!gatewayEndpoint(url)) throw new Error("unsafe gateway transport");
+      return new WebSocket(url) as unknown as WebSocketLike;
+    });
   }
 
   start(): void { if (!this.stopped) return; this.stopped = false; this.connect(); }
@@ -249,6 +259,10 @@ export class OpenClawStreamObserver implements GatewayControlTransport {
   private connect(): void {
     if (this.stopped || this.socket) return;
     this.connectionFailure = undefined;
+    if (!gatewayEndpoint(this.options.url)) {
+      const error = new GatewayControlError("GATEWAY_TRANSPORT_UNAVAILABLE");
+      this.connectionFailure = error; this.diagnostic(`gateway control connect failed (${error.code})`); this.scheduleReconnect(); return;
+    }
     let socket: WebSocketLike;
     try { socket = this.factory(this.options.url); }
     catch {
@@ -453,40 +467,96 @@ function trimmedString(value: unknown): string | undefined {
   const normalized = value.trim(); return normalized || undefined;
 }
 
-function gatewayEndpoint(value: string): string | undefined {
+interface GatewayEndpoint {
+  protocol: "ws:" | "wss:";
+  host: { kind: "loopback" } | { kind: "address"; value: string };
+  port: string;
+}
+
+function normalizedGatewayHost(value: string): string {
+  let host = value.toLowerCase();
+  if (host.startsWith("[") && host.endsWith("]")) host = host.slice(1, -1);
+  return host.replace(/\.+$/, "");
+}
+
+function isLoopbackGatewayHost(host: string): boolean {
+  if (host === "localhost") return true;
+  const family = isIP(host); return family !== 0 && LOOPBACK_ENDPOINTS.check(host, family === 4 ? "ipv4" : "ipv6");
+}
+
+function isTrustedPlaintextGatewayHost(host: string): boolean {
+  if (isLoopbackGatewayHost(host)) return true;
+  const family = isIP(host);
+  if (family !== 0) return PRIVATE_ENDPOINTS.check(host, family === 4 ? "ipv4" : "ipv6");
+  return host.endsWith(".local") || host.endsWith(".ts.net");
+}
+
+function gatewayEndpoint(value: string): GatewayEndpoint | undefined {
   try {
     const url = new URL(value);
     if (url.protocol !== "ws:" && url.protocol !== "wss:") return undefined;
-    let host = url.hostname.toLowerCase();
-    if (host.startsWith("[") && host.endsWith("]")) host = host.slice(1, -1);
-    if (host.endsWith(".")) host = host.slice(0, -1);
-    const family = isIP(host);
-    if (host === "localhost" || family !== 0 && LOOPBACK_ENDPOINTS.check(host, family === 4 ? "ipv4" : "ipv6")) host = "loopback";
+    const host = normalizedGatewayHost(url.hostname);
+    if (!host || url.protocol === "ws:" && !isTrustedPlaintextGatewayHost(host)) return undefined;
     const port = url.port || (url.protocol === "wss:" ? "443" : "80");
-    return `${url.protocol}//${host}:${port}`;
+    return { protocol: url.protocol, host: isLoopbackGatewayHost(host) ? { kind: "loopback" } : { kind: "address", value: host }, port };
   } catch { return undefined; }
 }
 
 function sameGatewayEndpoint(left: string, right: string): boolean {
   const leftEndpoint = gatewayEndpoint(left), rightEndpoint = gatewayEndpoint(right);
-  return Boolean(leftEndpoint && rightEndpoint && leftEndpoint === rightEndpoint);
+  if (!leftEndpoint || !rightEndpoint || leftEndpoint.protocol !== rightEndpoint.protocol || leftEndpoint.port !== rightEndpoint.port ||
+    leftEndpoint.host.kind !== rightEndpoint.host.kind) return false;
+  return leftEndpoint.host.kind === "loopback" || rightEndpoint.host.kind === "address" && leftEndpoint.host.value === rightEndpoint.host.value;
 }
 
 interface ExplicitCredentials { declared: boolean; token?: string; password?: string }
 
-function localGatewayAuth(mode: unknown, url: string, configToken: string | undefined, configPassword: string | undefined,
+interface ConfigCredential { configured: boolean; invalid: boolean; unresolved: boolean; value?: string }
+
+function configCredential(value: unknown): ConfigCredential {
+  if (value === undefined) return { configured: false, invalid: false, unresolved: false };
+  if (typeof value === "string") {
+    const normalized = value.trim();
+    if (!normalized) return { configured: false, invalid: false, unresolved: false };
+    if (/^(?:secretref-env:|__env__:)[A-Z][A-Z0-9_]{0,127}$/.test(normalized) ||
+      /^(?:\$[A-Z][A-Z0-9_]{0,127}|\$\{[A-Z][A-Z0-9_]{0,127}\})$/.test(normalized)) {
+      return { configured: true, invalid: false, unresolved: true };
+    }
+    return { configured: true, invalid: false, unresolved: false, value: normalized };
+  }
+  const ref = object(value), source = ref?.source, provider = ref?.provider, id = ref?.id;
+  const keys = ref ? Object.keys(ref) : [];
+  const validProvider = typeof provider === "string" && /^[a-z][a-z0-9_-]{0,63}$/.test(provider);
+  const validId = typeof id === "string" && (source === "env" ? /^[A-Z][A-Z0-9_]{0,127}$/.test(id) :
+    source === "file" ? id === "value" || id.startsWith("/") && id.slice(1).split("/").every(segment => /^(?:[^~]|~0|~1)*$/.test(segment)) :
+    source === "exec" ? /^[A-Za-z0-9][A-Za-z0-9._:/#-]{0,255}$/.test(id) && id.split("/").every(segment => segment !== "." && segment !== "..") : false);
+  if (keys.length === 3 && keys.includes("source") && keys.includes("provider") && keys.includes("id") && validProvider && validId) {
+    return { configured: true, invalid: false, unresolved: true };
+  }
+  return { configured: true, invalid: true, unresolved: false };
+}
+
+function selectedCredential(configured: ConfigCredential, explicit: string | undefined, explicitDeclared: boolean): string | undefined {
+  if (configured.invalid) return undefined;
+  if (explicitDeclared) return explicit;
+  return configured.unresolved ? undefined : configured.value;
+}
+
+function localGatewayAuth(mode: unknown, url: string, configToken: ConfigCredential, configPassword: ConfigCredential,
   explicit: ExplicitCredentials): GatewayAuth | undefined {
+  if (configToken.invalid || configPassword.invalid) return undefined;
   let effectiveMode = mode;
   if (effectiveMode === undefined) {
-    if (Boolean(configToken) === Boolean(configPassword)) return undefined;
-    effectiveMode = configPassword ? "password" : "token";
+    if (configToken.configured === configPassword.configured) return undefined;
+    effectiveMode = configPassword.configured ? "password" : "token";
   }
   if (effectiveMode === "none") return undefined;
   if (effectiveMode === "token") {
-    const token = explicit.declared ? explicit.token : configToken; return token ? { url, token } : undefined;
+    const token = selectedCredential(configToken, explicit.token, explicit.declared); return token ? { url, token } : undefined;
   }
   if (effectiveMode === "password" || effectiveMode === "trusted-proxy") {
-    const password = explicit.declared ? explicit.password : configPassword; return password ? { url, password } : undefined;
+    if (effectiveMode === "trusted-proxy" && (configToken.configured || Boolean(explicit.token))) return undefined;
+    const password = selectedCredential(configPassword, explicit.password, explicit.declared); return password ? { url, password } : undefined;
   }
   return undefined;
 }
@@ -503,19 +573,34 @@ export async function loadGatewayStreamAuth(env: NodeJS.ProcessEnv = process.env
   try { gateway = object(object(JSON.parse(await readFile(path, "utf8")))?.gateway); } catch { return undefined; }
   if (gateway?.mode !== undefined && gateway.mode !== "local" && gateway.mode !== "remote") return undefined;
   const remote = object(gateway?.remote), auth = object(gateway?.auth), remoteMode = gateway?.mode === "remote";
-  const configuredPort = typeof gateway?.port === "number" && Number.isInteger(gateway.port) && gateway.port > 0 && gateway.port <= 65_535 ? gateway.port : 18_789;
-  const configuredUrl = remoteMode ? trimmedString(remote?.url) ?? DEFAULT_URL : `ws://127.0.0.1:${configuredPort}`;
+  const configuredPort = gateway?.port === undefined ? 18_789 :
+    typeof gateway.port === "number" && Number.isInteger(gateway.port) && gateway.port > 0 && gateway.port <= 65_535 ? gateway.port : undefined;
+  if (configuredPort === undefined) return undefined;
+  const remoteUrl = trimmedString(remote?.url);
+  if (remoteMode && explicitUrl) {
+    if (!gatewayEndpoint(explicitUrl) || !explicit.declared || !explicit.token && !explicit.password) return undefined;
+    return { url: explicitUrl, ...(explicit.token ? { token: explicit.token } : {}), ...(explicit.password ? { password: explicit.password } : {}) };
+  }
+  if (remoteMode) {
+    if (!remoteUrl || !gatewayEndpoint(remoteUrl)) return undefined;
+    if (remote?.transport !== "direct" || remote.tlsFingerprint !== undefined) return undefined;
+    const token = configCredential(remote?.token), password = configCredential(remote?.password);
+    if (token.invalid || password.invalid) return undefined;
+    if (explicit.declared) return explicit.token || explicit.password ? { url: remoteUrl,
+      ...(explicit.token ? { token: explicit.token } : {}), ...(explicit.password ? { password: explicit.password } : {}) } : undefined;
+    if (token.unresolved || password.unresolved) return undefined;
+    return token.value || password.value ? { url: remoteUrl, ...(token.value ? { token: token.value } : {}),
+      ...(password.value ? { password: password.value } : {}) } : undefined;
+  }
+  const tls = object(gateway?.tls);
+  if (gateway?.tls !== undefined && !tls || tls?.enabled !== undefined && typeof tls.enabled !== "boolean") return undefined;
+  const configuredUrl = `${tls?.enabled === true ? "wss" : "ws"}://127.0.0.1:${configuredPort}`;
   const url = explicitUrl ?? configuredUrl;
   if (!gatewayEndpoint(url)) return undefined;
-  const independentEndpoint = Boolean(explicitUrl && !sameGatewayEndpoint(explicitUrl, configuredUrl));
-  if (independentEndpoint) {
+  if (explicitUrl && !sameGatewayEndpoint(explicitUrl, configuredUrl)) {
     if (!explicit.declared || !explicit.token && !explicit.password) return undefined;
     return { url, ...(explicit.token ? { token: explicit.token } : {}), ...(explicit.password ? { password: explicit.password } : {}) };
   }
-  if (remoteMode) {
-    const token = explicit.declared ? explicit.token : trimmedString(remote?.token), password = explicit.declared ? explicit.password : trimmedString(remote?.password);
-    return token || password ? { url, ...(token ? { token } : {}), ...(password ? { password } : {}) } : undefined;
-  }
-  const configToken = trimmedString(auth?.token), configPassword = trimmedString(auth?.password);
+  const configToken = configCredential(auth?.token), configPassword = configCredential(auth?.password);
   return localGatewayAuth(auth?.mode, url, configToken, configPassword, explicit);
 }

@@ -33,19 +33,19 @@ test("disabling preview does not disable the server control credential", async t
   });
 });
 
-test("server control auth follows the pinned mode resolver and never accepts auth-none", async t => {
-  const root = await tempFixture(t, "gateway-auth-contract-"), configPath = join(root, "openclaw.json");
-  async function assertNoAdminSocket(auth: Awaited<ReturnType<typeof loadGatewayStreamAuth>>): Promise<void> {
-    let sockets = 0;
-    const connection = auth ? new OpenClawStreamObserver({ ...auth,
-      webSocketFactory: () => { sockets++; throw new Error("must not create an admin socket"); } }) : undefined;
-    assert.equal(auth, undefined);
-    await assert.rejects(resolveGatewayControlTransport(connection).request("status", {}), error =>
-      error instanceof GatewayControlError && error.code === "GATEWAY_TRANSPORT_UNAVAILABLE" &&
-      error.message === "GATEWAY_TRANSPORT_UNAVAILABLE" && !error.message.includes("fixture"));
-    assert.equal(sockets, 0);
-  }
+async function assertUnavailableGatewayAuth(auth: Awaited<ReturnType<typeof loadGatewayStreamAuth>>): Promise<void> {
+  let sockets = 0;
+  const connection = auth ? new OpenClawStreamObserver({ ...auth,
+    webSocketFactory: () => { sockets++; throw new Error("must not create an admin socket"); } }) : undefined;
+  assert.equal(auth, undefined);
+  await assert.rejects(resolveGatewayControlTransport(connection).request("status", {}), error =>
+    error instanceof GatewayControlError && error.code === "GATEWAY_TRANSPORT_UNAVAILABLE" &&
+    error.message === "GATEWAY_TRANSPORT_UNAVAILABLE" && !error.message.includes("fixture"));
+  assert.equal(sockets, 0);
+}
 
+test("server control auth follows the pinned local mode resolver and never accepts auth-none", async t => {
+  const root = await tempFixture(t, "gateway-auth-contract-"), configPath = join(root, "openclaw.json");
   const rejectedNoneConfigs = [
     { mode: "none" },
     { mode: "none", token: "fixture-stale-token" },
@@ -54,13 +54,13 @@ test("server control auth follows the pinned mode resolver and never accepts aut
   ];
   for (const authConfig of rejectedNoneConfigs) {
     await writeFile(configPath, JSON.stringify({ gateway: { auth: authConfig } }));
-    await assertNoAdminSocket(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath }, true));
+    await assertUnavailableGatewayAuth(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath }, true));
   }
 
   const configCases = [
     { auth: { mode: "token", token: " config-token ", password: "stale-password" }, expected: { token: "config-token" } },
     { auth: { mode: "password", token: "stale-token", password: " config-password " }, expected: { password: "config-password" } },
-    { auth: { mode: "trusted-proxy", token: "stale-token", password: " proxy-password " }, expected: { password: "proxy-password" } },
+    { auth: { mode: "trusted-proxy", password: " proxy-password " }, expected: { password: "proxy-password" } },
     { auth: { token: " inferred-token " }, expected: { token: "inferred-token" } },
     { auth: { password: " inferred-password " }, expected: { password: "inferred-password" } },
     { auth: { token: "ambiguous-token", password: "ambiguous-password" }, expected: undefined },
@@ -74,27 +74,7 @@ test("server control auth follows the pinned mode resolver and never accepts aut
     assert.deepEqual(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath }, true), expected);
   }
   await writeFile(configPath, JSON.stringify({ gateway: { mode: "unknown", auth: { mode: "token", token: "fixture-token" } } }));
-  await assertNoAdminSocket(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath }, true));
-
-  for (const remoteCase of [
-    { credentials: { token: " remote-token " }, expected: { token: "remote-token" } },
-    { credentials: { password: " remote-password " }, expected: { password: "remote-password" } },
-    { credentials: { token: " remote-token ", password: " remote-password " },
-      expected: { token: "remote-token", password: "remote-password" } }
-  ]) {
-    await writeFile(configPath, JSON.stringify({ gateway: { mode: "remote", auth: {
-      mode: "none", token: "local-stale-token", password: "local-stale-password"
-    }, remote: { url: "wss://gateway.fixture.invalid", ...remoteCase.credentials } } }));
-    assert.deepEqual(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath }, true), {
-      url: "wss://gateway.fixture.invalid", ...remoteCase.expected
-    });
-  }
-  assert.deepEqual(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath,
-    PANEL_OPENCLAW_GATEWAY_TOKEN: " explicit-remote-token " }, true), {
-    url: "wss://gateway.fixture.invalid", token: "explicit-remote-token"
-  });
-  assert.equal(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath,
-    PANEL_OPENCLAW_GATEWAY_URL: "wss://other-gateway.fixture.invalid" }, true), undefined);
+  await assertUnavailableGatewayAuth(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath }, true));
 
   await writeFile(configPath, JSON.stringify({ gateway: { auth: { mode: "token", token: "must-not-fallback" } } }));
   for (const blankOverride of [
@@ -117,7 +97,6 @@ test("server control auth follows the pinned mode resolver and never accepts aut
 
   for (const localOverrideCase of [
     { auth: { mode: "password", password: "old-password" }, expected: { password: "new-password" } },
-    { auth: { mode: "trusted-proxy", password: "old-password" }, expected: { password: "new-password" } },
     { auth: { password: "old-password" }, expected: { password: "new-password" } }
   ]) {
     await writeFile(configPath, JSON.stringify({ gateway: { auth: localOverrideCase.auth } }));
@@ -126,6 +105,11 @@ test("server control auth follows the pinned mode resolver and never accepts aut
       url: "ws://127.0.0.1:18789", ...localOverrideCase.expected
     });
   }
+  await writeFile(configPath, JSON.stringify({ gateway: { auth: { mode: "trusted-proxy", password: "old-password" } } }));
+  assert.deepEqual(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath,
+    PANEL_OPENCLAW_GATEWAY_PASSWORD: " new-password " }, true), {
+    url: "ws://127.0.0.1:18789", password: "new-password"
+  });
   await writeFile(configPath, JSON.stringify({ gateway: { auth: { token: "ambiguous-token", password: "ambiguous-password" } } }));
   assert.equal(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath,
     PANEL_OPENCLAW_GATEWAY_TOKEN: "cannot-resolve-ambiguity" }, true), undefined);
@@ -141,12 +125,12 @@ test("server control auth follows the pinned mode resolver and never accepts aut
     { PANEL_OPENCLAW_GATEWAY_URL: "ws://127.0.0.2:18789", PANEL_OPENCLAW_GATEWAY_TOKEN: "fixture-env-token" },
     { PANEL_OPENCLAW_GATEWAY_URL: "ws://[::1]:18789", PANEL_OPENCLAW_GATEWAY_TOKEN: "fixture-env-token" },
     { PANEL_OPENCLAW_GATEWAY_URL: "ws://[::ffff:127.0.0.1]:18789", PANEL_OPENCLAW_GATEWAY_TOKEN: "fixture-env-token" }
-  ]) await assertNoAdminSocket(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath, ...sameEndpointOverride }, true));
+  ]) await assertUnavailableGatewayAuth(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath, ...sameEndpointOverride }, true));
 
   await writeFile(configPath, JSON.stringify({ gateway: { port: 19998, auth: {
     mode: "none", token: "fixture-stale-token"
   } } }));
-  await assertNoAdminSocket(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath,
+  await assertUnavailableGatewayAuth(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath,
     PANEL_OPENCLAW_GATEWAY_URL: "ws://localhost:19998/path", PANEL_OPENCLAW_GATEWAY_TOKEN: "fixture-env-token" }, true));
   assert.deepEqual(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath,
     PANEL_OPENCLAW_GATEWAY_URL: "ws://127.0.0.1:19999", PANEL_OPENCLAW_GATEWAY_TOKEN: " explicit-token " }, true), {
@@ -163,8 +147,201 @@ test("server control auth follows the pinned mode resolver and never accepts aut
   });
 
   await writeFile(configPath, "{not-json");
-  await assertNoAdminSocket(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath,
+  await assertUnavailableGatewayAuth(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath,
     PANEL_OPENCLAW_GATEWAY_URL: "wss://independent.fixture.invalid", PANEL_OPENCLAW_GATEWAY_TOKEN: "fixture-env-token" }, true));
+});
+
+test("remote control auth requires its configured URL or a self-contained explicit endpoint", async t => {
+  const root = await tempFixture(t, "gateway-remote-auth-contract-"), configPath = join(root, "openclaw.json");
+  const credentials = [{ token: "fixture-remote-token" }, { password: "fixture-remote-password" },
+    { token: "fixture-remote-token", password: "fixture-remote-password" }];
+  for (const url of [undefined, "", "  "]) for (const credential of credentials) {
+    const remote = { ...(url === undefined ? {} : { url }), ...credential };
+    await writeFile(configPath, JSON.stringify({ gateway: { mode: "remote", remote } }));
+    for (const override of [{}, { PANEL_OPENCLAW_GATEWAY_TOKEN: "fixture-panel-token" },
+      { PANEL_OPENCLAW_GATEWAY_PASSWORD: "fixture-panel-password" },
+      { PANEL_OPENCLAW_GATEWAY_TOKEN: "fixture-panel-token", PANEL_OPENCLAW_GATEWAY_PASSWORD: "fixture-panel-password" }]) {
+      await assertUnavailableGatewayAuth(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath, ...override }, true));
+    }
+  }
+
+  await writeFile(configPath, JSON.stringify({ gateway: { mode: "remote", remote: { token: "fixture-must-not-leak" } } }));
+  await assertUnavailableGatewayAuth(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath,
+    PANEL_OPENCLAW_GATEWAY_URL: "wss://independent.fixture.invalid" }, true));
+  await assertUnavailableGatewayAuth(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath,
+    PANEL_OPENCLAW_GATEWAY_URL: "ws://public.fixture.invalid", PANEL_OPENCLAW_GATEWAY_TOKEN: "fixture-panel-token" }, true));
+  assert.deepEqual(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath,
+    PANEL_OPENCLAW_GATEWAY_URL: "wss://independent.fixture.invalid", PANEL_OPENCLAW_GATEWAY_TOKEN: " fixture-panel-token " }, true), {
+    url: "wss://independent.fixture.invalid", token: "fixture-panel-token"
+  });
+
+  for (const remoteCase of [
+    { credentials: { token: " remote-token " }, expected: { token: "remote-token" } },
+    { credentials: { password: " remote-password " }, expected: { password: "remote-password" } },
+    { credentials: { token: " remote-token ", password: " remote-password " },
+      expected: { token: "remote-token", password: "remote-password" } }
+  ]) {
+    await writeFile(configPath, JSON.stringify({ gateway: { mode: "remote", auth: {
+      mode: "none", token: "local-stale-token", password: "local-stale-password"
+    }, remote: { url: "wss://gateway.fixture.invalid", transport: "direct", ...remoteCase.credentials } } }));
+    assert.deepEqual(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath }, true), {
+      url: "wss://gateway.fixture.invalid", ...remoteCase.expected
+    });
+  }
+  assert.deepEqual(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath,
+    PANEL_OPENCLAW_GATEWAY_TOKEN: " explicit-remote-token " }, true), {
+    url: "wss://gateway.fixture.invalid", token: "explicit-remote-token"
+  });
+
+  for (const unsupportedRemote of [
+    { url: "wss://gateway.fixture.invalid", token: "fixture-must-not-send" },
+    { url: "wss://gateway.fixture.invalid", transport: "ssh", token: "fixture-must-not-send" },
+    { url: "wss://gateway.fixture.invalid", transport: "invalid", token: "fixture-must-not-send" },
+    { url: "wss://gateway.fixture.invalid", transport: "direct", tlsFingerprint: "sha256:fixture-pin", token: "fixture-must-not-send" }
+  ]) {
+    await writeFile(configPath, JSON.stringify({ gateway: { mode: "remote", remote: unsupportedRemote } }));
+    await assertUnavailableGatewayAuth(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath }, true));
+  }
+  assert.deepEqual(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath,
+    PANEL_OPENCLAW_GATEWAY_URL: "wss://independent.fixture.invalid", PANEL_OPENCLAW_GATEWAY_TOKEN: " fixture-panel-token " }, true), {
+    url: "wss://independent.fixture.invalid", token: "fixture-panel-token"
+  });
+
+  await writeFile(configPath, JSON.stringify({ gateway: { mode: "remote", remote: {
+    url: "wss://gateway.fixture.invalid", transport: "direct", token: "fixture-remote-token"
+  } } }));
+  await assertUnavailableGatewayAuth(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath,
+    PANEL_OPENCLAW_GATEWAY_URL: "wss://gateway.fixture.invalid" }, true));
+  await assertUnavailableGatewayAuth(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath,
+    PANEL_OPENCLAW_GATEWAY_URL: "wss://other-gateway.fixture.invalid" }, true));
+  assert.deepEqual(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath,
+    PANEL_OPENCLAW_GATEWAY_URL: "wss://other-gateway.fixture.invalid", PANEL_OPENCLAW_GATEWAY_PASSWORD: " explicit-password " }, true), {
+    url: "wss://other-gateway.fixture.invalid", password: "explicit-password"
+  });
+});
+
+test("gateway endpoint provenance follows local TLS and rejects public plaintext WebSockets", async t => {
+  const root = await tempFixture(t, "gateway-endpoint-contract-"), configPath = join(root, "openclaw.json");
+  await writeFile(configPath, JSON.stringify({ gateway: { tls: { enabled: true }, auth: { mode: "token", token: "fixture-token" } } }));
+  assert.deepEqual(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath }, true), {
+    url: "wss://127.0.0.1:18789", token: "fixture-token"
+  });
+  assert.deepEqual(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath,
+    PANEL_OPENCLAW_GATEWAY_URL: "wss://localhost:18789/path" }, true), {
+    url: "wss://localhost:18789/path", token: "fixture-token"
+  });
+  await assertUnavailableGatewayAuth(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath,
+    PANEL_OPENCLAW_GATEWAY_URL: "wss://loopback:18789" }, true));
+  assert.deepEqual(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath,
+    PANEL_OPENCLAW_GATEWAY_URL: "wss://loopback:18789", PANEL_OPENCLAW_GATEWAY_TOKEN: "fixture-independent-token" }, true), {
+    url: "wss://loopback:18789", token: "fixture-independent-token"
+  });
+  await writeFile(configPath, JSON.stringify({ gateway: { tls: { enabled: "true" }, auth: { mode: "token", token: "fixture-token" } } }));
+  await assertUnavailableGatewayAuth(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath }, true));
+  for (const port of ["18789", 0, -1, 18_789.5, 65_536]) {
+    await writeFile(configPath, JSON.stringify({ gateway: { port, auth: { mode: "token", token: "fixture-token" } } }));
+    await assertUnavailableGatewayAuth(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath }, true));
+  }
+
+  for (const url of ["ws://localhost:18789", "ws://127.0.0.2:18789", "ws://10.2.3.4:18789",
+    "ws://100.64.1.2:18789", "ws://169.254.1.2:18789", "ws://172.16.1.2:18789", "ws://192.168.1.2:18789",
+    "ws://[fd00::1]:18789", "ws://[fe80::1]:18789", "ws://gateway.local:18789", "ws://node.fixture.ts.net:18789"]) {
+    await writeFile(configPath, JSON.stringify({ gateway: { mode: "remote", remote: { url, transport: "direct", token: "fixture-remote-token" } } }));
+    assert.deepEqual(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath }, true), { url, token: "fixture-remote-token" });
+  }
+  for (const url of ["ws://loopback:18789", "ws://public.fixture.invalid:18789", "ws://8.8.8.8:18789",
+    "ws://[2001:4860:4860::8888]:18789"]) {
+    await writeFile(configPath, JSON.stringify({ gateway: { mode: "remote", remote: { url, transport: "direct", token: "fixture-must-not-send" } } }));
+    await assertUnavailableGatewayAuth(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath }, true));
+  }
+  await writeFile(configPath, JSON.stringify({ gateway: { mode: "remote",
+    remote: { url: "wss://public.fixture.invalid", transport: "direct", token: "fixture-remote-token" } } }));
+  assert.deepEqual(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath }, true), {
+    url: "wss://public.fixture.invalid", token: "fixture-remote-token"
+  });
+
+  let unsafeSocketCount = 0;
+  const unsafeObserver = new OpenClawStreamObserver({ url: "ws://public.fixture.invalid", token: "fixture-must-not-send",
+    webSocketFactory: () => { unsafeSocketCount++; throw new Error("unsafe transport must not reach the socket factory"); } });
+  await assert.rejects(unsafeObserver.request("status", {}), error =>
+    error instanceof GatewayControlError && error.code === "GATEWAY_TRANSPORT_UNAVAILABLE" && !error.message.includes("fixture"));
+  assert.equal(unsafeSocketCount, 0);
+  unsafeObserver.stop();
+});
+
+test("Gateway SecretRef presence participates in mode and trusted-proxy fail-closed rules", async t => {
+  const root = await tempFixture(t, "gateway-secretref-contract-"), configPath = join(root, "openclaw.json");
+  const tokenRef = { source: "env", provider: "default", id: "FIXTURE_GATEWAY_TOKEN" };
+  const passwordRef = { source: "file", provider: "default", id: "/gateway/password" };
+  for (const auth of [{ mode: "token", token: tokenRef }, { mode: "password", password: passwordRef },
+    { token: tokenRef, password: "fixture-password" }, { token: "fixture-token", password: passwordRef },
+    { token: tokenRef, password: passwordRef }, { mode: "token", token: "${FIXTURE_GATEWAY_TOKEN}" },
+    { mode: "token", token: { source: "invalid", id: "fixture" }, password: "fixture-password" }]) {
+    await writeFile(configPath, JSON.stringify({ gateway: { auth } }));
+    await assertUnavailableGatewayAuth(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath }, true));
+  }
+  for (const token of [
+    { source: "env", id: "FIXTURE_GATEWAY_TOKEN" },
+    { source: "env", provider: "Invalid Provider", id: "FIXTURE_GATEWAY_TOKEN" },
+    { source: "env", provider: "default", id: "lowercase" },
+    { source: "file", provider: "default", id: "relative/path" },
+    { source: "exec", provider: "default", id: "../fixture" },
+    { source: "env", provider: "default", id: "FIXTURE_GATEWAY_TOKEN", extra: true }
+  ]) {
+    await writeFile(configPath, JSON.stringify({ gateway: { auth: { mode: "token", token } } }));
+    await assertUnavailableGatewayAuth(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath,
+      PANEL_OPENCLAW_GATEWAY_TOKEN: "fixture-panel-token" }, true));
+  }
+
+  await writeFile(configPath, JSON.stringify({ gateway: { auth: { token: tokenRef } } }));
+  assert.deepEqual(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath,
+    PANEL_OPENCLAW_GATEWAY_TOKEN: " fixture-panel-token " }, true), {
+    url: "ws://127.0.0.1:18789", token: "fixture-panel-token"
+  });
+  await writeFile(configPath, JSON.stringify({ gateway: { auth: { mode: "password", password: passwordRef } } }));
+  assert.deepEqual(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath,
+    PANEL_OPENCLAW_GATEWAY_PASSWORD: " fixture-panel-password " }, true), {
+    url: "ws://127.0.0.1:18789", password: "fixture-panel-password"
+  });
+
+  for (const remoteCase of [
+    { credentials: { token: tokenRef }, override: { PANEL_OPENCLAW_GATEWAY_TOKEN: " fixture-panel-token " },
+      expected: { token: "fixture-panel-token" } },
+    { credentials: { password: passwordRef }, override: { PANEL_OPENCLAW_GATEWAY_PASSWORD: " fixture-panel-password " },
+      expected: { password: "fixture-panel-password" } }
+  ]) {
+    await writeFile(configPath, JSON.stringify({ gateway: { mode: "remote",
+      remote: { url: "wss://gateway.fixture.invalid", transport: "direct", ...remoteCase.credentials } } }));
+    await assertUnavailableGatewayAuth(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath }, true));
+    assert.deepEqual(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath, ...remoteCase.override }, true), {
+      url: "wss://gateway.fixture.invalid", ...remoteCase.expected
+    });
+  }
+  await writeFile(configPath, JSON.stringify({ gateway: { mode: "remote", remote: {
+    url: "wss://gateway.fixture.invalid", transport: "direct", token: { source: "invalid", id: "fixture" }
+  } } }));
+  await assertUnavailableGatewayAuth(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath,
+    PANEL_OPENCLAW_GATEWAY_TOKEN: "fixture-panel-token" }, true));
+
+  for (const token of ["fixture-mutually-exclusive-token", tokenRef]) {
+    await writeFile(configPath, JSON.stringify({ gateway: { auth: {
+      mode: "trusted-proxy", token, password: "fixture-local-password"
+    } } }));
+    await assertUnavailableGatewayAuth(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath }, true));
+  }
+  await writeFile(configPath, JSON.stringify({ gateway: { auth: { mode: "trusted-proxy" } } }));
+  await assertUnavailableGatewayAuth(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath }, true));
+  await writeFile(configPath, JSON.stringify({ gateway: { auth: { mode: "trusted-proxy", password: "fixture-local-password" } } }));
+  for (const panelCredentials of [
+    { PANEL_OPENCLAW_GATEWAY_TOKEN: "fixture-panel-token" },
+    { PANEL_OPENCLAW_GATEWAY_TOKEN: "fixture-panel-token", PANEL_OPENCLAW_GATEWAY_PASSWORD: "fixture-panel-password" }
+  ]) await assertUnavailableGatewayAuth(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath, ...panelCredentials }, true));
+  await writeFile(configPath, JSON.stringify({ gateway: { auth: { mode: "trusted-proxy", password: passwordRef } } }));
+  await assertUnavailableGatewayAuth(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath }, true));
+  assert.deepEqual(await loadGatewayStreamAuth({ OPENCLAW_CONFIG_PATH: configPath,
+    PANEL_OPENCLAW_GATEWAY_PASSWORD: " fixture-local-password " }, true), {
+    url: "ws://127.0.0.1:18789", password: "fixture-local-password"
+  });
 });
 
 test("missing server control credentials select a stable fail-closed transport", async () => {
@@ -201,7 +378,7 @@ class FakeSocket {
 
 test("observer ignores business events until the exact hello and subscriptions complete", async t => {
   const sockets: FakeSocket[] = [], events: GatewayStreamEvent[] = [];
-  const observer = new OpenClawStreamObserver({ url: "ws://fixture", token: "fixture", requestTimeoutMs: 300,
+  const observer = new OpenClawStreamObserver({ url: "ws://fixture.local", token: "fixture", requestTimeoutMs: 300,
     webSocketFactory: () => {
       const socket = new FakeSocket((current, frame) => queueMicrotask(() => current.message({ type: "res", id: frame.id, ok: true,
         payload: frame.method === "connect" ? { type: "hello-ok", server: { version: "2026.6.11" },
@@ -227,7 +404,7 @@ test("observer ignores business events until the exact hello and subscriptions c
 test("stale socket callbacks, challenge, hello, and data cannot mutate a replacement generation", async t => {
   const sockets: FakeSocket[] = [], reconnected = deferred();
   let staleConnectId: unknown;
-  const observer = new OpenClawStreamObserver({ url: "ws://fixture", token: "fixture", requestTimeoutMs: 300,
+  const observer = new OpenClawStreamObserver({ url: "ws://fixture.local", token: "fixture", requestTimeoutMs: 300,
     reconnectMinMs: 1, reconnectMaxMs: 2, webSocketFactory: () => {
       const index = sockets.length;
       const socket = new FakeSocket((current, frame) => {
@@ -267,7 +444,7 @@ test("stale socket callbacks, challenge, hello, and data cannot mutate a replace
 test("send failures retire the owned socket and recover on one replacement generation", async t => {
   for (const failure of ["throw", "callback", "ready"] as const) {
     const sockets: FakeSocket[] = [], reconnected = deferred(), diagnostics: string[] = [];
-    const observer = new OpenClawStreamObserver({ url: "ws://fixture", token: "fixture", requestTimeoutMs: 300,
+    const observer = new OpenClawStreamObserver({ url: "ws://fixture.local", token: "fixture", requestTimeoutMs: 300,
       reconnectMinMs: 1, reconnectMaxMs: 2, onDiagnostic: message => diagnostics.push(message), webSocketFactory: () => {
         const socket = new FakeSocket((current, frame) => queueMicrotask(() => current.message({ type: "res", id: frame.id, ok: true,
           payload: frame.method === "connect" ? { type: "hello-ok", server: { version: "2026.6.11" },
@@ -289,7 +466,7 @@ test("send failures retire the owned socket and recover on one replacement gener
 
 test("a stale send callback cannot invalidate the current generation", async t => {
   const sockets: FakeSocket[] = [], reconnected = deferred();
-  const observer = new OpenClawStreamObserver({ url: "ws://fixture", token: "fixture", requestTimeoutMs: 300,
+  const observer = new OpenClawStreamObserver({ url: "ws://fixture.local", token: "fixture", requestTimeoutMs: 300,
     reconnectMinMs: 1, reconnectMaxMs: 2, webSocketFactory: () => {
       const socket = new FakeSocket((current, frame) => queueMicrotask(() => current.message({ type: "res", id: frame.id, ok: true,
         payload: frame.method === "connect" ? { type: "hello-ok", server: { version: "2026.6.11" },
@@ -336,7 +513,7 @@ test("observer uses backend identity, routes sessions independently, and resubsc
     });
     sockets.push(socket); if (sockets.length === 2) reconnected.resolve(); queueMicrotask(() => socket.challenge()); return socket;
   };
-  const observer = new OpenClawStreamObserver({ url: "ws://fixture", token: "fixture", requestTimeoutMs: 500,
+  const observer = new OpenClawStreamObserver({ url: "ws://fixture.local", token: "fixture", requestTimeoutMs: 500,
     reconnectMinMs: 1, reconnectMaxMs: 2, webSocketFactory: factory });
   t.after(() => observer.stop());
   const first: GatewayStreamEvent[] = [], second: GatewayStreamEvent[] = [];
@@ -371,7 +548,7 @@ test("observer replaces a socket that emits error without close", async t => {
         auth: { role: "operator", scopes: ["operator.read", "operator.write", "operator.admin"] } } : { subscribed: true } })));
     sockets.push(socket); if (sockets.length === 2) reconnected.resolve(); queueMicrotask(() => socket.challenge()); return socket;
   };
-  const observer = new OpenClawStreamObserver({ url: "ws://fixture", requestTimeoutMs: 100,
+  const observer = new OpenClawStreamObserver({ url: "ws://fixture.local", requestTimeoutMs: 100,
     reconnectMinMs: 1, reconnectMaxMs: 2, webSocketFactory: factory });
   t.after(() => observer.stop());
   await observer.request("sessions.list", {});
@@ -395,7 +572,7 @@ test("observer replaces a socket after an RPC timeout", async t => {
     });
     sockets.push(socket); if (sockets.length === 2) reconnected.resolve(); queueMicrotask(() => socket.challenge()); return socket;
   };
-  const observer = new OpenClawStreamObserver({ url: "ws://fixture", requestTimeoutMs: 20,
+  const observer = new OpenClawStreamObserver({ url: "ws://fixture.local", requestTimeoutMs: 20,
     reconnectMinMs: 1, reconnectMaxMs: 2, webSocketFactory: factory });
   t.after(() => observer.stop());
   await withTimeout(assert.rejects(observer.request("sessions.create", {}), /GATEWAY_REQUEST_TIMEOUT: sessions\.create/), "intentional RPC timeout");
@@ -408,7 +585,7 @@ test("observer replaces a socket after an RPC timeout", async t => {
 test("observer honors a longer per-request timeout for model-backed RPCs", async t => {
   const sockets: FakeSocket[] = [];
   const responseTimers = new Set<NodeJS.Timeout>();
-  const observer = new OpenClawStreamObserver({ url: "ws://fixture", requestTimeoutMs: 10,
+  const observer = new OpenClawStreamObserver({ url: "ws://fixture.local", requestTimeoutMs: 10,
     webSocketFactory: () => {
       const socket = new FakeSocket((current, frame) => {
         // This timer is the subject of the test: compact must outlive the default request timeout.
@@ -438,7 +615,7 @@ test("observer rejects every non-exact role and scope grant before enabling cont
   ] as const;
   for (const fixture of invalidAuth) {
     const diagnostics: string[] = [], sockets: FakeSocket[] = [];
-    const observer = new OpenClawStreamObserver({ url: "ws://fixture", token: "fixture", requestTimeoutMs: 200,
+    const observer = new OpenClawStreamObserver({ url: "ws://fixture.local", token: "fixture", requestTimeoutMs: 200,
       reconnectMinMs: 60_000, reconnectMaxMs: 60_000, onDiagnostic: message => diagnostics.push(message),
       webSocketFactory: () => {
         const socket = new FakeSocket((current, frame) => queueMicrotask(() => current.message({ type: "res", id: frame.id, ok: true,
@@ -456,7 +633,7 @@ test("observer rejects every non-exact role and scope grant before enabling cont
 
 test("observer rejects a different pinned Gateway version before any business RPC", async t => {
   const sockets: FakeSocket[] = [];
-  const observer = new OpenClawStreamObserver({ url: "ws://fixture", token: "fixture", requestTimeoutMs: 200,
+  const observer = new OpenClawStreamObserver({ url: "ws://fixture.local", token: "fixture", requestTimeoutMs: 200,
     reconnectMinMs: 60_000, reconnectMaxMs: 60_000, webSocketFactory: () => {
       const socket = new FakeSocket((current, frame) => queueMicrotask(() => current.message({ type: "res", id: frame.id, ok: true,
         payload: { type: "hello-ok", server: { version: "2026.6.12" },
@@ -473,7 +650,7 @@ test("observer rejects a different pinned Gateway version before any business RP
 test("observer normalizes denied handshakes and upstream RPC errors without exposing payloads", async t => {
   const secret = "fixture-token-and-private-message-/private/example";
   const deniedDiagnostics: string[] = [];
-  const denied = new OpenClawStreamObserver({ url: "ws://fixture", token: "fixture", requestTimeoutMs: 200,
+  const denied = new OpenClawStreamObserver({ url: "ws://fixture.local", token: "fixture", requestTimeoutMs: 200,
     reconnectMinMs: 60_000, reconnectMaxMs: 60_000, onDiagnostic: message => deniedDiagnostics.push(message),
     webSocketFactory: () => {
       const socket = new FakeSocket((current, frame) => queueMicrotask(() => current.message({ type: "res", id: frame.id, ok: false,
@@ -487,7 +664,7 @@ test("observer normalizes denied handshakes and upstream RPC errors without expo
   denied.stop();
 
   const rpcDiagnostics: string[] = [];
-  const rpc = new OpenClawStreamObserver({ url: "ws://fixture", token: "fixture", requestTimeoutMs: 200,
+  const rpc = new OpenClawStreamObserver({ url: "ws://fixture.local", token: "fixture", requestTimeoutMs: 200,
     onDiagnostic: message => rpcDiagnostics.push(message), webSocketFactory: () => {
       const socket = new FakeSocket((current, frame) => queueMicrotask(() => current.message(frame.method === "status" ?
         { type: "res", id: frame.id, ok: false, error: { message: secret, payload: { secret } } } :
@@ -502,7 +679,7 @@ test("observer normalizes denied handshakes and upstream RPC errors without expo
   rpc.stop();
 
   const closedDiagnostics: string[] = [];
-  const closed = new OpenClawStreamObserver({ url: "ws://fixture", token: "fixture", requestTimeoutMs: 200,
+  const closed = new OpenClawStreamObserver({ url: "ws://fixture.local", token: "fixture", requestTimeoutMs: 200,
     reconnectMinMs: 60_000, reconnectMaxMs: 60_000, onDiagnostic: message => closedDiagnostics.push(message), webSocketFactory: () => {
       const socket = new FakeSocket((current, frame) => queueMicrotask(() => frame.method === "status" ? current.close(1008, secret) :
         current.message({ type: "res", id: frame.id, ok: true, payload: frame.method === "connect" ? { type: "hello-ok",
@@ -518,7 +695,7 @@ test("observer normalizes denied handshakes and upstream RPC errors without expo
 
 test("observer enforces the reviewed read, write, and admin RPC map and sends nothing else", async t => {
   const sockets: FakeSocket[] = [];
-  const observer = new OpenClawStreamObserver({ url: "ws://fixture", token: "fixture", requestTimeoutMs: 200,
+  const observer = new OpenClawStreamObserver({ url: "ws://fixture.local", token: "fixture", requestTimeoutMs: 200,
     webSocketFactory: () => {
       const socket = new FakeSocket((current, frame) => queueMicrotask(() => current.message({ type: "res", id: frame.id, ok: true,
         payload: frame.method === "connect" ? { type: "hello-ok", server: { version: "2026.6.11" },
@@ -552,7 +729,7 @@ test("observer enforces the reviewed read, write, and admin RPC map and sends no
 
 test("observer discards the previous grant and fails closed when a reconnect hello is narrower", async t => {
   const sockets: FakeSocket[] = [], secondHandshake = deferred();
-  const observer = new OpenClawStreamObserver({ url: "ws://fixture", token: "fixture", requestTimeoutMs: 200,
+  const observer = new OpenClawStreamObserver({ url: "ws://fixture.local", token: "fixture", requestTimeoutMs: 200,
     reconnectMinMs: 1, reconnectMaxMs: 2, webSocketFactory: () => {
       const index = sockets.length;
       const socket = new FakeSocket((current, frame) => queueMicrotask(() => {
