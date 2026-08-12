@@ -1,718 +1,477 @@
 # ark-panel 实现规格
 
-> 设计依据、备选方案的取舍与侦察过程见 [`architecture.md`](architecture.md)，本文集中说明“建什么、怎么建、怎么验收”。
-> 面向 Codex 无人监督时的自主开发：每个任务都带一个 Codex 自己能跑、能判断通过或失败的验收方式。
-> 写于 2026-07-11。
-> **范围更新（2026-07-17）：**真实 active 会话与 reset 归档只读；只有 panel 自建/fork 会话可写。当前实现已提供 A 类面板原生命令与 C 类只读命令（`/commands`、`/help`、`/status`、`/models`、`/tools`、`/usage`）。普通消息接口仍永久拒绝 `/...`，命令只走独立结构化派发接口。见 [`decisions/slash-commands.md`](decisions/slash-commands.md)。
+本文是当前实现与验收契约，不是开发计划。产品范围见根目录 README，分层与数据流见
+[`architecture.md`](architecture.md)，绑定设计取舍见 [`decisions/`](decisions/)。
+历史施工记录只存在于 Git 历史和非规范 [`archive/`](archive/)；日期化验收文档只证明
+对应运行时刻和环境。
 
----
+## 0. 不变量
 
-## 0. 最高优先级：安全约束（违反即停止）
+以下要求优先于功能便利性：
 
-这些约束高于一切开发目标。任何一条无法保证时，停下等 Owl 醒来确认，不要绕过。
+1. panel transcript、metadata、附件、run 和记忆工作流状态是面板权威数据；派生索引
+   必须可清空重建。
+2. 配置的 OpenClaw active/reset transcript 是只读来源。面板不能写入、重命名或删除
+   这些源文件；对应用户 metadata 只写 panel sidecar。
+3. 面板与 OpenClaw 不能共同写同一权威文件。生成必须保留“一次性 runtime session
+   物化 → 完整结果验证 → panel 原子提交”的边界。
+4. 完整 run、可变 metadata、候选和 settings 使用已有原子写与 durability helper；
+   多行 append 不能被当作事务。
+5. 拒绝 traversal、symlink、需要时的 hardlink、特殊文件和 allowlist 根外路径。浏览器
+   永远不能选择主机路径。
+6. 登录、固定 Host/Origin、CSRF、请求大小与同源资源边界不能因新增 HTTP 能力放松。
+7. SSE 与 Gateway streaming 只是临时观察；经过完整校验并原子提交的 transcript 才能
+   决定 completion 和下一轮上下文。
+8. API 保持 `{ data }` / `{ error: { code, message, requestId } }` envelope 与稳定错误码。
+   有规范化 DTO 时不能暴露上游原始 payload。
+9. OpenClaw 适配固定为 `2026.6.11`；修改 RPC、scope、transcript、cleanup 或 runtime
+   假设前，必须先完成隔离验收并更新工程决定。
+10. 存储格式变化必须有显式迁移和回滚，不能静默重新解释既有权威数据。
 
-1. **绝不接触真实 agent `claude`。** 它的 workspace 是 `~/claude`，会话目录是 `~/.openclaw/agents/claude/sessions/`。开发和测试期间对这两个位置**只读、且只读拷贝**，不写、不删、不改。真实的 `MEMORY.md`、`memory-seed`、几年的对话是本项目唯一无法重建的资产。
-2. **测试只用隔离的测试 agent。** 见 §1，Codex 自己创建一个测试 agent + 空 workspace，所有需要连 gateway 的测试都跑在它身上。
-3. **测试 agent 不绑任何 IM 渠道。** 不执行 `openclaw agents bind`。这样 `chat.send` 没有对外出口，不会把测试消息发到 Owl 的 Telegram 或飞书。
-   - 补充依据：`chat.send` 的投递目标来自会话记录里的 `route` / `deliveryContext` 字段（见方案文档 §4.1 的索引结构）。测试 agent 没有渠道绑定，新建会话就不会带 IM route，消息无处可发。
-4. **面板服务端永不写 `sessions.json`。** 这是整个架构的前提（见方案文档 §5.3）。面板只写自己的存储目录。
-5. **不改 `~/.openclaw/openclaw.json` 里与真实 agent、真实渠道相关的任何配置。** 只允许追加测试 agent 相关的项。
-6. **不执行 git push、不改 git 配置、不碰 git-crypt 密钥。** 提交可以，推送等 Owl 醒来。
-7. **控制测试推理的工具副作用。** `paneltest` 不绑 IM 只挡住了 Telegram / 飞书，挡不住其它有外部影响的工具：浏览器操作、网络请求、文件写入、shell 命令、发外部消息的技能。为验证「完整工具是否注入」而跑推理时，测试 prompt 必须受控（用明确无副作用的问题，例如“列出你能用的工具名称”而非“上网查 X 并发给我”），或给 `paneltest` 收窄工具集。绝不用会真正触发外部动作的 prompt——那同样不可逆。
+## 1. 运行时、配置与部署入口
 
----
+- Node.js `>=22 <23`，ESM，严格 TypeScript；包管理器为 npm。
+- 服务端使用 Node 内置 HTTP，不使用 Web 框架。
+- 浏览器 UI 使用原生 HTML、CSS、JavaScript；不引入前端框架。
+- API 前缀为 `/api/v1`，静态资源与 KaTeX 均由面板同源提供。
+- 进程只监听 `127.0.0.1`；`PANEL_PORT` 只改变端口，不改变监听主机。
+- `PANEL_DATA_DIR` 是权威数据根。read agent、聊天 runtime、记忆 runtime 和 workspace
+  只从服务端配置 allowlist 得到。
 
-## 0.5 第 0 段：推理桥接可行性实验（已完成）
+配置解析必须在启动时失败关闭。数据根与 OpenClaw source/runtime 根不得相同或父子
+重叠；runtime 不能复用真实、渠道绑定的 agent。所有秘密只来自受保护的服务端环境或
+经过 Gateway resolver 选择的配置，不能进入仓库、浏览器、错误或日志。
 
-第 0 段已于 2026-07-11 在 `paneltest` 完成。桥接成立，当前采用 2a′；详细证据和未完成的扩展测试见 `实测记录.md`。
+### 1.1 浏览器 origin 与 Host
 
-已确定的主流程：`sessions.create` 创建一次性临时 session；覆盖其 transcript，只写到上一轮完整 run；通过 `sessions.send` 提交最新用户消息；等待完成后从临时 transcript 读取新增的完整 entry 组。临时 session 不复用。
+默认只信任当前监听端口上的 `127.0.0.1` 和 `localhost` HTTP origin/Host。
+HTTPS 反向代理部署使用：
 
-实验程序是不带 UI 和正式持久化的最小脚本，只操作 `paneltest`。复现脚本保存在 `experiments/bridge-zero.sh`。
+- `PANEL_PUBLIC_ORIGIN`：唯一浏览器可见的精确 `http(s)://host[:port]`；
+- `PANEL_SECURE_COOKIE=1`：HTTPS origin 的强制配套项；
+- `PANEL_TRUSTED_HOSTS`：代理明确改写 Host 时才使用的有限精确 JSON 数组。
 
-**实验结果：**
+origin/Host 共用规范化规则。拒绝 wildcard、userinfo、路径、query、fragment、
+IDN/punycode、替代数字 IP、非规范 IPv6 和规范化后的重复项。所有请求先校验实际
+`Host`；登录与 mutation 还要求显式匹配的 `Origin`，mutation 再要求登录态和 CSRF。
+缺失或 `null` Origin 不受信。应用不读取 `Forwarded`、`X-Forwarded-Host`、
+`X-Forwarded-Proto` 或其它代理头，也不从请求学习信任。
 
-1. **gateway 读取预置历史：通过。** 必须先 `sessions.create`，再覆盖它创建的 transcript；直接放置未登记文件不可用。
-2. **最新用户消息不重复：通过。** 物化历史不含最新用户消息，只经 `sessions.send` 提交；搬回时校验并跳过 gateway 新增的 user entry。
-3. **完整工具 run：通过。** `sessions.send` 的直接响应不足以重建；应在 run 完成后读取临时 transcript 新增的完整 JSONL entries。
-4. **abort 与客户端退出：基础行为通过。** abort 留下结构完整的 entry；客户端退出后 gateway 仍完成推理。强制杀死自定义 WebSocket 客户端和 gateway 重启恢复尚未测试，不作为当前架构前提。
-5. **官方清理：不完整。** `sessions.delete` 能注销，但 transcript 会改名，trajectory 仍残留；已选择专用 runtime agent + 受限文件清理。
-6. **累积结论：已足够确定。** 每轮至少产生 transcript 和 trajectory artifacts，官方删除后仍线性累积；没有在已知结论后继续浪费模型调用。受限自动清理完成后再做耐久测试。
-7. **记忆 / 系统文件 / skills 的实际注入。** 确认面板发起的推理里，`SOUL/USER/MEMORY` 等具名文件确实被注入（发一条能触发记忆的消息看回复），`memory_search` 跑完后 recall store 有新数据落盘，browser/canvas/skills 等工具是否随推理带上。
+失败保持既有 `HOST_REJECTED`、`ORIGIN_REJECTED` 和 `CSRF_REJECTED` 语义。配置错误
+只指出变量/类别，不回显部署 hostname、请求头或路径。真实代理、TLS、登录、mutation
+与长 SSE 当前部署状态必须由 #48 复验，不能由 fixture 测试推断为已通过。
 
-**实验产出**：`实测记录.md`。Owl 已根据结果选择专用 runtime agent + 受限 artifact 清理，不维护 OpenClaw 补丁分支。
+## 2. 会话来源与权威存储
 
----
+### 2.1 三类来源
 
-## 1. 隔离测试环境（Codex 开工第一步）
+| `sourceKind` | 来源 | 写入规则 |
+| --- | --- | --- |
+| `active` | 配置 agent sessions 根中的现行 active JSONL | 只读，变化后重新读取 |
+| `reset` | 同一根中的现行 `.reset.` JSONL | 只读，不建立冻结导入副本 |
+| `panel` | `PANEL_DATA_DIR/sessions/...` | 面板独占写入 |
 
-在写任何面板代码前，先建好隔离环境，并确认它与真实 agent 分离。
+active/reset 扫描只支持固定 OpenClaw 版本的现行命名与 v3 transcript 结构。读取正在
+追加的 active 文件时只解析完整 JSONL 行，末尾半行留给下一次刷新。reset 也持续以
+OpenClaw 源文件为准；sidecar 只保存面板用户意图，不复制正文成为第二份权威数据。
 
-创建测试 agent（名字用 `paneltest`，workspace 用一个新目录）：
+### 2.2 panel record
 
-```bash
-mkdir -p ~/paneltest-workspace
-openclaw agents add paneltest --non-interactive \
-  --workspace ~/paneltest-workspace \
-  --model 'mini1/claude-opus-4-8' \
-  --json
-# 注意：不执行 agents bind，测试 agent 不接任何 IM 渠道
+一条 panel 记录位于：
+
+```text
+PANEL_DATA_DIR/
+  sessions/<agentId>/<recordId>/
+    metadata.json
+    transcript.jsonl
+    attachments.json   # optional
 ```
 
-验收（Codex 自查，全部满足才算环境就绪）：
-- `openclaw agents bindings` 输出里，`paneltest` **没有**任何 channel 绑定。
-- `~/.openclaw/agents/paneltest/sessions/` 目录存在，且与 `claude` 的会话目录是不同路径。
-- `openclaw.json` 里 `claude` agent 的配置项逐字未变（改动前后 diff 只多出 `paneltest`）。
+`metadata.json` 至少承载稳定 `recordId`、agent、标题、fork 来源、归档/隐藏/置顶/project、
+记忆处置与会话 override。`transcript.jsonl` 保留 v3 header、`id` / `parentId` 分支、
+message、tool、thinking、model/thinking change、compaction 和未知但安全的既有 entry。
 
-Gateway 连接凭证：读 `~/.openclaw/openclaw.json` 的 `gateway.auth.token` / `gateway.auth.password`，也可由显式的面板环境变量覆盖。共享 secret 必须长期可轮换且只留在服务端；若 Gateway 要求认证而没有可解析的固定凭据，就**停下**，先做不依赖 Gateway 的部分（见 §6 分段），不能把 secret 写进仓库或日志。
+创建、新建 fork 和编辑重发使用同一发布事务：
 
----
+1. 在目标 agent 目录的保留 staging 名称空间写完整记录；
+2. 每个 `0600` 文件写完并 `fsync`；
+3. `fsync` staging 目录；
+4. 以一次目录 rename 发布为 `<recordId>/`；
+5. `fsync` agent 父目录。
 
-## 2. 目标架构（一句话回顾）
+父目录首次创建也要逐层完成 durability。发布前记录不可枚举。失败后的 staging 作为
+故障证据保留并隔离，不能自动删除；若 rename 后的 durability 无法确认，必须明确报
+不确定，不能宣称成功。
 
-面板是一个 Node 服务端，与 gateway 同机运行。它自己保存会话历史（真相），gateway 只负责两件事：跑模型推理、收发 IM。
+### 2.3 fork 与编辑重发
 
-```
-浏览器（手机 / 公司 Windows / 家里 Linux）
-   │  HTTP / WebSocket
-   ▼
-面板服务端（Node，与 gateway 同机）
-   ├─ 自己的会话存储：transcript 文件 + 索引 + fork 关系
-   └─ 通过 localhost WebSocket 连 gateway：只为跑一次推理
-        │
-        ▼
-   gateway（127.0.0.1:18789）
-```
+fork 从目标 entry 沿 `parentId` 回溯完整祖先链；编辑重发回溯到被编辑 user entry 的
+父节点，再添加替换后的 user entry。不能复制 JSONL 物理前缀，因为物理顺序可能包含
+旁支。工具调用/结果与其它必须成组的 entry 不能被截成半组。祖先 message ID 可在新
+transcript 内保留，但跨会话引用必须带 `recordId`。
 
-浏览器只连面板服务端。外部设备通过 SSH 转发面板一个端口即可（见方案文档 §2）。
+任何来源都可以 fork，目标永远是新的 `panel` 记录。来源 transcript、metadata、附件
+索引和 blob 不修改。
 
----
+### 2.4 readonly sidecar
 
-## 3. 会话数据格式（面板自己的存储）
-
-面板用 OpenClaw 的 transcript 格式存会话，便于直接查看、纳入 git、以后迁移。
-
-**每个会话的 transcript 是一个 JSONL 文件**，每行一个 JSON 对象：
-- 首行是会话头：`{"type":"session","version":3,"id":"<uuid>","timestamp":"<ISO>","cwd":"<workspace路径>"}`
-- 消息行：`{"type":"message","id":"<短id>","parentId":"<父id或null>","timestamp":"<ISO>","message":{"role":"user|assistant","content":...}}`
-- 其它类型（`model_change`、`thinking_level_change`、`custom`）按原样保留，不必理解其语义，但要能读能写回。
-
-**关键：`id` + `parentId` 构成一棵树。** fork 就是让新消息的 `parentId` 指向历史上某个节点。面板的 fork 树直接建立在这个父子关系上。
-
-**面板存储的当前目录布局**：
-```
-<面板数据目录>/
-  sessions/
-    <agentId>/
-      <recordId>/
-        metadata.json         # 可变会话属性与 fork 来源
-        transcript.jsonl      # 权威完整 transcript
-        attachments.json      # 可选；该会话实际拥有的附件引用
-```
-
-`metadata.json`、`transcript.jsonl` 与存在时的 `attachments.json` 共同构成一条可见的权威记录，不得逐文件直接发布。创建时在同一 `<agentId>/` 下以保留前缀 staging 目录写入：各 `0600` 文件分别写完并 `fsync`，再 `fsync` staging 目录，单次 rename 为 `<recordId>/`，最后 `fsync` `<agentId>/`。panel fork/edit-and-fork 在创建任何 staging 前解析完整源附件索引，并只选择目标 transcript 中真实 `attachment` block 对应、owner 一致且 manifest/blob 完整的引用；附件存储互斥锁一直持有到目标目录发布完成，因此 GC、上传分配或删除不能在预检与发布之间使引用失效。源 session、源附件索引、manifest 与 blob 不修改、不复制、不删除。创建或复用 `sessions/` 与 agent 子目录时都重新 `fsync` 各自父目录，避免前一次父目录同步失败后由重试跳过 durability。发布失败时回退为不可枚举的 staging；若回退本身也失败则必须明确报告 durability 不确定，不得宣称创建成功。已有 staging 或其他半成品作为故障证据保守报告，不自动删除；列表、读取、搜索与附件 GC 均忽略 staging。已发布记录仍逐条独立校验；缺文件、损坏 JSON、非普通文件、硬/符号链接或不安全权限只隔离当前记录，结构化诊断不得含正文或私密绝对路径。只有 `sessions/` 或 agent 子目录不存在可解释为空；配置的数据根缺失、不安全或不可达必须以脱敏的 `PANEL_SESSION_STORAGE_UNAVAILABLE` 失败。这不改变现有 metadata/transcript/attachment schema，也不对历史数据做静默迁移或删除。
-
-参考样本：可以把 `~/.openclaw/agents/claude/sessions/` 里的文件**拷贝出来**做解析测试样本，绝不直接读写原目录。
-
-验收：
-- 写一个解析器，能读入一个 v3 transcript 文件，还原成消息树（每个节点知道自己的父节点和子节点）。
-- 用拷贝出来的真实样本测试：解析后再序列化写回，与原文件逐行对比应一致（除了可以接受的空白差异）。
-- 单元测试覆盖：多分支的树、`parentId` 为 null 的根、非 message 类型行的保留。
-
----
-
-## 4. 面板自己的会话索引
-
-gateway 的 `sessions.json` 面板不碰。面板维护单一的进程内派生读取索引，用于侧边栏列表、单条定位和搜索。
-
-**索引只作可重建缓存，不作第二份权威数据，也没有持久化 schema。** 权威信息（如 fork 来源）写进 transcript 头部或独立 metadata；进程重启或清空派生状态后，从安全扫描 transcript 与 metadata 全量重建。历史 `index.json` 不参与读取，可以删除。索引按 `agentId + sourceKind + stable source identity` 主键和 `recordId -> ordered candidate keys` 二级 locator 缓存已验证 document，不能假设磁盘上的 recordId 永不碰撞；列表和搜索保留各条复合记录，record-only 调用发现多个候选时沿用相应 API 既有的 not-found/null 语义失败关闭，其中 mutation 使用 `SESSION_NOT_FOUND`，附件 owner 使用 `PANEL_SESSION_NOT_FOUND`。列表或搜索先取得一次一致请求快照，只重读新增或变更记录；唯一定位的单条读取只校验目标 source root；并发冷启动共享同一次重建。clear、定点失效和删除通过 epoch 门禁使在途旧扫描作废并重试，不能复活已删除记录。坏记录按自身指纹隔离，不能污染其他记录或把根级存储错误解释为空库。
-
-create、metadata update、fork 或 edit-and-fork 的权威提交先于派生索引维护；提交后的索引刷新失败只能标脏 locator 并由后台或下次读取重建，API 仍返回已提交结果，不能伪装成权威写失败而诱发重复创建。create 响应所需 revision/fingerprint 在 staging 文件 fsync 后、原子发布前取得，发布成功后不得再依赖一次可能失败的扫描才能返回。生产进程只构造一个覆盖 read agent 与附件 runtime agent 并集的索引，并显式注入读取和附件 API；API 构造器不得私自创建第二实例。两个 consumer 必须分别按 read-agent allowlist 与 runtime-agent allowlist 限定 snapshot 和 record locator，不能因为共享索引而扩大读取或写入范围。附件引用只存在于 panel 权威记录，下载与预览的 owner 枚举必须使用同一索引的 panel-source-only 快照，不得为此探测同 agent 的 external transcript root；该快照仍受相同 composite identity 与 epoch 发布门禁保护。
-
-#### 4.1 会话记录的字段（修正：`id` 不能等于会话 uuid）
-一个会话 uuid 不足以唯一标识一条记录：`/reset` 会让同一个 uuid 先后产生 `<uuid>.jsonl`、`<uuid>.jsonl.reset.<时间1>`、`<uuid>.jsonl.reset.<时间2>`，它们很可能共享同一个 session uuid；不同 agent 之间也需要命名空间。因此每条记录用一组字段标识：
-
-- `recordId`：**面板内部按契约应全局唯一的 ID**（自己生成，不等于会话 uuid）；读取不信任历史或手工数据满足该约束，碰撞时按上节失败关闭。
-- `agentId`：来自哪个 agent（`claude` / `main` / `paneltest`）。
-- `sourceSessionId`：源会话 uuid（可能多条记录共享）。
-- `sourceKind`：`active`（活会话）｜`reset`（reset 归档）｜`panel`（面板自建）。
-- `sourcePath` 或稳定归档标识：源文件路径 / 归档标识。
-- `sourceRevision`：mtime + size（或内容摘要），用于判断源文件是否变化、要不要刷新。
-- `title` / `createdAt` / `updatedAt` / `messageCount`。
-- `parentRecordId` + `forkedFromMessageId`：从别处 fork 出来时记来源（指向 `recordId`，不是 uuid）。
-
-#### 4.2 三类会话的对待方式（修正：不再一律「拷贝进存储」）
-之前「只读拷贝进面板存储」与「活会话直接读真实文件」是矛盾的。明确区分：
-
-- **活会话**（`<uuid>.jsonl`，gateway 在管）：**只读源文件 + 建立派生索引，不拷成权威副本。** 轮询刷新时按 `sourceRevision` 判断源文件是否变了，变了就重读。这样才能看到 IM 刚追加的新消息（对应方案 §6.1）。
-  - 读正在被追加的文件时，要处理「读到半行」：按完整行解析，最后不完整的一行丢弃、下次再读。
-- **reset 归档**（`<uuid>.jsonl.reset.<ts>`）：保持 OpenClaw 源文件只读；由派生索引缓存已验证 document，源 locator 变化时重建，不复制或改写为另一份权威数据。
-- **面板自建 / fork**（`sourceKind: panel`）：文件本就由面板拥有，直接是权威数据。
-
-**导入范围**：扫描 `~/.openclaw/agents/<agent>/sessions/`（测试期 `paneltest`），识别活会话和 reset 归档；只要求现行格式，早期 `-topic-N` 可跳过。多 agent 分别扫描、分别登记。
-
-验收：
-- 索引能列出面板自建 + 各 agent 导入的会话，包括 reset 归档；同一 uuid 的活会话与多个 reset 归档各占独立记录，不互相覆盖。
-- 清空进程内索引或重启后能从扫描 transcript/metadata 全量重建，结果一致；任何遗留 `index.json` 都不影响结果。
-- N 条候选的搜索至多读取、解析 N 份 transcript；同一请求不为每条命中再次全量扫描。暖缓存的单条读取不枚举所有会话，源/sidecar 变化后只使相应记录失效。
-- 跨 agent 相同 recordId、同 agent 跨 source kind 相同 recordId 不丢列表/搜索记录；record-only 读取、写入与附件 owner 查询不按刷新完成顺序选择 winner。
-- revision 轮询 DTO 与浏览器比较同样携带 `agentId/sourceKind/sourceKey/recordId` 复合 identity，不能把碰撞记录压回单值 recordId 而造成永久误判刷新。
-- clear 与 full/targeted refresh、delete 与在途 full refresh 交错时，当前快照重试并且旧扫描不能重新发布已作废或已删除记录；并发 agent refresh 的完成顺序不改变 DTO 排序。
-- create/update/fork/edit-and-fork 已完成权威提交后，即使可注入的索引刷新失败也返回提交结果；后续读取从标脏 locator 或全量快照自愈。
-- 搜索：按标题和消息内容关键词能查到会话。
-- 活会话源文件被追加新行后，轮询刷新能读到新消息，且不会因读到半行而解析出错。
-
-#### 4.3 会话管理字段（重命名 / 归档 / 删除 / 记忆处置）
-
-以下都是**面板侧 metadata**，是可从 transcript 重建之外的用户意图状态，必须持久化，且**对只读会话绝不写回源文件**。放在面板 metadata（transcript 头或独立元数据文件），不能只放派生索引（索引可清空重建）。
-
-- `title`：用户可改的标题。重命名任何会话（含活会话、reset 归档）只改这里。未设置时展示用截取首条用户消息，不落库为 `title`。
-- **`archived` 与 `hidden` 是两个独立状态，不能用一个布尔表达**（否则「归档页可见」和「彻底隐藏」区分不出）：
-  - `archived`（布尔）：归档 = 从主列表移到**归档列表**，在归档列表**仍可见**、可取消归档移回主列表。这是「暂时不想看，但要能找回」。
-  - `hidden`（布尔）：隐藏 = 主列表与归档列表**都不默认展示**。这是「删除」对只读会话的落地形态（源文件永不动，只是面板不再列出）。
-  - 两者正交：一条会话可以 `archived=true, hidden=false`（在归档页），也可以 `hidden=true`（哪儿都不列，无论 archived 取值）。彻底删除只读会话 = 置 `hidden=true`。
-  - 状态在重新扫描源目录后仍生效：被归档 / 隐藏的只读会话不因 rescan 重新出现。
-- `memoryDisposition`：`eligible`｜`scratch`（默认 `scratch`）。该字段只控制会话能否进入面板管理的记忆沉淀流程；两种状态都必须读取目标 agent 的既有记忆，见 §5.5 与 `decisions/panel-memory.md`。
-- 只读会话（`sourceKind` = `active` / `reset`）的“删除”= 置 `hidden=true`；**没有任何路径可 unlink、改名或改写其源文件**。
-- 面板自建会话（`sourceKind` = `panel`）的彻底删除：必须先 `archived`，再经显式二次确认，才移除面板拥有的 transcript 与 metadata；git（git-crypt）历史为最后兜底。
-
-**只读会话的 metadata 存储（sidecar）**：只读会话（`active` / `reset`）的源文件在 gateway 目录，面板绝不写回；它们的 `title` / `archived` / `hidden` / `memoryDisposition` 需要一处面板自有的 sidecar 存储：
-
-- **存储位置**：面板数据目录下**镜像 agent 维度的 sidecar 目录**（如 `PANEL_DATA_DIR/readonly-meta/<agentId>/<sourceIdentity>.json`），与源目录物理隔离，只由面板拥有、原子写（沿用 §0 `atomicWrite` 与路径/符号链接防护）。不复用 panel 自建会话的 `sessions/<agent>/<recordId>/` 目录。
-- **源身份（source identity）**：用**稳定标识**关联源会话，不是易变的文件名。`active` 用会话 uuid；`reset` 归档（`<uuid>.jsonl.reset.<ts>`）用 `uuid + reset 时间戳`组合。选稳定标识的目的：源文件被 rescan 重新发现、或 reset 文件路径变化时，sidecar 仍能重新挂到同一逻辑会话上，用户设的标题 / 归档态不丢。
-- **schema 版本化**：sidecar JSON 带 `version` 字段（起始 `1`），与 panel metadata 同一套升级方法（读到未知版本报错，不静默丢字段）。
-- **v1 精确 schema**：`{ version: 1, sourceKind: "active"|"reset", agentId, sourceSessionId, resetTimestamp?: string, title?: string, archived: boolean, hidden: boolean, memoryDisposition: "eligible"|"scratch", updatedAt }`。`resetTimestamp` 仅 `reset` 必填；`title` 缺失表示使用首条用户消息的展示标题。读取旧 sidecar 时缺失的布尔按 `false`、缺失的 `memoryDisposition` 按 `scratch` 补齐，并在下一次修改时写回完整 schema。
-- **安全文件名**：`sourceIdentity` 是逻辑键，不直接拼进路径；文件名使用 `sha256(agentId + "\0" + sourceKind + "\0" + sourceSessionId + "\0" + (resetTimestamp ?? "")) + ".json"`。JSON 内保留组成字段，读取时重新计算并校验文件名，拒绝不一致记录。
-- **原子更新与并发**：sidecar 写用 `atomicWrite`（临时文件 + fsync + rename）；每个 `sourceIdentity` 使用服务端 keyed mutex 串行执行完整的 read-modify-write，避免同进程并发请求发生丢失更新。不同 identity 可并行。gateway 不知道该目录，不存在跨 gateway 竞争。
-
-验收：
-- 重命名活会话与 reset 归档：面板 sidecar 记录的 `title` 改变，**源文件字节逐字未变**（改动前后对源文件做 diff 应为空）。
-- 归档某会话后，它从主列表消失、出现在归档列表；取消归档后回到主列表。清空索引重建后，归档 / 隐藏状态保持一致（说明状态存 sidecar / panel metadata，不只存派生索引）。
-- 只读会话执行“删除”（置 `hidden=true`）：源文件仍在原处、内容未变；主列表与归档列表都不再默认展示它。
-- `archived` 与 `hidden` 正交可验：一条会话 `archived=true` 时在归档列表可见；再置 `hidden=true` 后从归档列表也消失；两状态可独立切换。
-- reset 源文件被 rescan 重新发现后，此前设的 `title` / `archived` / `hidden` 仍挂在同一逻辑会话上（source identity 稳定，不因文件重新扫描而丢关联）。
-- 并发更新同一 sidecar 的不同字段（例如同时重命名和归档）后两项都保留；测试用 barrier 让两个请求重叠，证明 keyed mutex 覆盖完整 read-modify-write，而不只是原子 rename。
-- 面板自建会话未归档时，彻底删除入口不可用（或被拒绝）；归档并二次确认后，面板 transcript 与 metadata 被移除，且该操作不触碰任何非 `panel` 会话。
-- 路径与符号链接防护沿用 §0 与工程决定：删除只作用于由 agentId + recordId 推导出的面板数据目录内文件，拒绝路径越界与符号链接；sidecar 写入同样受此约束。
-
----
-
-## 5. 功能实现对照表
-
-面板里存在两类会话，写入归属不同（详见方案文档 §6.1）：
-- **活会话**：gateway 管理、绑定 IM 的会话（如 `agent:claude:main`）。面板对它只读 + 轮询刷新；要发消息则调 gateway `chat.send`，由 gateway 追加到同一个上下文桶。面板由此成为与 IM 并列的又一扇窗口，消息进同一段上下文（注意：这不等于两类会话能力相同——fork 出的自建会话就不回 IM，见方案 §6.1）。
-- **自建会话**：面板中新建或 fork 产生。文件由面板自己拥有，生成回复走 §5.1 推理桥接。
-
-| 功能 | 实现方式 | 连 gateway？ |
-|---|---|---|
-| 查看会话历史 | 读 transcript（自建会话读面板存储；活会话只读其真实会话文件） | 否 |
-| 侧边栏列表 / 搜索 | 读可清空重建的进程内索引；按 locator 指纹增量刷新 | 否 |
-| 多 agent 切换（联系人页） | 按 agent 分别扫描 `~/.openclaw/agents/<agent>/sessions/`、分别索引 | 否 |
-| 多设备同步 | 完整正文按 revision 同步；运行中预览由可重连 SSE 快照同步 | 否（预览由服务端连 Gateway） |
-| 看记忆 | 低优先级，MVP 不做（见 §6） | — |
-| 从某条消息 fork | 面板从目标 entry 沿 `parentId` 回溯出祖先链，写成一个新 transcript 文件，`wx` 模式创建（存在即失败，防覆盖），头部记来源。见 §5.0 | 否（纯文件操作） |
-| 编辑某条消息重新生成 | 与 fork 同一套机制：回溯到被编辑消息的父节点，接上编辑后的新消息，得到一条新分支。见 §5.0 | 否（生成回复那步才连） |
-| 发消息到活会话 | **首版不支持，活会话只读**；继续在原有 OpenClaw 渠道发送 | 否 |
-| 生成回复（自建会话） | 见 §5.1 推理桥接 | **是** |
-| 运行状态与内容预览流 | SSE 推送 run 生命周期、OpenClaw 合并文本快照及工具开始/完成；不宣称逐 token | **是** |
-| 停止生成 | `chat.abort` 或 `sessions.abort` RPC | **是** |
-| 工具调用 / 思考块展示 | 解析器保留所有 content block；UI 默认折叠、可展开 | 否 |
-| Markdown / LaTeX 渲染 | 消息文本按 Markdown 渲染，LaTeX 数学公式由本地 KaTeX 渲染；安全与降级边界见 §8.7 | 否 |
-| 消息复制 / 代码块复制 | 整条消息复制到剪贴板；每个代码块单独复制。见 §8.7 | 否 |
-| 消息时间显示 | 读 entry 的 `timestamp`，按浏览器本地时区渲染日期时间。AI 感知时间不做，交给 gateway | 否 |
-| 会话重命名 | 改面板侧 metadata 的 `title`，不写源文件；对只读会话同样只改面板记录。见 §4.3 | 否 |
-| 会话归档 / 取消归档 | 面板 metadata 的 `archived`（与 `hidden` 正交）；归档会话仍在归档列表可见；rescan 不复现。见 §4.3 | 否 |
-| 会话删除 | 只读会话=置 `hidden`（主列表与归档列表都不列，永不碰源文件）；面板自建会话=归档后经二次确认彻底删除面板文件，git 兜底。见 §4.3 | 否 |
-| 会话记忆倾向标记 | 面板 metadata 的 `memoryDisposition`（`eligible` / `scratch`）；两者都读取既有记忆，只有 eligible 可进入面板提炼/确认/写入流程。见 §5.5 与 `decisions/panel-memory.md` | 标记本身不连；提炼时连 gateway |
-| OpenClaw 自带命令 | 普通消息路径永久拒绝 `/`；命令走独立派发接口，当前支持 A（面板原生）+ C（只读信息类），D 类默认不做；`/bash` 当前也不实现。见 §5.4 与 `decisions/slash-commands.md` | 新增命令来源与 DTO 需先评审 |
-| 登录 | 账号密码，保持登录态；纯本地，不连 gateway | 否 |
-
-fork 和编辑重发共用底层（见 §5.0）：都是「从目标 entry 回溯祖先链，派生出一条新会话线」。先实现这个底层函数，两个功能都基于它。
-
-**解析器硬要求**：transcript 里 tool_use / tool_result 和思考块都是独立 content block，解析和序列化必须**保留所有类型的 content block，不能只留 text**。这条与 §3“序列化写回逐行一致”的验收相互印证。
-
-### 5.0 fork / 编辑重发的底层：回溯祖先链（不是复制文件前缀）
-
-**为什么不能简单「拷贝文件到该行为止」**：transcript 是 `id + parentId` 构成的树，源文件里可能已经有分叉。文件里物理排在目标消息之前的行，不一定是目标消息的祖先——可能是别的分支。所以「文件前缀」≠「目标消息的上下文」。
-
-**正确做法**：
-1. 从目标 entry 出发，沿 `parentId` 一路回溯到根，得到这条**祖先链**（有序的 entry 列表）。
-2. 保留这条链依赖的非 message 条目（`model_change`、`thinking_level_change`、`custom` 等落在链上的）。
-3. **tool_use 和它对应的 tool_result 不能拆开**：如果祖先链的截断点落在一次工具调用中间，要把这一组一起纳入或一起排除，不能只留半边（否则下一轮模型看到一个没有结果的工具调用，上下文不完整）。
-4. compaction、model_change 等特殊 entry 如何继承：跟随祖先链，落在链上就带上。
-5. 生成新的 session 头（新 `recordId`）和来源元数据（`parentRecordId` + `forkedFromMessageId`）。
-
-**消息 ID 的处理**：新分支里，祖先链上的 entry 可以沿用原 `id`（在单个 transcript 内仍唯一）。但要清楚：这样 `id` 只在本 transcript 内唯一，不是全局唯一。若以后要做跨会话的全局搜索或引用，必须带上 `recordId` 命名空间（`recordId` + 消息 `id` 才全局唯一）。
-
-**fork 与编辑重发的差别**：
-- fork：祖先链到目标 entry 为止，之后等用户发新消息。
-- 编辑重发：祖先链到被编辑消息的**父节点**为止，接上编辑后的新消息。
-
-验收（纯文件操作，不连 gateway，可完整单测）：
-- 构造一个已有分叉的源 transcript，从某个深层 entry fork，产出的祖先链正确（只含该 entry 到根的真实祖先，不含旁支）。
-- 截断点落在工具调用中间时，tool_use / tool_result 不被拆开。
-- 新分支文件序列化后仍满足 §3「逐行完整 JSON」；来源元数据正确指向父记录。
-
-### 5.1 推理桥接（连 gateway 那一步）
-
-只有**自建会话**走这套流程（活会话是调 `chat.send` 交给 gateway，见 §5、§5.3）。
-
-#### 基本流程（已经实测）
-面板要为一条自建会话生成回复时：
-1. 调 `sessions.create` 创建一次性临时 session，再覆盖 gateway 为它创建的 transcript。物化内容停在最新用户消息的父节点，也就是上一轮完整 run；最新用户消息不能提前写入。
-2. 在发送前由服务端 Gateway WebSocket 订阅该临时 session；订阅失败只降级预览，不阻止生成。随后调 `sessions.send`，将最新用户消息作为 `message` 提交，并带面板生成的 idempotencyKey。
-3. gateway 在它自己的 `sessions.json` 里留一个条目——这是推理工作区，面板不把它当权威数据。
-4. 等 session 结束后读取临时 transcript 的新增行，校验 gateway 新增的 user entry 与所提交消息一致并跳过它，将后续的**一整组 entry**以原子文件替换方式提交到面板 transcript。**不是只存最后一行，也不把 append 当作事务。**
-5. 清理推理工作区（见下方「工作区清理」）。
-
-**必须遵守的约束（否则自动记忆归档会失效）**：推理必须跑在固定的同一个 workspace 下，且保留完整的 prompt 和工具，不要用 `promptMode: none` 或 `minimal` 把 `memory_search` 工具裁掉。原因见方案文档 §5.4。
-
-#### 正确性细节一：一次 run 是一组 entry，整组原子写入（关键原则）
-**持久化的单位是「一次 run 产生的一组完整 entry」，不是「一条回复」。** 一次带工具的 run 会依次产生：assistant 思考 → tool_use → tool_result → 可能再一次 assistant/tool_use → 最终 assistant 回复，可能还带 custom 事件和 usage 信息。只存最后一条 assistant 行会导致：UI 看不到工具执行过程、下一轮模型缺少工具调用和结果的上下文、fork 到工具附近时语义不完整、transcript 不再是 OpenClaw 格式的忠实副本。
-
-**这组 entry 从哪来（§0.5 实验第 3 条要回答的）**：先确认 gateway 给客户端的事件是否足够重建这一组 entry；如果不够，则在推理结束后读取临时工作区 transcript 里新增的那几行，复制进面板存储。两条路都要保证拿到的是完整一组，不是只有最后一行。
-
-**状态流与 transcript 提交分离**：run 生命周期是面板持久化的服务端状态，SSE 是可丢失、可重连的观察通道；上游 `chat` / `session.tool` 只形成进程内临时预览。**面板自己的 transcript 文件在这次 run 结束前一个字都不写。** run 正常结束、拿到完整的一组 entry 后，先将待提交结果落到受限 run 记录，再以临时文件 + fsync + rename 原子替换提交完整 transcript。预览的粒度由 OpenClaw 决定，当前约 150 ms 合并一次，并非逐 token；这不改变提交语义。
-
-这样做的原因：§3 要求 transcript「序列化写回逐行一致」，每行必须是完整 JSON。边流式边写会在崩溃时留下残缺行；一组 entry 若只写了一半（比如写了 tool_use 没写 tool_result）则语义损坏。所以「展示用的流式」与「持久化用的整组写入」分开，文件里永远是完整行、完整组。
-
-#### 正确性细节二：中断与失败的处理
-生成过程可能因三种情况中断：用户点停止（`chat.abort` / `sessions.abort`）、gateway 断开、推理自身报错。三种统一这样处理：
-- **面板文件层面**：因为遵守细节一（整组 entry 结束后才原子写入），中断时面板存储里那条会话**没有写入这次 run 的任何内容**，保持在中断前「最后一组完整 entry」的干净状态，不需要回滚。
-- **界面层面**：流式内容明确是临时预览。上游观察连接断开时保留已有预览并标注降级，生成继续；run 明确失败或中止后移除未提交预览，显示终态和**重试**入口，避免把它误认为 transcript 历史。
-- **重试语义**：重试 = 从这条会话的最后一条用户消息重新发起一次推理，等同于「编辑重发」不改内容的特例，复用 §5.0 那套底层，不把这次失败的部分写进文件。
-- **可选增强（第一版可不做）**：若希望把中断时已生成的部分也存进历史，须将拿到的那几个 entry 作为**完整 entry**写入（每个仍是完整 JSON），并在这组上带一个 `incomplete: true` 之类的标记，供解析器识别、界面标注。不能写入残缺行或半组。第一版默认不保存中断的部分内容，只保证文件不脏。
-
-#### 正确性细节三：同一会话的并发生成串行化
-同一条自建会话，可能有两个浏览器标签同时点「生成」。规则：
-- **面板服务端按 recordId 持久化唯一非终态 run**。同一会话已有 accepted / running / materializing / committing / aborting run 时，不同 idempotency key 的新请求直接拒绝并提示「该会话正在生成」。同 key、同请求返回原 run；同 key、不同请求稳定报冲突。
-- 进程内协调器只负责当前进程的执行顺序，不能再作为权威锁。服务重启后先恢复 run 记录和活跃占用，再开放写接口，避免启动窗口创建第二个 run。
-- completed / failed / aborted 是不可逆终态。所有状态转换串行化且只向前推进，abort 与 complete 竞争时以 transcript 是否已经原子提交为边界：提交前取消可以胜出，提交后 completed 必须胜出。
-
-#### 正确性细节四：后台 run、断线与崩溃恢复
-
-- 创建顺序固定为：校验请求与 revision → 计算请求指纹 → 以 `0600` 原子持久化 accepted run → 才允许启动 OpenClaw bridge。durable create、执行中合并和完成态缓存共用同一 SHA-256 指纹：按固定顺序编码 `recordId`、消息、`expectedRevision`（未提供时为 `null`）、有序附件 ID 和仅在为真时出现的 `requestOutputs`；因此属性声明顺序与显式 `undefined` 不影响身份，附件顺序、revision、消息或产出意图变化均冲突，同时保持既有 `requestOutputs: false` 指纹不变。附件支持之前的 durable run 仅在重试仍无附件且不请求产出时兼容早期不含 `attachmentIds` 的 hash；新 run 始终只写入当前形状，不重写旧权威记录。请求正文只在非终态恢复确有需要时暂存，进入终态即清除；终态保留指纹以维持幂等。结构化 compact 不接受 idempotency key，也不维护请求缓存，继续由会话独占锁与 revision CAS 保证一致性。
-- run 使用创建时持久化的 `plannedUserEntryId`。若进程在 transcript rename 后、completed 状态落盘前退出，启动恢复通过该 ID 核验 transcript 已提交并补写 completed，绝不重复追加。
-- bridge 在临时 session 创建、历史物化、gateway 接受 send、entries 物化四个边界回调 run manager。完整 entries 必须先持久化，随后才允许清理临时 session，避免「临时结果已删、面板尚未接住」的永久丢失窗口。
-- SSE 订阅首帧发送最新快照，每个状态版本带单调序号。浏览器在终态前遇到 EOF 或网络错误时保留 runId，重新查询并订阅；只有明确 completed 才清对应草稿。
-- 服务重启时：accepted 且恢复负载完整的 run 可以重新调度；已提交但未标终态的 run 补成 completed；已有暂存 entries 的 run按基线 revision精确补提交；无法证明可以安全续跑的 gateway run 标为 `RUN_ORPHANED_AFTER_RESTART`，绝不盲目重发可能已经产生工具副作用的任务。
-- 服务启动或首次活跃查询会全量扫描权威 run JSON，并据此重建仅存在于进程内的 active-run 派生索引。accepted 只有在 run 文件原子落盘并完成目录 durability 后才加入索引，终态也只有持久化成功后才移除；任一 run 原子写返回失败时，因 rename 可能已经发生而必须作废派生索引，下一次查询按磁盘当前可见的权威文件重建。创建占用检查、活跃查询和附件维护不再扫描全部历史终态 run。该索引没有独立持久格式，删除内存状态或重启后仍完全由 run 文件恢复。
-- run 查询、订阅和停止均受登录态约束；停止必须等待服务端确认。内部临时 session / gateway 标识仅用于受限持久化和日志诊断，不下发给浏览器。
-- 长程任务的 OpenClaw 执行上限与面板 watcher 分离：`PANEL_GATEWAY_RUN_TIMEOUT_MS` 默认 30 分钟，随后以 `PANEL_RUN_WATCHER_GRACE_MS`（默认 30 秒）继续等待 terminal trajectory。watcher 增量读取 trajectory，并区分上游 timeout、abort、普通失败、未观察到启动和 watcher 自身超时。停止或超时后的清理必须等到 terminal 且 gateway 报告 `no-active-run`；无法确认释放时保留 artifact 与 `cleanupPending`，不得删除仍可能运行的 session。
-- 失败日志只记录结构化标识和经过白名单筛选的 trajectory 状态（panel run、record、runtime、临时 session、gateway run、等待时长和布尔终止标记），不记录 prompt、模型输出或 CLI stderr。
-- 终态 run 记录当前无限期保留，仅保留请求指纹、终态、revision 与必要诊断字段，不保留消息正文或模型输出。这是有意的正确性取舍：在引入「终态记录 + 更长期幂等 tombstone」两级回收前不能直接 GC，否则旧 idempotency key 会再次执行。run 数量增长后再单独实现带 tombstone 的保留期策略。
-
-#### 工作区清理（Owl 已选定）
-`sessions.delete` 只注销索引并把 transcript 改名，trajectory 仍会残留。第一版不维护 OpenClaw 补丁，采用以下明确方案：
-
-1. 每个真实 agent 对应一个无渠道绑定的专用 runtime agent。两者共用目标 workspace，但 sessions 目录隔离。
-2. 每轮先调用官方 `sessions.delete` 注销。
-3. 再只在该 runtime agent 的 allowlist sessions 根目录内，按本轮服务端创建并登记的 sessionId 删除当前 OpenClaw 版本已验证的 transcript 归档和 trajectory artifacts。
-4. 清理拒绝符号链接、路径越界、未知文件类型和非 allowlist 根目录；绝不清理真实 agent 的 sessions 目录。
-5. 第一版仅支持 OpenClaw `2026.6.11`。版本不符时拒绝推理和清理，升级后先重跑兼容实验。
-
-### 5.2 连接 gateway 的方式
-
-- 默认通过 localhost WebSocket 连 `127.0.0.1:18789`；配置与端点 resolver 可按下述受限规则改变目标。
-- 固定 OpenClaw `2026.6.11` 的握手身份为 `client.id=gateway-client`、`client.mode=backend`、`role=operator`，使用共享 token/password。direct-loopback backend self-pairing 不需要伪造浏览器设备身份；远程或浏览器身份不继承该保证。
-- 请求 scope 必须恰好是 `operator.read`、`operator.write`、`operator.admin`；`hello` 必须是 `hello-ok`、版本仍为 `2026.6.11`、角色仍为 operator，且授权 scope 集合逐项精确相同。缺项、额外/未知项、重复项或错误角色一律 fail closed，不能利用 admin 蕴含关系放宽 `hello` 校验。
-- 每条 socket 分配独立 source/generation。open、message、challenge、hello、error、close 和 send callback 处理前都必须确认仍是当前 generation；业务 chat/tool 事件只有在当前 generation 完成精确 hello、全局订阅且授权绑定仍有效后才投递。pre-hello 与旧 socket 事件忽略；当前 socket 的 send throw、错误 callback 或非 OPEN ready 状态统一注销该 generation、稳定拒绝 pending、关闭并重新握手，旧 callback 不得注销新连接。
-- RPC 采用版本化 default-deny 允许列表：read 仅有 `status`、`commands.list`、`tools.catalog`、`tools.effective`、`sessions.list`、`sessions.subscribe`、`sessions.messages.subscribe` / `unsubscribe`、`artifacts.list` / `download`；write 仅有 `sessions.create` / `send` / `abort`；admin 仅有 `sessions.patch` / `compact` / `delete`。任何未登记方法都必须在建立连接或发帧前返回 `GATEWAY_RPC_METHOD_NOT_ALLOWED`。
-- scope/role/hello 违反契约返回 `GATEWAY_SCOPE_CONTRACT_VIOLATION`（版本不符仍用 `OPENCLAW_VERSION_UNSUPPORTED`）；上游握手拒绝与 RPC 拒绝分别归一为 `GATEWAY_HANDSHAKE_DENIED` / `GATEWAY_REQUEST_DENIED`。错误、close reason 与诊断日志不得带 token/password、上游原始 payload、消息正文、prompt 或私有路径。
-- `PANEL_OPENCLAW_STREAMING=0` 只关闭临时文本/工具预览；同一控制连接与 read/write/admin scope 仍用于生成、typed 命令、附件和临时 session 生命周期。连接断开后，已接受 run 的终态继续由 trajectory watcher 判定；新的控制 RPC 不自动改走不同凭据或扩大 scope。
-- 配置 resolver 只解析严格 JSON。`PANEL_OPENCLAW_CONFIG_PATH` 是 `OPENCLAW_PROFILE` 声明时唯一允许的显式配置路径；没有它时 profile 必须先于其他 selector fail closed。否则按官方 `OPENCLAW_CONFIG_PATH`、`OPENCLAW_STATE_DIR` 内 new/legacy 两候选、`OPENCLAW_HOME` 内四候选、兼容旧版 `OPENCLAW_CONFIG` 的顺序选择；目录候选只对 `ENOENT` 继续，找到但不可读/解析失败就拒绝且不落到低级 selector。无 selector 时在 OS home 内依次尝试 `~/.openclaw/openclaw.json`、`~/.openclaw/clawdbot.json`、`~/.clawdbot/openclaw.json`、`~/.clawdbot/clawdbot.json`。空白显式路径直接拒绝。本批拒绝 JSON5，也拒绝严格 JSON 中任何 `$include` 或未转义 `${VAR}`，避免部分解析；`$${VAR}` 保持字面量。失败只令控制 transport unavailable，不影响本地权威会话只读浏览。
-- 共享 secret 是单一 trusted-local operator 的 owner 级凭据，不是多租户隔离。同一本机端点的凭据选择必须与固定 OpenClaw resolver 对齐：`gateway.auth.mode=none` 无条件禁用 admin 连接；`token` / `password` mode 只取对应字段；`trusted-proxy` 只允许同机 direct fallback password，且要求 `gateway.auth.trustedProxy.userHeader` 为非空白字符串、`gateway.trustedProxies` 为元素均非空白的非空列表、最终选中非空 password、配置 token 不存在并且未声明 `PANEL_OPENCLAW_GATEWAY_TOKEN`，连接只能发送 password。配置 token 的明文或 SecretRef 均算 presence；panel token 只要声明即拒绝。mode 未设置时，只有配置 token 或只有配置 password 才推导，同时存在两者因歧义拒绝。已声明的面板环境凭据组只覆盖该 mode 选中的值，整组全为空白不能回落。
-- 本机端点的 scheme 从 `gateway.tls.enabled` 推导；port 优先级必须是非空合法 `OPENCLAW_GATEWAY_PORT` > 合法 `gateway.port` > `18789`。已声明但空白或非法的环境值直接 fail closed，不得回落配置或默认值。origin 以 scheme、规范化 port 和 discriminated host identity 比较。localhost、127/8、`::1` 与 IPv4-mapped loopback 是同类 alias，真实 DNS hostname（包括字面 `loopback`）属于另一类，禁止用合法 hostname 充当 sentinel。公网 hostname/IP 的 `ws://` 必须拒绝；明文只允许 loopback、RFC1918、link-local、CGNAT、IPv6 ULA、`.local` 与 `.ts.net`，其余必须 `wss://`。TLS 证书验证不能关闭。
-- remote mode 不能回落本机默认地址，`gateway.remote` credential 独立于本机 auth mode。配置型 remote 端点必须有非空且安全的 URL、显式 `transport: "direct"`，并且未配置 `tlsFingerprint`；无 panel credential override 时使用 remote 配置凭据，非空 panel credential group 可覆盖值但不能改变 provenance 或绕过 transport 门禁。与配置 remote URL 同源的显式 panel URL 还必须带该凭据组，并继续通过 direct / no-fingerprint 检查。只有显式 panel URL 改变 origin，或配置 remote URL 缺失时，URL 与非空 panel credential group 才构成自包含的独立端点，不得继承 remote/local 配置 secret、transport 或 pin；本机模式仅在显式 URL 与配置 origin 不同时采用同一独立边界。该配置只是操作员断言，不改变目标服务端 mode，须同步确保目标端强制对应 secret，并由 #48 验收。
-- SecretRef string/object 必须计入 credential presence、mode、双凭据歧义与 trusted-proxy 互斥。面板不得自行执行 env/file/exec provider；选中的 ref 只有在对应非空 `PANEL_*` 明文覆盖且 endpoint/mode 边界允许时才能使用，否则稳定脱敏 fail closed。完整 provider resolution 需另立权限与版本门禁工作项。轮换与回滚同步更新两端；本批不迁移存储、不要求重新签发凭据。无法解析安全 transport 时保留只读面板，Gateway 控制调用返回 `GATEWAY_TRANSPORT_UNAVAILABLE`，不得回落逐请求 CLI。
-
-确定性契约验收（fake WebSocket，不接真实 runtime）：
-- 精确的 role/scope `hello` 可连接；缺项、额外/未知项、重复项和错误角色均在任何业务 RPC 前拒绝。
-- read/write/admin 三组现用方法都在允许列表；未登记方法不创建 socket、不发送帧。
-- 握手拒绝、权限不足、恶意上游 message/details 与 close reason 只产生上述稳定错误和脱敏诊断。
-- 重连后重新做同一精确握手并恢复订阅，不能沿用旧连接的授权状态。
-- pre-hello 数据不投递；旧 generation 的迟到 challenge/hello/data/open/error/close/send callback 不改变新连接。同步 send throw、callback error 和 ready failure 都关闭坏 socket、拒绝该代 pending，并只创建一个可恢复的新 generation。
-- `PANEL_OPENCLAW_STREAMING=0` 仍装配控制 transport；缺失凭据装配稳定拒绝 transport，二者均不得触发逐请求 CLI fallback。
-- selector 回归覆盖 panel path 优先、profile 在无 panel path 时的拒绝、state/home/default legacy 候选、选中路径空白/缺失/不可读/严格 JSON 解析失败，以及端口与凭据不会从其他来源误投。严格 JSON 中 `$include` 或未转义环境替换也必须拒绝，`$${VAR}` 字面量不误判；失败只降低 Gateway 控制可用性且保持脱敏。
-- 本机 `gateway.auth.mode=none` 带任意遗留或同端点 `PANEL_*` secret 时都不创建 admin socket；token/password mode 只发送对应凭据。trusted-proxy 缺 userHeader、trustedProxies 为空/含空白项、缺 password、配置 token presence 或声明任意 panel token 时均拒绝；满足结构要求且只有 password 时只发送 password。SecretRef presence 参与单凭据推导、双凭据歧义和互斥；选中 ref 无对应 panel override 时拒绝。
-- `OPENCLAW_GATEWAY_PORT` 的合法值优先于 `gateway.port`，后者优先于默认 `18789`；环境值已声明但为空白、格式非法或越界时不回落。本机 TLS 配置生成 `wss://`；loopback aliases 同源，真实 hostname `loopback` 不继承本机 secret。loopback、private、link-local、CGNAT、ULA、`.local`、`.ts.net` 明文正例与公网 hostname/IPv4/IPv6 明文负例均有覆盖。
-- remote URL 缺失、空串或空白时不回落本机；只有自包含的 panel URL + 非空 panel credential group 可独立解析。配置型 remote 的 SSH/默认/非法 transport 与 fingerprint 均拒绝；同源 panel URL 也不能绕过这些检查，不同源 panel URL + 自带凭据才进入独立 provenance。已配置 direct remote URL 的 token/password/both 保持独立解析。所有拒绝使用稳定 code，且错误和日志不泄露凭据、ref、配置正文或路径。
-
-真实 runtime 的消息、IM 隔离和清理验收仍只在无渠道绑定的测试 agent 上显式执行，不属于每次普通单元测试，也不由本次文档宣称已复验。
-
-### 5.3 向活会话发送消息的安全边界 ⚠️
-
-**首版结论：不开放这条写链路。**真实 active 会话与 reset 归档只读；以下内容仅作为未来版本风险依据，不是首版待验收功能。
-
-面板往**活会话**（绑定 IM 的会话）发消息，是调 gateway `chat.send`，让 gateway 追加到同一个上下文桶。这一步对真实 agent 有不可逆的外部影响：
-
-- gateway 生成的回复会按会话记录里的 `route` / `deliveryContext` 投递，**很可能同时发到 Owl 真实的 Telegram / 飞书**，且发出即不可撤回。
-- 因此这条链路只能这样验证：
-  - 测试 agent `paneltest` 没绑任何渠道，向它的活会话发送不会漏出去——**发送逻辑本身在 `paneltest` 上验**。
-  - 面板对真实 agent（`claude`、`main`）的**读、刷新、界面、多 agent 切换**可以无人时自主验证（只读、无外部影响）。
-  - 面板**向真实 agent 的活会话发送并生成回复**，必须等 Owl 在场时验证，不在无人时段做。
-- 这条写进 §6 分段：多 agent 的读与界面归第二段（可在真实 agent 上验读），向真实活会话发送归第三段（等 Owl）。
-
-### 5.4 OpenClaw 自带命令
-
-**v1 现状（保留，不回退）**：普通消息发送路径拒绝一切以 `/` 开头的输入，服务端在 bridge 之前以稳定错误码 `SLASH_COMMANDS_UNSUPPORTED` 拒绝，不写 transcript、不调用 gateway。完整分类适配设计、机制发现与源码依据见 [`decisions/slash-commands.md`](decisions/slash-commands.md)。
-
-**适配实现规格（首版做 A + C 两类）**
-
-核心安全不变量（违反即等于把 admin 权限暴露给误输入）：
-- **两条路径彻底隔离**：普通消息发送接口**永远拒绝 `/`**；命令**只从独立命令派发接口进入**（如 `POST /api/v1/sessions/<id>/command`，请求体是结构化的 `{ command, args }`，不是自由文本）。
-- **绝不把命令字符串带内塞进推理桥接的 `sessions.send`**（gateway 会把它当命令并以当前 admin scope 自动授权执行）。命令效果一律经面板原生操作或专用 typed RPC 实现。
-
-| 类 | 首版 | 实现 |
-|---|---|---|
-| A 面板原生（`/model` `/think` `/reasoning` `/new`） | ✅ | 写入面板会话 metadata（`modelOverride` / `thinkingLevel` 等）；下轮推理经 `sessions.create` 参数或 `sessions.patch` 应用到临时 session。`/new` 复用新建面板会话。与 §8.6「会话中途换模型」同一实现。**逐命令参数语义见下表。** |
-| B `/compact` | 归 §22 长上下文 | 物化历史后调 **`sessions.compact` typed RPC**（绝不把 `/compact` 送进 `sessions.send`）、读回压缩后 transcript、采纳进面板存储。不在本节单独实现。 |
-| C 信息类 | `/help` `/commands` `/status` `/models` `/tools` `/usage` | 调已核实的只读 RPC/CLI，或由面板基于 allowlist / 权威 transcript 生成，面板渲染，不产生写入。 |
-| D gateway 管理 / owner 全局（`/config` `/restart` `/reset` `/mcp` `/plugins`） | ❌ 默认不做 | 面板不暴露入口；用户在原生 surface 执行。 |
-| `/bash`（未来可能的面板原生能力，非命令代理） | ❌ 当前不做 | gateway 无命令执行 RPC。当前不设启用开关、不进 allowlist，派发一律拒绝；未来立项前先完成 §5.6。 |
-
-**命令补全与支持范围（allowlist 定位）**：客户端在输入框敲 `/` 时拉 `commands.list`（含 skill/plugin 动态命令）+ 面板原生命令做补全。**关键区分**：
-- `commands.list` **仅用于补全展示与参数提示**（命令名、描述、参数 schema），不代表面板会执行它。
-- 面板实际支持的命令，是一份**显式、版本化、默认拒绝（default-deny）的服务端 allowlist**（当前 = A 类 + `/commands` `/help` `/status` `/models` `/tools` `/usage`；`/bash` 不在本批）。补全列表里出现但不在 allowlist 的命令（如 `/skill`、`/goal`、`/tasks`、`/approve`、`/export-session` 等）在客户端灰显并标注「仅 OpenClaw 原生渠道可用」，不发请求；服务端仍以稳定错误码拒绝手工构造的请求。
-- **OpenClaw 升级新增命令时默认拒绝**，不因出现在 `commands.list` 而自动获得执行入口——新增命令要显式评审归类后才进 allowlist（见 engineering-decisions「版本控制与升级维护」）。这条是安全面不随上游漂移的保证。
-- `commands.list` 不返回 owner/surface/run 可用性，这三类由面板按分类判断或派发时由 gateway 执行层裁决。
-
-**A 类逐命令参数语义**（首版；写面板会话 metadata，下轮推理经 `sessions.create`/`sessions.patch` 应用）：
-
-| 命令 | 无参数时 | 有参数 | 值校验 | 恢复默认 | 生效时机 |
-|---|---|---|---|---|---|
-| `/model [m]` | 返回当前 override + 可选模型列表，不报错 | 写 `modelOverride` | 目录来源固定为服务端执行 `openclaw models list --json`；只接受 `available=true` 的规范 `key`，别名须先解析成该 key | `/model default` 清除 → 删除 `modelOverride`，回 agent 默认 | 写 metadata 即时生效，作用于**下一轮**推理（不影响进行中的 run） |
-| `/think [level]` | 返回当前 `thinkingLevel` + 可选值 | 写 `thinkingLevel` | 值须在 gateway 支持集内；当前模型不支持该 level 时**派发即拒绝并回报原因**，不静默降级 | `/think default` 清除 → 回默认 | 同上，下一轮生效 |
-| `/reasoning [mode]` | 返回当前 `reasoningLevel` 与 `on/off/stream` 三个可选值 | 写独立的 `reasoningLevel`，它控制思考内容可见性，**不是** `/think` 的别名 | 仅接受 `on`、`off`、`stream`（来自 2026.6.11 `commands.list` / `sessions.patch` schema） | `/reasoning default` 删除 `reasoningLevel`，回 agent 默认 | 同上 |
-| `/new` | **新建面板会话**（不是改当前会话 metadata） | 可带初始标题 | — | — | 立即创建，返回新 `recordId`，客户端切换到新会话 |
-
-- A 类命令**是否写入 transcript**：写一条 `custom`/`model_change` 类系统事件进面板 transcript（UI 显示为一条系统提示），使「本轮用了哪个模型/思考档」在历史里可见且随 fork 继承。`/new` 例外——它创建新会话，不往当前会话写事件。
-- **并发生成期间**：run 进行中时 A 类设置类命令入队到该轮结束后应用（或提示「生成中，稍后生效」），不中断进行中的 run；`/new` 不受影响。
-
-**C 类逐命令来源与语义差异**（只读，`operator.read`，不写入）：
-
-| 命令 | 数据来源 | 与原生命令的已接受差异 |
-|---|---|---|
-| `/commands` | `commands.list` 直接渲染 | 无实质差异；面板可额外标注哪些在 allowlist 内可执行 |
-| `/help` | 面板基于 allowlist + `commands.list` 描述**自行生成** | 展示的是**面板支持范围**的帮助，不是 gateway 原生 `/help` 全文 |
-| `/status` | gateway `status` RPC | `status` 是**全局运行状态**，不等价于原生某 session 内 `/status`；面板明示这是 gateway 全局状态 |
-| `/models` | 服务端执行 `openclaw models list --json`；响应取 `models[].{key,name,input,contextWindow,available,tags,missing}` | 这是 OpenClaw CLI 的配置可见模型目录，不是 session 内原生 `/models` 文本；只读、不改配置。因 `/model` 校验也依赖同一目录，纳入 C 类 |
-| `/tools` | gateway `tools.catalog` typed RPC，参数 `{agentId:<runtimeAgentId>, includePlugins:true}`；响应归一化为 `{scope:"configured-runtime-catalog", agentId, groups:[{id,label,source,pluginId?,tools:[{id,label,description,source,pluginId?,optional?,risk?,tags?,defaultProfiles}]}]}` | 展示的是该 runtime agent 的**配置层工具目录**，不是某一轮推理时的动态有效工具、授权裁决或当前 session tool state；不得把它描述成“本会话一定可调用”。 |
-| `/usage` | 面板读取当前权威 transcript，并沿当前 active parent 分支聚合 assistant entry 上模型上报的 `usage` 字段；响应为 `{source:"model-reported-transcript-usage", scope:"current-branch", estimated:false, tokens:{input,output,cacheRead,cacheWrite,reasoning,reportedTotal}, coverage}` | 这是当前分支已落盘消息里的**模型上报用量**，不是 gateway 全局账单，也不做 tokenizer 估算；缺少上报的 assistant 消息只计入 `coverage.missingUsageMessages`，`reportedTotal` 缺失时保持 `null`。 |
-
-> C 类命令只能在来源、参数、返回 DTO、与原生命令的差异写清后进入 allowlist。`/tools` 与 `/usage` 已按上表收敛为只读、可测试的面板语义；后续新增 C 类命令仍按同一门槛执行。
-
-验收：
-- 普通消息接口提交 `/` 开头文本仍返回 `SLASH_COMMANDS_UNSUPPORTED`，不调用 gateway、不写 transcript（回归 v1 行为，不因新增命令派发路径而松动）。
-- A 类：对面板会话设 `/model X` 后，metadata 记录 override；下一轮推理确实以该模型跑（在 `paneltest` 验），且该设置**不因临时 session 删除而丢失**（因为存在面板 metadata，不在临时 session）。
-- C 类：`/commands`、`/status` 返回 gateway 的真实数据，`/models` 返回 `openclaw models list --json` 的规范 DTO，`/tools` 返回配置层 runtime 工具目录，`/usage` 返回当前分支模型上报用量；这些操作只读，不产生配置写入或 transcript 变更。
-- **allowlist 默认拒绝**：补全列表里出现但不在 allowlist 的命令灰显且客户端不派发；手工构造 `/skill`、`/goal`、升级后未知命令等请求时，服务端以稳定错误码拒绝且不产生副作用。
-- D 类命令在面板无入口；即便手工构造派发请求，服务端也拒绝。
-- `/bash` 当前不在 allowlist，派发始终被拒绝；未来立项不属于本批验收（见 §5.6）。
-- 安全回归：命令派发接口同样受同源检查 / CSRF 保护与登录态约束（见安全基线）；命令字符串在任何路径下都不会进入推理桥接的 `sessions.send`。
-
-### 5.5 面板记忆模块（读取常开，沉淀受控）
-
-完整产品决定与 OpenClaw `2026.6.11` 的能力边界见 [`decisions/panel-memory.md`](decisions/panel-memory.md)。本节只规定实现合同。
-
-**读取合同：**
-
-- `scratch` 与 `eligible` 的普通生成请求都继续使用目标 agent 的共享 workspace、完整 bootstrap 和 `memory_search` / `memory_get`。不得根据 `memoryDisposition` 切换到无记忆 workspace，也不得删减记忆工具。
-- `memoryDisposition` 不加入 prompt 正文，也不改变权威 transcript；它是服务端记忆工作流的授权字段。
-- 读取旧记忆可能留下 OpenClaw 查询/召回统计，因此产品只承诺 scratch 不贡献本会话的新内容，不宣称 OpenClaw 内部状态字节级零变化。
-
-**处置与 UI 合同：**
-
-- 默认 `scratch`；新建、fork、编辑重发产生的新会话都为 `scratch`，不继承来源的 `eligible`。
-- UI 文案为「不整理进记忆」/「允许整理进记忆」，提供标题区或会话菜单入口；状态写入面板 metadata/只读 sidecar 并跨终端生效。
-- `scratch` 来源调用候选提炼或确认写入 API 时，服务端必须稳定拒绝，不能只靠前端隐藏按钮。
-- 从 `eligible` 改回 `scratch` 不删除已写入记忆；归档、隐藏或删除来源会话也不级联删除记忆。
-
-**只读记忆中心：**
-
-- 入口位于最左侧 Agent 栏的设置齿轮正上方，展开与收起 rail 顺序一致；它打开独立记忆工作区，不再把文件列表和正文塞进设置抽屉。入口具备 active/pressed 状态，再次点击或页面返回按钮回到进入前的会话视图与焦点。
-- 桌面工作区保留 Agent 栏，左侧为按类别折叠的文件树，右侧为 Markdown 正文；在记忆模式切换 Agent 只刷新对应树。移动端为树和正文两级视图，均提供明确返回动作。
-- agent 到 workspace 的映射只能来自服务端配置。读取 allowlist 固定为 `MEMORY.md`、`DREAMS.md` 与 `memory/**/*.md`，接口只接受 agentId 和服务端返回的 opaque/相对标识，绝不接受任意主机路径。
-- 使用与附件/输出相同等级的路径防护：realpath containment、拒绝 symlink/特殊文件、限制单文件与总响应大小；正文不进日志，响应 `no-store`。
-- 提供树状列表、查看、安全 Markdown 渲染，以及面板生成记忆的来源会话跳转；会话滚动记忆优先显示来源会话标题，稳定 hash 路径作为次要元数据，来源不可见时才回退到通用名称。不提供任意 workspace 浏览和在线编辑。
-
-**手动提炼与确认：**
-
-- 服务端从权威分支和上次成功 checkpoint 计算固定 entry 范围；浏览器不能提交 transcript、起止 entry 或目标路径。
-- 首次从 `scratch` 改为 `eligible` 且尚无 checkpoint 时，固定范围从当前分支第一条 entry 开始；后续只处理 checkpoint 之后的新增范围。
-- 候选提炼使用独立的内部 job/run 和一次性 session，沿用来源会话的有效 modelOverride、thinkingLevel 与 reasoningLevel。不得复用普通聊天 runId，不得把内部 user/assistant/tool/reasoning entries 提交到来源 transcript。首次输入为固定范围原文；后续输入必须明确包含该会话上一版已确认的完整记忆和 checkpoint 后固定范围原文，并要求输出修订后的完整会话记忆。
-- 提炼 session 只能获得经受支持版本验收的无写入工具能力；可保留 `memory_search` / `memory_get` 用于去重，但不得开放 shell、文件写入或其它有副作用的工具。优先验证受限 subagent session capability；不可用时使用专用受限 runtime，不能只靠提示词约束。
-- 提炼结果先作为带 batch id、来源 revision、throughEntryId、基线内容 hash 和候选内容 hash 的完整替换候选保存到 `PANEL_DATA_DIR`，不触碰 workspace、不推进 checkpoint。
-- 候选按整份 Markdown 预览和确认；首版不拆逐条候选卡片，也不提供逐条勾选/编辑。
-- 确认接口复核：来源仍为 `eligible`、候选 revision/内容 hash 未变、batch 未确认、checkpoint 和基线内容 hash 仍等于候选生成时的版本。成功后原子创建或替换该会话唯一的 `memory/ark-panel/<sha256(recordId)>.md`；不得与 OpenClaw 或其他会话共写文件，不得直接修改 `MEMORY.md` / `DREAMS.md`。
-- workspace 文件完成原子写与 durability 边界后，才原子记录 ledger 和 checkpoint。ledger 至少保存 agentId、recordId/source identity、entry 范围、内容 hash、目标相对路径、创建/确认时间和状态；正文留在候选/记忆文件，不复制进日志或索引。
-- ledger/checkpoint 持久化后，确认流程必须刷新共享该 workspace 的真实 agent、普通聊天 runtime 和记忆整理 runtime 三份 OpenClaw 文件索引，不能把 watcher 当作可靠提交通知。索引命令使用服务端 allowlist 的结构化参数且按逻辑 agent 串行；全部成功后才向 UI 报告“已建立索引”。若刷新失败，返回稳定的 `MEMORY_INDEX_REFRESH_FAILED`，明确文件已经安全写入；不得回滚记忆或 checkpoint，重复确认同一 batch 必须再次尝试刷新。
-- 同一来源使用 keyed mutex；确认按 batch id 幂等。候选生成后出现的新消息不进入该批，留待下一批。
-- OpenClaw watcher/index/promote 接手已确认的短期文件；面板不复刻 promote。删除短期源文件不能承诺撤销已被 promote 到 `MEMORY.md` 的副本。旧版逐 batch 文件在首次滚动确认时按 ledger/hash 组成基线；新版文件和 state 持久化后才安全清理，异常残留宁可造成可见重复，也不得误删不确定文件。
-- 手动移除会话滚动文件不表示“忘记”，也可能只是内容已整合进长期记忆后的 workspace 清理。memory status 在原有 `available`、`eligible`、`pending` 外返回稳定恢复枚举 `none` / `restore_or_rebuild` / `rebuild_only`，仍不暴露正文、路径、checkpoint 或 hash。UI 在缺失时显示「恢复面板记忆并继续整理」「从会话重新生成」「暂不处理」；恢复快照不可用时只显示完整会话重建与暂不处理，不使用“忘记”措辞。
-- 候选创建请求只接受 `mode: incremental|restore|rebuild`；浏览器不能提交恢复路径、entry 范围、checkpoint、正文、state 指纹或基线 hash。`restore` 只使用 `PANEL_DATA_DIR` 中与最新 confirmed ledger、v2 current hash、target 和 checkpoint 全部相符的完整候选快照，保留 checkpoint 并仅整理新增范围；无新增时以快照本身生成可确认的重建候选。`rebuild` 忽略旧面板记忆并从权威完整分支起点生成；上下文预算不足时返回既有稳定预算错误，禁止静默截断历史。v1 state、快照缺失/损坏/不安全时只能 `rebuild`。
-- 恢复预览不得写 workspace 或推进 checkpoint。候选额外绑定 state 指纹、生成时的目标缺失状态与固定来源范围；确认时做 CAS。目标在生成期间被重新创建或修改、state/checkpoint/hash 变化、竞争候选已确认或来源分支变化时拒绝覆盖。确认后才原子创建滚动文件并持久化 state/ledger，再刷新真实 agent、聊天 runtime 和记忆 runtime 索引；重复确认仍覆盖写文件后崩溃与索引重试窗口。
-
-**工具写入边界（Owl 2026-07-22 已定）：** 普通 scratch 对话保留完整 agent 工具；用户明确要求模型自行写记忆时允许发生。`memoryDisposition` 只约束面板管理的沉淀流程，不是 workspace 通用只读策略。候选提炼内部 session 则必须无写入副作用，因为确认前 workspace 不得改变；这两类 run 不能共用工具策略。
-
-验收：
-
-- 两种处置状态的普通受控推理均能取得同一份既有记忆证据，并保留 `memory_search` / `memory_get`；状态切换不改变 runtime/workspace。
-- scratch 的候选提炼、确认和定时任务入口全部由服务端拒绝；eligible 可生成候选，但未确认前 workspace hash 不变。
-- 提炼沿用来源会话的有效模型与思考设置；成功、失败、停止和重试前后来源 transcript revision 均不变，内部 tool/reasoning entries 不会出现在会话 API 或导出中。
-- 对受限提炼 session 做工具目录和实际调用验收：只读记忆工具可用，shell/文件写入及其它副作用工具不可用；不能证明时不得开放候选提炼功能。
-- 首次确认创建、后续确认原子替换同一条会话短期文件；完整候选、ledger/checkpoint、基线 hash 与当前文件一致，重复确认不产生第二份，竞争候选不能覆盖新版本，任意故障点不允许 checkpoint 超前。
-- 删除当前滚动文件后，存在有效完整快照时可在有/无新增消息两种情况下恢复并保留 checkpoint；快照不可用时只能从完整权威分支重建。恢复候选生成期间重新创建文件、修改 state、切换来源分支或并发确认均被 CAS 拒绝；确认前 workspace/checkpoint 不变，确认后文件/state/ledger/三索引顺序正确，进程重启与重复确认幂等。
-- 记忆中心不能读取 allowlist 外、越界、symlink 或超限文件；只读来源 transcript 在整个流程中保持逐字不变。
-- 启用 OpenClaw dreaming 前，在隔离环境验证临时 runtime transcript 不会绕过 disposition 摄取 scratch 正文；不能证明时不得把 dreaming 与 scratch 隔离组合标为受支持。
-
-### 5.6 `/bash`：未来可能的面板原生进程执行（仅立项检查清单，当前不实现）
-
-`/bash` 是**面板原生能力**而非 gateway 命令代理。下列内容目前只是立项前的安全检查清单，**不是完整实施规格**；所有数值和执行语义落定前不进入实现批次。默认行为只有一条：`/bash` 不在 allowlist，派发请求被拒绝。
-
-未来立项前提：
-- 当前版本不读取 `PANEL_ENABLE_BASH`，避免一个看似可用但安全语义未定的开关；服务端稳定拒绝 `/bash`。
-- 未来若增加开关，开启但登录未启用（或登录强度未达安全基线）时，服务必须拒绝启动。
-
-执行模型（未来立项时逐条定死并测试）：
-- **先决定能力类型**：若采用 `spawn(executable, args, { shell: false })`，这是结构化进程执行器，不支持管道、重定向等 shell 语法；若采用 shell 文本，则参数数组不能提供“防注入”保证，必须另做完整威胁模型。两者不得混称。
-- **cwd**：默认工作目录、是否允许 per-command 指定 cwd 及其边界校验均须明确（沿用 §0 路径/符号链接防护，拒绝越界）。
-- **环境变量**：传入子进程的 env 白名单；**绝不泄漏面板自身的密钥 / 口令哈希 / 会话密钥**给子进程。
-- **超时**：单条命令墙钟超时，到点强制终止。
-- **输出上限**：stdout/stderr 字节上界，超限截断并标注（沿用「不静默截断」——要显式告知被截断）。
-- **进程终止**：用户可中断正在跑的命令（复用停止生成的 abort 通道或独立 kill）。
-- **并发上限**：同时运行的 `/bash` 进程数上限，防止耗尽资源。
-- **参数编码 / 防注入**：若选择结构化进程执行器，使用 `{ executable, args[] }` 并以 `shell:false` 启动，绝不拼接 shell 字符串；若未来明确需要 shell 语法，本条作废并重新评审。
-- **审计日志**：每条 `/bash` 记录时间、命令、退出码、是否被截断 / 超时 / 中断，写独立审计日志。
-
-明确接受的权衡：一旦开启，「面板登录失守」在后果上等同于「shell 访问」。因此登录强度（慢哈希口令、限速、SameSite=Strict cookie、仅 localhost 监听 + SSH 隧道）是**开启 bash 的前提**，不是可选项。
-
-验收（`/bash` 若实现）：
-- 未开启时，`/bash` 派发被拒绝，返回稳定错误码。
-- 开启但登录未启用时，服务拒绝启动。
-- 开启且登录启用时：命令以数组参数执行（构造含 shell 元字符的参数不发生注入）；超时命令被终止；超限输出被截断并标注；审计日志记录每条执行。
-- 子进程 env 不含面板口令哈希 / 会话密钥。
-
----
-
-## 6. 开发分段（决定哪些能在无人时做，哪些等 Owl）
-
-### 第 0 段：桥接可行性实验（已完成，见 §0.5）
-实验已经产出 `实测记录.md`，Owl 已确认继续采用 2a′ 和专用 runtime agent 清理方案。
-
-**第 0 段与第一段可以并行**：第一段是不依赖这座桥的纯本地工作，实验跑的同时可以推进；但第一段里凡涉及「一次 run 如何搬回面板」的**数据模型定稿，要等第 0 段实验第 3 条的结论**，不要在实验出结果前把 entry 存储格式定死。
-
-### 第一段：整夜可自主完成（不连 gateway、可逆、可自测）
-按顺序做，每步做完自测通过再进下一步：
-1. 一页**工程决定**文档（见 §6 末尾「工程决定」），把技术选型、目录、错误码、索引原子写等先写清楚。
-2. 项目骨架：Node 服务端 + 前端脚手架，一个能起来的空壳。**从第一天就带上安全基线（见 §6 末尾「安全基线」），不要留到登录那步再补。**
-3. §3 transcript 解析器 + 序列化（**保留全部 content block 类型**：tool_use / tool_result / 思考块），单元测试。
-4. §4 会话索引 + 导入会话（活会话只读源文件、reset 归档快照、多 agent 分别扫描；索引可从磁盘全量重建），单元测试。
-5. §5.0 fork / 编辑重发的**文件层底层函数**（沿 parentId 回溯祖先链、tool 组不拆开），单元测试。纯本地文件操作，能完整自测。
-6. 侧边栏列表 + 搜索 + 多 agent 切换（联系人页）UI。
-7. §8 界面：claude.ai 风格暖色调、会话视图、消息树、工具调用/思考块可折叠、响应式适配多屏。
-8. 失败与中断状态的本地部分（见 §8.4）：transcript 里生成中断/失败留成什么样、界面怎么呈现、能否重试，先把不连 gateway 能定的部分做掉。
-
-这一段占工作量大头，全部能自己验收，可以整夜推进。
-
-### 第二段：连测试 agent 验证；真实 agent 只验读
-9. §5.2 连接 gateway，§5.1 推理桥接，接到测试 agent `paneltest` 上跑通（以第 0 段实验的结论为基础）。
-10. 停止生成、SSE 生命周期状态，以及 OpenClaw 合并文本/tool 事件的临时预览；上游观察断线只降级，不触发 abort。
-11. fork / 编辑重发接上真实推理（在 `paneltest` 上验证整条链路）。
-12. **斜杠命令（见 §5.4）**：普通消息路径永久拒绝 `/`（保留客户端与服务端双重拒绝测试）；命令走独立派发接口，当前支持 A（面板原生）+ C（只读信息类），按 default-deny allowlist 校验。`/compact` 归 §22 长上下文（经 `sessions.compact` typed RPC），`/reset` 等 D 类默认不做，`/bash` 当前不实现。
-13. **长对话有效上下文预算（已实现）**：2a′ 里每次推理的历史都由面板提供。`utf8-bytes-upper-bound-v3` 先取 OpenClaw 2026.6.11 等价 current branch；无 compaction 时只投影 `message`、`custom_message` 与非空 `branch_summary`，有 compaction 时只投影最新摘要、从 `firstKeptEntryId` 起到该压缩点前的 inclusive kept tail、以及压缩后的上述消息。旧 compaction、state 与 opaque custom 不重复计入。摘要使用上游 LLM-facing wrapper；本轮待发送文本始终计入。默认历史预算 100000 tokens，可配置；超限返回 `CONTEXT_BUDGET_EXCEEDED`，不调用 gateway、不写本轮消息，并提供压缩动作。估算仍是保守上界，不冒充模型 tokenizer。
-
-14. **持久 `/compact` 与交互闭环（已实现）**：仅允许面板自建会话；active/reset 在服务端以稳定 `SOURCE_READ_ONLY` 拒绝并引导先 fork。服务端以拒绝排队的同会话独占操作锁定 revision，物化 OpenClaw 2026.6.11 可识别的当前分支，在一次性 runtime 应用当前模型、thinking 和 reasoning override 后调用 `sessions.compact` typed RPC。普通消息路径仍拒绝所有 `/` 文本；输入 `/compact`、会话操作按钮、90% 状态动作和超预算错误动作共用同一结构化 command API，绝不发送命令文本。面板重新读取原临时 transcript，只采纳历史前缀完全不变且唯一新增、结构/父链/边界均合法，且用同一个 `ConservativeContextBudget` 复算后让有效上下文严格减少的 `compaction`，再原子追加到完整 transcript；没有有效减少时返回 `compacted: false` 与稳定 reason `NO_EFFECTIVE_REDUCTION`，权威 transcript 和 revision 均不改变。不得为了制造减少而自行改写上游的 `firstKeptEntryId`。会话 DTO 直接输出规范化 current branch；compaction 只暴露 `id`、`parentId`、`timestamp`、`summary`、`firstKeptEntryId`、`tokensBefore`。界面保留全部原始消息，以默认折叠 marker 安全渲染摘要并允许从压缩点 fork；导出 Markdown 同样保留消息和 marker。压缩期间禁发、禁重复压缩并禁用 fork/edit。首版不自动压缩。
-
-- **压缩前记忆提醒（已实现）**：scratch 直接压缩。eligible 会话通过同源鉴权的只读 memory status 检查 current branch 与 ledger checkpoint 之后是否存在有意义的新 message；返回 `available`、`eligible`、`pending` 和不含内部状态的恢复枚举，不暴露内容或 checkpoint id。仅在 runtime available 且 pending 时显示“整理记忆后压缩 / 直接压缩 / 取消”。前者复用既有整段候选预览；滚动文件缺失时再进入同一恢复/重建选择，只有确认写入并刷新索引成功后才继续压缩。取消、生成失败或确认失败均不压缩。记忆 runtime 不可用不阻止直接压缩。
-14. 多 agent 对真实 agent（`claude`、`main`）的**读、刷新、界面、切换**——只读、无外部影响，可在此段自主验证。
-
-第二段**只对 `paneltest` 验证"发送和生成"**；对真实 agent 只做只读验证，**不向真实 agent 的活会话发送消息**。
-
-### 第三段：必须等 Owl 醒着
-15. **移出首版：**不向真实 agent（`claude`、`main`）的活会话发送消息；未来若重新立项，必须由 Owl 在场并重新评估真实 IM 投递风险。
-16. 登录 / 登录态：账号密码（Owl 已定，纯本地一层，实现从简）。
-17. **已完成：**长对话有效预算、手动持久压缩、摘要 marker、fork/导出边界与 eligible 记忆提醒均已按第 13、14、22 项落地。
-18. 部署、端口、SSH 转发联调；git-crypt 数据目录加密（见方案 §二「数据保护」）。
-
-### 首版之后的路线（v1 已部署并在用，以下为 2026-07-12 追加）
-
-上面三段是首版的自主开发计划，已完成。以下是首版之后的增量，按 Owl 定的顺序推进。
-
-**排序决定（重要）：斜杠命令 → 长上下文，记忆功能插在中间。**
-理由：部分斜杠命令（如 `/compact`）本身就会改变上下文，且这些都是 gateway 在做。面板应先兼容它们的行为——活会话的压缩交给 gateway、如实读它压缩后的 transcript——之后再处理面板自建会话的长上下文，就有 gateway 行为可参照，更自然。
-⚠️ 但要记住：`/compact` 只解决**活会话**。面板自建/fork 会话是 2a′ 下面板自己物化历史喂给 gateway 的，压缩前 flush 永远触发不了（见方案 §5.4），这部分长上下文最终仍由面板自己承担。斜杠命令不会替它兜底。
-
-按顺序：
-
-19. **纯本地增量（不连 gateway，可随时做，与排序无关）：**
-    - §8.7 Markdown 渲染 + 消息复制 + 代码块复制。（已实现：纯 DOM 安全渲染，原始 HTML 不执行。）
-    - 消息时间戳 UI 显示（读 entry `timestamp`，本地时区）。（已实现。）
-    - §4.3 会话重命名 / 归档 / 取消归档 / 删除（面板会话彻底删除、只读会话仅隐藏）。（已实现。）
-    - 会话置顶、按 project 分组、当前分支导出 Markdown。（已实现；全部状态只存面板 metadata，导出不包含内部路径与隐藏元数据。2026-07-17 分组入口改为标题栏/列表共用的可访问快捷菜单，可选已有项目、移出分组或行内创建；项目目录包含正常与归档会话、排除隐藏来源并按大小写去重。）
-    - §5.5 记忆倾向标记的存储与处置 UI 已完成（打标本身不连 gateway）。
-20. **记忆模块（分批实施）：**
-    - 20a（已完成）：处置状态 UI；明确 `scratch` / `eligible` 都读取既有记忆，仅后者可进入沉淀流程。
-    - 20b（已完成）：独立只读记忆工作区，按 Agent 和类别树状列出并查看 `MEMORY.md`、`DREAMS.md` 与 `memory/**/*.md`，可从面板记忆跳回来源会话。
-    - 20c（已完成）：eligible 会话使用同一有效模型但独立无副作用 session 的增量候选提炼、整份预览确认、唯一短期文件写入、ledger/checkpoint 与失败恢复；内部轨迹不进入聊天上下文。隔离实机证据见 `testing/memory-runtime-acceptance-2026-07-22.md`。
-    - 20d：手动流程稳定后再设计服务器端定时整理；自动确认默认不进入首版。
-21. **斜杠命令适配（A + C）：** 按 [`decisions/slash-commands.md`](decisions/slash-commands.md) 的分类适配设计与 §5.4 实现规格。守住两条路径隔离的安全不变量（普通消息路径拒绝 `/`，命令只走独立结构化派发接口，命令字符串绝不带内进 `sessions.send`）。
-    - A 面板原生（`/model` `/think` `/reasoning` `/new`）：写面板会话 metadata，推理时应用；与 §8.6 换模型同一实现。
-    - C 信息类为 `/commands`、`/help`、`/status`、`/models`、`/tools`、`/usage`；`/tools` 是配置层 runtime 工具目录，`/usage` 是当前分支模型上报用量。
-    - `/` 补全拉 `commands.list`（含 skill/plugin 动态命令）。
-    - B `/compact` 归第 22 项；D 类默认不做；`/bash` 当前不实现，也不提供启用开关。
-22. **长上下文完整策略（含 B 类 `/compact`，已完成）：** 面板自建会话物化临时 session 后调用 `sessions.compact` typed RPC，读回并严格验证新增 compaction；候选还必须通过面板预算复算，确认有效上下文严格减少后才采纳进面板存储，绝不把 `/compact` 送进 `sessions.send`。首版采用手动时机；完整旧消息继续可见，最新 compaction 决定有效上下文；fork 在边界前不继承摘要、在边界及之后继承摘要。eligible 的记忆提醒复用 §5.5 的显式候选/确认/ledger 路径，scratch 不沉淀。
-23. **附件/多模态输入与模型产出文件（已实现）：** 文件选择、图片粘贴和拖放均先上传到面板私有存储；run 只提交附件 ID，服务端复核会话归属后把原始字节交给 OpenClaw。Office 不转换，模型按需用 Python/skill 读取。OpenClaw 为当前 run 登记的 artifact 始终采集；可信 workspace 下的隔离 outputs 目录只在本轮 `requestOutputs: true` 时准备，并且只有这时才向送入 runtime 的 user message 附加产出指令。普通轮次保持用户原文。`requestOutputs` 必须是布尔值、进入幂等指纹与非终态恢复数据，但客户端绝不能提交路径。收集结果复制入面板存储后清理暂存。图片草稿使用浏览器本地 Blob URL 缩略图；已提交图片只通过登录鉴权后的专用接口内联真实解码、有界的单帧 PNG/JPEG/WebP，点击可在灯箱查看并下载原图。
-24. **中英文界面（已实现）：** 原生前端使用轻量语义键字典，不执行 HTML 翻译内容；简体中文与英文字典的键和占位符由测试保证一致。`locale` 保存到服务端账户设置并跨终端生效，旧设置缺失时按 `zh-CN` 读取。静态 HTML 保留中文首屏 fallback，动态消息操作、附件、运行状态、命令和错误按当前语言渲染。
-25. **持续维护：** OpenClaw 版本升级适配，见工程决定「版本控制与升级维护」。
-
----
-
-### 安全基线（第一天起就要有，不等登录那步）
-- 面板服务端**只监听 `127.0.0.1`**，不对外暴露端口（外部靠 SSH 转发）。
-- HTTPS 反代只通过启动时严格校验的单一 canonical `PANEL_PUBLIC_ORIGIN` 和精确 Host allowlist 扩展入口；监听地址不变，不信任 `Forwarded` / `X-Forwarded-*`，不根据请求学习 origin。Host 失败为 `421 HOST_REJECTED`；登录和 mutation 的 Origin 缺失、`null` 或跨源继续失败，mutation 仍同时要求 CSRF token。
-- gateway token **绝不下发到浏览器、绝不写进日志**。
-- **日志默认不记录消息正文和提示词**（会话内容和记忆一样敏感）。
-- 所有 Markdown surface 默认不得为外部 HTTP(S) 图片创建 `<img>`、`fetch` 或代理请求；页面 CSP 的 `img-src` 只允许 `'self' blob:`。允许的显式跨主机导航必须去除 Referer；面板同 hostname 异 origin 不得成为可导航入口。
-- 所有修改类接口要有 CSRF 防护或严格同源检查。
-- 登录做了之后：密码用慢哈希（如 argon2/bcrypt）保存、不进仓库；cookie 设 `HttpOnly` + `SameSite=Strict`；登录尝试限速。
-- **不接受客户端传任意路径**：agent 用 allowlist，会话文件路径由服务端从 agentId + recordId 推导，防目录穿越和符号链接绕过。
-- 测试夹具必须脱敏（见 §0 约束 7 的工具副作用控制）。
-
-### 工程决定（开工前补一页，避免边写边返工）
-先写清楚再动手，内容至少覆盖：
-- Node 版本、包管理器、是否用 TypeScript。
-- 服务端框架、前端框架。
-- API 路由风格；流式用 SSE，约定事件格式。
-- 数据目录的配置方式（环境变量 / 配置文件）。
-- 错误码和错误响应格式。
-- **读取索引只作进程内可重建缓存**：不定义持久格式；能从扫描 transcript/metadata 全量重建；fork 来源等权威元数据进 transcript 头或独立 metadata，不只存索引。
-- OpenClaw 版本兼容范围，启动时做版本检查（打包源码路径、RPC 名称都可能随版本变）。
-- 备份、恢复、迁移怎么验收。
-
-## 7. 实现时需要继续实测的兼容细节
-
-这些是侦察没有查到底、但实现时一试便知的细节。Codex 遇到时先在测试 agent 上实测，把结果记进代码注释或一个 `实测记录.md`：
-
-1. **已确认：推理 RPC** 使用 `sessions.create` 登记一次性 session，再覆盖 transcript，并用 `sessions.send` 提交最新用户消息。实现时只需把复现脚本中的参数收束进适配层。
-2. **已确认：connect 握手与权限契约**。OpenClaw 2026.6.11 的本机服务端集成使用 `client.id=gateway-client`、`client.mode=backend`、共享密钥与 operator 角色，命中官方 direct-loopback backend self-pairing 分支。生产控制连接请求并精确核验 `operator.read` / `operator.write` / `operator.admin`，RPC 矩阵见 §5.2；远程 Gateway 不假设可跳过设备配对。`PANEL_OPENCLAW_STREAMING=0` 只关闭预览，不能据此把控制连接描述为 read-only。
-3. **`resolveContextInjectionMode` 的行为**：确认 `SOUL/USER/MEMORY` 等文件在面板发起的推理里确实被注入（发一条能触发记忆的测试消息，看回复是否体现）。
-4. **`memory_search` 的 recall 落盘**：跑一次推理后，确认测试 workspace 的 recall store 有新数据写入（验证自动记忆归档的前提成立）。
-5. **browser / canvas / skills 等工具**是否随推理自动带上。
-6. **已确认：增量预览能力**。`chat` 提供合并后的完整文本快照和 delta 提示，`session.tool` 提供工具开始/结果阶段；面板已中转文本和工具状态。命令 stdout 逐行输出与 reasoning 不在本批，未来若加入必须继续保持临时预览与权威 transcript 分离。
-7. **命令兼容侦察**：已实现来源核实后的 `/commands`、`/help`、`/status`、`/models`、`/tools`、`/usage`。新增命令的来源、参数和返回 DTO 必须先更新 §5.4，再扩展 default-deny allowlist。命令字符串始终不进入 gateway 官方带内分派。
-
----
-
-## 8. 界面规格（方向由 Owl 定，Codex 照此搭第一版）
-
-界面的"顺不顺眼、暖色调对不对味"没有测试能判定，属于 Owl 醒后要亲眼调的部分。本节给定信息架构、组件清单和配色间距的**方向**，Codex 按此搭出第一版；具体色值、最终观感留给 Owl 微调。样式可参考 claude.ai，但不照搬。
-
-### 8.1 信息架构（三栏）
-
-```
-┌──────────┬───────────────────────┬─────────────────────────────┐
-│ Agent 栏  │  会话列表（侧边栏）      │  会话主视图                    │
-│ (联系人)  │                        │                             │
-│          │  [＋ 新建会话]          │  ┌─────────────────────────┐ │
-│ ● claude │  🔍 搜索…               │  │ 会话标题      · fork 自 XX │ │
-│ ○ main   │  ─────────────         │  └─────────────────────────┘ │
-│ ○ panel- │  ▸ 会话 A      · 未读   │                             │
-│   test   │    昨天 · 12 条          │  用户: ……                    │
-│          │  ▸ 会话 B（fork）       │  ┌─ ▸ 工具调用（折叠）──────┐  │
-│          │    3 天前 · 8 条         │  └────────────────────────┘  │
-│          │  ▸ 会话 C（reset 归档） │  Claude: ……      [从这里 fork] │
-│          │    ……                   │  ┌─ ▸ 思考过程（折叠）──────┐  │
-│          │                        │  └────────────────────────┘  │
-│          │                        │  ─────────────────────────   │
-│          │                        │  [ 输入框 ]                   │
-│          │                        │  [发送] [停止]                │
-└──────────┴───────────────────────┴─────────────────────────────┘
+active/reset 的 `title`、`archived`、`hidden`、`memoryDisposition` 等写入
+`PANEL_DATA_DIR/readonly-meta/<agentId>/`。文件名由稳定 source identity 摘要得到，
+内容包含版本与组成字段并在读取时反校验；写入使用 per-identity mutex 和原子替换。
+
+`archived` 与 `hidden` 正交：前者把记录放入归档视图，后者从普通和归档视图都隐藏。
+只读来源的“删除”只能设置 `hidden`。panel 来源只有已归档并经过显式确认后才可删除
+面板拥有的记录。
+
+## 3. 单一会话读取索引
+
+生产进程只构造一个进程内读取索引，覆盖 read-agent 与 attachment-runtime allowlist
+的并集；各 consumer 在请求时再用自己的 allowlist 限定 snapshot/locator，不能因共享
+缓存扩大授权范围。
+
+索引主键是 `agentId + sourceKind + stable source identity`，二级 locator 是
+`recordId -> ordered candidate keys`。跨 agent/source 的异常 `recordId` 碰撞必须在
+列表和搜索中保留所有记录；只接受 recordId 的读取、mutation 或附件 owner 查询遇到
+多候选时沿用 not-found 语义失败关闭，不能按刷新完成顺序选择 winner。
+
+一次列表或搜索请求先取得一致 snapshot；新增/变化的记录至多解析一次。唯一定位的
+单条读取只探测目标 source root。附件下载/预览只枚举索引中的 panel-source snapshot，
+不能为附件 owner 检查去探测 external transcript root。
+
+目录清单与安全 stat 身份只决定缓存是否失效；权威 document 和 metadata 仍逐条验证。
+坏记录按自身指纹隔离。clear、定点失效和删除通过 epoch/generation 使旧扫描作废；
+并发冷启动共享同一次重建。create/update/fork 的权威提交先于索引刷新，刷新失败只
+标脏并在后续重建，API 返回已提交结果。
+
+会话搜索只在用户已选择的 agent 内执行，覆盖当前普通或归档视图；当前没有单独的
+source-kind 筛选控件或跨 agent 搜索。文档和 UI 不得声称存在这两项能力。
+
+## 4. 附件、预览与产出文件
+
+上传只接受字节和显示元数据；服务端签发附件 ID，并将 blob 以 SHA-256 内容寻址保存
+到私有存储。manifest、owner 与 transcript attachment block 分离。单轮发送使用附件
+ID；服务端重新校验 owner、普通文件、链接数、大小和 MIME/实际内容边界。
+
+图片草稿使用浏览器本地 Blob URL。已提交附件预览只允许服务端完整解码、像素/尺寸
+受限的单帧 PNG、JPEG、WebP，并返回 `nosniff`、`no-store` 与隔离 CSP。SVG、HTML、
+动图、伪图片或部分解码失败都不内联。普通下载使用 attachment disposition。
+
+生成永远收集当前 run 的上游 artifact。只有本轮 `requestOutputs: true` 时，服务端才
+在配置的可信 workspace 下创建 `.openclaw/tmp/ark-panel/<run-id>/outputs` 并向本轮
+runtime 消息增加产出说明。浏览器不能提交该路径，附件也不会自动开启这个开关。
+artifact/outputs 必须在 runtime cleanup 前安全复制到 panel storage；任何路径、链接、
+文件种类、竞态、文件数或总量违规都使本轮失败。
+
+## 5. HTTP API 与同步
+
+所有 API 都使用 JSON envelope；Markdown export、附件二进制和 SSE 是显式例外。
+`GET /api/v1/health` 与 `POST /api/v1/auth/login` 无需已有登录态；两者仍受 Host 校验，
+login 还要求允许的 Origin 并受频率限制。其余 `/api/v1` 路由要求登录。
+
+当前 API 分组：
+
+- authentication：login、session、logout；
+- settings/avatar：账户设置与 agent 头像；
+- sessions：agent、普通/归档列表、projects、revisions、agent 内搜索、conversation、
+  create/update/delete、fork、edit-resend、Markdown export；
+- attachments：upload、authenticated download/preview；
+- runs：create、active lookup、snapshot、SSE subscribe、abort；
+- commands：panel session structured command dispatch；
+- memory：只读文件树/正文、会话状态、candidate、preview、confirm。
+
+mutation 对 Content-Type、body 大小、字段 allowlist 和 runtime 类型做校验。conversation
+DTO 只返回规范化 header/entry/status，不能回传 `cwd`、未知 header、内部 runtime ID 或
+上游 payload。revision DTO 使用与读取索引相同的复合 identity，不能压缩回单值
+recordId。
+
+多设备正文同步使用 revision 轮询；run 观察使用持久 snapshot 与可重连 SSE。SSE 首帧
+是 `run.snapshot`，此后用 `run.updated` 发送 sequence/stream revision 更新，终态发送
+`run.completed`、`run.failed` 或 `run.aborted`；终态前 EOF 只表示连接丢失。浏览器只有
+收到明确 completed 并重新读取权威 conversation 后才清草稿和预览。
+
+## 6. run、幂等与生成编排
+
+生成仅允许 `panel` 来源；active/reset 在任何 Gateway 调用前返回 `SOURCE_READ_ONLY`。
+生产只有 `BridgeService.generate` 一个生成编排边界。`adapter.ts` 定义版本化协议和
+类型，runtime/stream 探针只用于显式隔离验收，不是生产回落路径。
+
+### 6.1 接受与指纹
+
+HTTP 层在创建 run 前校验登录、panel source、请求字段/大小、附件 ID 数量和
+idempotency key 格式。随后计算请求指纹，在创建门禁中检查重复 key 与既有 active run，
+再原子持久化 accepted run。同一 record 同时只允许一个非终态 run。
+
+后台执行取得该会话独占后重新加载权威记录，并在任何 Gateway 调用前校验 `/` 前缀、
+expected revision、附件所有权/字节与上下文预算。这些检查失败时把 accepted run 推进为
+durable failed，不写 transcript；accepted 表示服务端已接管任务，不等于上游已开始。
+
+当前规范指纹用固定编码的 `recordId`、message、`expectedRevision`（缺失为 `null`）、
+有序 attachment IDs，以及只在为真时出现的 `requestOutputs` 计算 SHA-256。JSON 属性
+顺序与显式 `undefined` 不影响身份；附件顺序、revision、消息或产出意图变化都冲突。
+附件功能前的旧 durable run 只在重试仍无附件且不请求产出时兼容旧 hash；新 run 不写
+旧形状，也不重写历史权威记录。
+
+相同 idempotency key + 相同指纹返回同一 active/terminal run；相同 key + 不同指纹
+返回稳定冲突。终态清除暂存请求正文，但保留指纹。
+
+### 6.2 一次性 runtime 流程
+
+1. 通过版本化 Gateway RPC 创建一次性 session。
+2. 将面板当前有效历史物化到其 transcript；尚未交给 `sessions.send` 的本轮 user 消息
+   不能提前出现在文件中。
+3. 应用当前 model/thinking/reasoning override，并调用 `sessions.send`。
+4. trajectory watcher 与控制事件分别观察终态和临时预览；预览故障不能决定 completion。
+5. 完成后从 runtime transcript 读取新增 entry，核验新增 user entry 与请求一致并跳过，
+   再验证完整 assistant/tool/custom 组。
+6. 新 entries 先写入可恢复 run record；随后以临时文件、`fsync`、rename 原子提交完整
+   panel transcript。
+7. transcript 提交后写 completed snapshot；再执行官方注销和受限清理。
+
+一次 run 的提交单位是完整 entry 组，不是最后一条 assistant 文本。streaming 期间不向
+权威 transcript append。失败/abort 清除临时预览，不写部分 run；重试从未改变的权威
+tip 重新开始。
+
+### 6.3 重启与 active-run 索引
+
+run JSON 是权威状态。进程首次需要时扫描 run 根并构建单一 active-run 派生索引，之后
+创建占用检查、active 查询和附件维护不扫描全部历史终态 run。accepted 只有在文件原子
+落盘且目录 durability 完成后进入索引；终态只有持久化成功后移除。run 原子写一旦返回
+失败，因 rename 可能已发生必须作废索引，并从磁盘重建当前可见状态。
+
+在途旧扫描通过 generation 门禁作废，不能覆盖新写入。索引丢失、进程重启或缓存损坏
+均从 run 文件恢复，不定义第二份持久格式。
+
+重启恢复使用持久 `plannedUserEntryId` 和 staged entries 判断：已提交但未标终态的 run
+补写 completed；可证明未开始且恢复 payload 完整的 accepted run 可重新调度；已有
+完整 staged entries 的 run 按基线 revision 精确补提交；其它可能已产生工具副作用的
+上游 run 标记 `RUN_ORPHANED_AFTER_RESTART`，不盲目重发。
+
+### 6.4 停止、超时与保留
+
+浏览器取消 fetch 与服务端 abort 是不同操作。只有服务端确认 aborting/aborted 才显示
+已停止。timeout 后继续等待配置的 watcher grace，以区分上游 timeout、abort、普通
+failure、未观察到 start 和 watcher timeout。清理前必须确认 terminal 且 no-active-run；
+无法确认时保留 artifact 与 `cleanupPending`。
+
+终态 run 当前无限期保留。记录不保留消息正文或模型输出，但会持续增长。任何 retention
+实现必须同时提供更长期 idempotency tombstone、迁移与回滚；当前不能直接删除旧终态
+记录。这是已知限制，而不是已排期能力。
+
+## 7. Gateway WebSocket 契约
+
+当前只支持 OpenClaw `2026.6.11`。服务端复用一条 control WebSocket，浏览器不能看到
+Gateway URL 或 secret。
+
+握手固定为：
+
+- `client.id = gateway-client`；
+- `client.mode = backend`；
+- `role = operator`；
+- requested scopes 恰好为 `operator.read`、`operator.write`、`operator.admin`；
+- `hello-ok` 的版本、角色和 scopes 必须逐项精确相同。
+
+缺少、额外、未知或重复 scope 使用 `GATEWAY_SCOPE_CONTRACT_VIOLATION`；版本不符使用
+`OPENCLAW_VERSION_UNSUPPORTED`。握手和请求拒绝归一为稳定脱敏错误。不能利用 admin
+蕴含关系接受缩写 grant。
+
+版本化 RPC allowlist：
+
+| scope | 方法 |
+| --- | --- |
+| read | `status`、`commands.list`、`tools.catalog`、`tools.effective`、`sessions.list`、`sessions.subscribe`、`sessions.messages.subscribe`、`sessions.messages.unsubscribe`、`artifacts.list`、`artifacts.download` |
+| write | `sessions.create`、`sessions.send`、`sessions.abort` |
+| admin | `sessions.patch`、`sessions.compact`、`sessions.delete` |
+
+未登记方法在创建 socket/发帧前以 `GATEWAY_RPC_METHOD_NOT_ALLOWED` 拒绝。每条 socket
+分配独立 source/generation；open、challenge、hello、message、error、close 和 send
+callback 处理前必须确认仍是当前 generation。业务事件只有精确 hello 与订阅完成后才
+投递。send throw/callback error/非 OPEN 状态会注销当前授权、拒绝 pending、关闭并
+重新握手；旧 callback 不能注销新连接。
+
+### 7.1 resolver 与 credential provenance
+
+resolver 只解析一份严格 JSON OpenClaw 配置。selector 顺序、profile fail-closed、目录
+候选及默认/legacy 文件名以
+[`engineering-decisions.md`](decisions/engineering-decisions.md) 为绑定契约。找到但不可读
+或无效的文件不向低优先级回落；空白显式 selector 失败。JSON5、`$include` 和未转义
+`${VAR}` 不做部分解释。
+
+本机 endpoint scheme 来自 `gateway.tls.enabled`；port 为合法、非空
+`OPENCLAW_GATEWAY_PORT`，否则合法 `gateway.port`，否则 `18789`。已声明但空白/非法
+的环境值不回落。origin 使用 scheme、规范 port 与带类型 host identity；loopback alias
+可等价，普通 DNS hostname（包括字面 `loopback`）不能与 sentinel 混同。
+
+公网 endpoint 必须 `wss://`；`ws://` 只允许固定版本认可的 loopback、private、
+link-local、CGNAT、ULA、`.local` 和 `.ts.net`。TLS 证书验证不能关闭。
+
+- 本机 `gateway.auth.mode=none` 始终禁用管理连接；panel 环境 secret 不能绕过。
+- token/password mode 只选择同名 credential；mode 缺失仅在恰有一种 credential 时
+  推导。
+- trusted-proxy 只允许满足完整 userHeader/trustedProxies/mutex 条件的本机 password
+  fallback；配置或 panel token presence 均使它拒绝。
+- SecretRef 字符串/对象参与 presence、mode、歧义和互斥，但面板不执行 env/file/exec
+  provider；选中的 ref 需要对应非空 `PANEL_*` 明文覆盖。
+- remote mode 不回落本机默认，不继承本机 auth。配置 remote 要求安全 URL、显式
+  `transport: direct`、无 `tlsFingerprint`；panel override 不能改变其 provenance。
+- panel URL 改变带类型 origin，或在缺少配置 remote URL 时独立提供 endpoint，必须
+  同时带自包含非空 panel credential group，且不继承磁盘 secret/transport/pin。
+
+这组配置只能声明面板将发送的 endpoint/credential，不能证明目标 Gateway 实际强制
+相同 secret。真实 server auth、scope grant、bootstrap、工具、memory 与 cleanup 必须在
+#48 指定的无渠道 runtime 上复验；当前状态为 unknown。
+
+`PANEL_OPENCLAW_STREAMING=0` 只关闭临时 text/tool preview；同一 control socket 与全部
+三个 scope 仍用于 generation、commands、attachments 和 lifecycle。配置/连接失败保留
+本地只读访问，需要 Gateway 的操作返回 `GATEWAY_TRANSPORT_UNAVAILABLE`；生产不回落
+逐请求 CLI。
+
+## 8. 结构化命令
+
+普通 message API 永久拒绝 `/` 前缀；任务即使已被持久 run 层接管，也会在执行前以
+`SLASH_COMMANDS_UNSUPPORTED` 进入 failed，不能调用 Gateway，也不能写 transcript。
+命令 API 接受结构化 `{ command, args }`，用静态、版本化、default-deny allowlist
+分派，绝不把命令文本送进 `sessions.send`。
+
+| 分类 | 当前命令 | 语义 |
+| --- | --- | --- |
+| panel native | `/model`、`/think`、`/reasoning`、`/new` | metadata/新 panel 会话；override 下一轮生效 |
+| compaction | `/compact` | typed `sessions.compact`，验证后持久化 compaction |
+| read-only | `/commands`、`/help`、`/status`、`/models`、`/tools`、`/usage` | 规范化只读 DTO |
+| unsupported | `/reset`、`/bash`、config/restart、未知/动态命令 | 无入口，服务端稳定拒绝 |
+
+`commands.list` 只用于补全和说明，动态 skill/plugin 命令不会自动进入 allowlist。
+`/tools` 返回配置层 runtime 工具目录，不代表当前 session 的动态授权或某次 run 一定可
+调用。`/usage` 沿当前权威分支聚合 assistant entry 的模型上报 usage，缺失字段保持
+coverage/unknown；它不是 Gateway 全局账单，也不做 tokenizer 估算。
+
+`/model`、`/think`、`/reasoning` 无参数时返回当前值及各自目录；单个合法参数写入
+override，`default` 清除。模型只接受唯一且 available 的规范 key/alias，thinking 必须
+同时通过固定 level 与当前模型能力校验，reasoning 只接受 `on` / `off` / `stream`。
+设置写 panel metadata 和可见系统事件，与进行中的 run 串行，并从下一轮生效。
+`/new [title]` 在同一 agent 下创建新的 panel 会话。只读信息命令和 `/compact`
+不接受额外参数。
+
+命令 API 同样要求 panel 来源、登录、Origin 与 CSRF。只读信息命令不写 transcript；
+设置命令不依赖一次性 runtime session 存续。完整分类依据见
+[`slash-commands.md`](decisions/slash-commands.md)。
+
+## 9. 上下文与持久压缩
+
+发送前，`ConservativeContextBudget` 按 OpenClaw `2026.6.11` current-branch/compaction
+语义投影面板将物化的历史，再加入本轮输入。当前方法为
+`utf8-bytes-upper-bound-v3`，以 UTF-8 字节和固定结构开销作为保守上界，不是模型
+tokenizer。默认历史预算为 100000，可配置但必须为系统提示、记忆、工具 schema 和输出
+保留余量。
+
+超限返回 `CONTEXT_BUDGET_EXCEEDED`，不创建 Gateway session、不写本轮 user entry。
+用户可通过 `/compact`、会话动作或状态动作调用同一 structured compaction API；没有
+自动压缩。
+
+压缩只允许 panel 会话，并与 generation 使用同一会话独占边界和 revision CAS。服务端
+物化当前分支、应用 override、调用 typed `sessions.compact`，随后重新读取原 runtime
+transcript。仅当历史前缀未改、恰有一个结构/父链/边界合法的新 compaction，且同一预算
+器证明候选有效上下文严格减少时才原子提交。否则返回
+`NO_EFFECTIVE_REDUCTION`，权威 transcript/revision 不变；面板不能自行移动上游
+`firstKeptEntryId` 来丢消息。
+
+完整旧消息始终保留、可显示和导出；最新摘要、inclusive kept tail 与压缩后消息决定
+下一轮有效上下文。fork 在压缩边界前不继承摘要，在边界及之后继承合法摘要。界面
+token 状态只显示与当前 tip 绑定且 OpenClaw 标为 fresh 的 usage；否则明确 unknown，
+不能用保守预算估算冒充实际用量。
+
+## 10. 记忆合同
+
+`memoryDisposition` 只有 `scratch` / `eligible`，默认 `scratch`。普通聊天的配置合同
+要求两种状态使用同一目标 workspace、bootstrap 与工具策略；实现不能因 disposition
+主动删减记忆能力。共享配置不证明具体 runtime 实际获得 bootstrap、memory tool 或召回
+结果；这些逐 runtime 状态在 #48 前为 unknown。disposition 只授权面板管理的新内容沉淀：
+
+- `scratch`：候选、确认与未来自动整理 API 由服务端拒绝；
+- `eligible`：API 允许整份滚动候选与确认事务；真实模型执行仍待 #48；
+- fork/编辑重发目标重新默认 `scratch`，不继承来源授权；
+- 改回 `scratch`、归档/隐藏/删除来源都不级联删除已确认记忆。
+
+只读记忆中心仅从服务端 workspace allowlist 读取 `MEMORY.md`、`DREAMS.md` 与
+`memory/**/*.md`；接口接受 agentId 和服务端标识，不接受主机路径。读取拒绝越界、链接、
+特殊文件和大小超限，正文不进日志。
+
+候选使用独立一次性内部 session，沿用来源有效 model/thinking/reasoning。每个 session
+创建后，面板查询其 `tools.effective` 清单，仅在没有工具或只有 `memory_search` /
+`memory_get` 时继续；其它工具一律失败关闭。这个门禁是实现合同，不代表已有 runtime
+完成真实验收；安全模型执行与实际工具状态在 #48 前为 unknown。普通聊天轨迹不受这项
+候选门禁约束，候选轨迹也绝不写回来源 transcript。候选固定来源 revision/entry 范围、
+checkpoint、state fingerprint 与内容 hash。预览只写 `PANEL_DATA_DIR`；确认 CAS 成功后
+才原子创建/替换该会话唯一滚动文件，再写 ledger/checkpoint，并请求刷新真实 agent、
+聊天 runtime、记忆 runtime 三份派生索引；真实刷新结果仍须逐环境验收。
+
+滚动文件缺失不等于遗忘。用户可从最后确认的完整快照恢复并保留 checkpoint，或从完整
+权威分支重建；浏览器不能提交恢复路径、正文、hash 或范围。详细原子顺序、幂等、旧
+batch 兼容和回滚见 [`panel-memory.md`](decisions/panel-memory.md)。
+
+确定性测试证明面板工作流边界；真实 bootstrap、memory tool、索引刷新与 runtime 隔离
+在当前部署中的状态必须由 #48 复验，不能由旧日期证据推断。
+
+## 11. 前端渲染与体验合同
+
+中英文 locale catalog 的 key 和占位符必须一致。服务端账户设置是主题、强调色、locale、
+会话状态和头像的权威来源；设备本地状态只用于阅读字号、rail、草稿、project 折叠和
+后台未读。localStorage 不可用时必须安全降级，不能影响权威发送。
+
+不受信内容只使用 text nodes 或既有安全 Markdown/KaTeX helper，不能新增用户控制的
+`innerHTML`。raw HTML inert，危险 link scheme 不可点击。KaTeX、语法高亮与字体均
+同源加载；解析失败显示原始文本，不能中断后续消息。
+
+### 11.1 Markdown 图片隐私
+
+最终消息、stream preview、memory viewer 与 memory candidate 复用同一图片策略：
+
+- 外部绝对 HTTP(S) 图片默认只显示 alt 和规范化 origin，不创建 `<img>`、`fetch` 或
+  server proxy/cache 请求；
+- 仅 hostname 与 panel 不同的目标提供文字明确的新标签导航，固定
+  `noopener noreferrer` 和 `referrerPolicy=no-referrer`；
+- panel 同 hostname、异 scheme/port 的 origin 不提供导航，因为 host-only cookie 不按
+  端口隔离；
+- 只有精确同源、无 query/fragment 且匹配 `/api/v1/files/<id>/preview` 的既有认证附件
+  可以内联；其它同源 URL、相对路径和 `file:` / `data:` / `blob:` / `javascript:` 均
+  不可操作；
+- 页面 CSP 保持 `img-src 'self' blob:`，不能为 Markdown 开放全局 HTTP(S) image。
+
+真实 Firefox 验收需要两个独立本地 origin：默认渲染网络计数为零；显式跨 hostname
+点击只产生一次目标请求且无 Referer/panel Cookie；同 hostname 异端口始终为零。
+
+### 11.2 会话交互
+
+草稿和单轮 `requestOutputs` 按 agent/session 隔离；发送失败保留，服务端接受 run 后才
+清单轮开关，明确 completed 后才清草稿。只有所属会话因 active run 锁定，其它会话可
+继续编辑。
+
+长线程仅在用户接近底部时自动跟随；上翻时保留位置并显示新消息入口。后台 completed/
+failed 按设备本地、每会话记录未读；用户 abort 不通知。桌面 rail 与移动端分层导航都
+必须保留新建、搜索、最近会话、设置、记忆中心和 agent 切换的可访问入口。
+
+## 12. 验证与当前限制
+
+普通改动使用最窄相关测试迭代；跨层、存储、安全、lifecycle、依赖或发布改动最终运行：
+
+```sh
+npm run typecheck
+npm run check:frontend
+npm run build
+npm test
 ```
 
-- **最左 Agent 栏（联系人页）**：列出各 agent（`claude` / `main` / `paneltest`），当前选中高亮。切换 agent 换掉中间的会话列表。有新消息的 agent 标未读点。
-- **中间会话列表**：顶部"新建会话"+ 搜索框。每条会话显示标题、更新时间、消息数；fork 出来的标"fork 自 XX"，reset 归档的标"归档"。有未读的标未读点。
-- **右侧主视图**：消息按时间流排列。用户消息、模型回复区分样式，assistant 回复按 Markdown 渲染。每条消息显示本地时区时间戳。工具调用、思考块默认折叠、点击展开。每个消息节点悬停出现"从这里 fork"、"编辑"、"复制"。底部输入框、发送 / 停止按钮；首版不提供命令菜单，以 `/` 开头的输入会被拒绝（见 §5.4）。
+coverage、fixture browser 与 deployment dry-run 只证明仓库内确定性边界。所有可能接触
+真实 OpenClaw/runtime 的命令必须由任务明确把目标放入范围，并遵守对应验收文档；
+不能因为命令存在就运行。
 
-### 8.2 组件清单
-- AgentList（联系人栏）、AgentItem（含未读点）
-- SessionList、SessionItem（标题 / 时间 / 消息数 / fork 或归档标记 / 未读点）、SearchBox、NewSessionButton
-- SessionListTabs 或等价切换：主列表 / 归档列表两个视图
-- SessionMenu（每条会话的操作：重命名、归档 / 取消归档、彻底删除仅面板会话且需二次确认、记忆处置切换；UI 文案为「不整理进记忆」/「允许整理进记忆」）
-- MemoryCenter（已完成：独立 Agent/类别树、内容查看、面板贡献的友好标题与来源跳转）
-- MemoryCandidateReview（已完成：eligible 会话的固定范围候选预览与整份确认；未确认不写 workspace）
-- ConversationView、MessageBubble（user / assistant 两态）
-- MessageContent：Markdown 安全渲染（含 CodeBlock，每块带单独复制按钮）
-- MessageTimestamp（本地时区日期时间）
-- CollapsibleBlock（工具调用、思考块共用，默认折叠）
-- MessageActions（悬停出现：从这里 fork、编辑、复制整条消息）
-- Composer（输入框 + 发送 / 停止；首版无命令菜单，见 §5.4）
-- StreamingIndicator（流式生成中的光标 / 加载态）
-- LoginForm（账号密码）
+当前明确限制：
 
-### 8.3 配色与间距方向
-- **暖色调**：以米白 / 暖灰为背景，避免纯白纯黑；强调色用暖橙或赭色一类，接近 claude.ai 的观感。
-- 具体色值 Codex 先给一版接近的，Owl 醒后调。用 CSS 变量集中管理颜色，方便一处改全局（回应 ClawGPT"主题难改"的痛点）。
-- 间距宽松、留白充足；正文行高偏松，长文易读。
-- 字体优先系统字体栈；代码块和工具调用用等宽字体。
-
-### 8.4 失败与中断状态（正确性相关，先想清楚再实现）
-- **生成中断 / 失败**（推理挂了、gateway 断开、用户点停止）：这一条消息在 transcript 里要留成可识别的状态（例如标记为 incomplete），不能留下半条脏数据破坏解析。界面上明确显示"生成被中断 / 失败"，并提供**重试**。
-- **重试**：重试是从该消息的父节点重新生成，等同一次编辑重发，复用同一套底层。
-- **连接断开**：面板↔gateway 断开时，界面给出可见提示，不静默失败。
-- 不连 gateway 能定的部分（transcript 里怎么标、界面怎么显示、重试入口）归第一段先做；连 gateway 才能验的部分（真中断一次看状态对不对）归第二段在 `paneltest` 上验。
-
-### 8.5 响应式（多屏是硬需求）
-- 桌面（Windows / Linux）：三栏并排。
-- 窄屏（手机）：三栏折叠为可切换的层级——Agent 栏和会话列表收进抽屉 / 返回式导航，主视图占满。消息树在窄屏下纵向展开，工具调用 / 思考块仍可折叠。
-
-### 8.6 优先级较低（第一版可后放）
-- **一个会话中途切换模型 / 供应商**：transcript 有 `model_change` 条目。此能力依赖 gateway，**随斜杠命令适配到位即可获得，面板不自建**（见 §一「暂不实现」与 §5.4）。接口先留出。
-- **面板作为渠道注入自己的系统提示**：回应"每渠道注入 prompt"的需求。第一版可不做，记为后续。
-
-### 8.6.1 会话状态区（2026-07-17 已实现）
-
-- 会话详情返回经过筛选的 `status` DTO：panel metadata 中显式设置的 `modelOverride` / `thinkingLevel` / `reasoningLevel`（未设置为 `null`）、绑定当前 transcript tip 的 OpenClaw `contextUsage`、内部安全用的保守 `contextBudget`，以及 transcript 文件的 `lastActiveAt`。DTO 不返回内部路径、完整 metadata 或额外消息正文。
-- 桌面标题区固定为两行：第一行是标题；第二行将 `subtitle` 的生成、断线或来源状态与独立的 `conversation-status` 视觉上连续排列。两个 DOM 区域及 `aria-live` 语义仍然独立，状态更新不得互相覆盖。第二行统一字号，副标题使用中等字重；模型项按内容占位且最多 220px。第二行不换行；空间不足先隐藏最近活跃并优先保住上下文信息。移动端仍隐藏 `conversation-status`。
-- 上下文主状态以 OpenClaw 2026.6.11 `sessions.list` 为准。生成或压缩完成后、一次性 runtime session 清理前，读取精确 key 对应行；只有 `totalTokensFresh === true` 且数值合法时显示 `上下文 18k / 200k（9%）`。未上报 fresh 总量时显示“上下文未知”（若仅 window 可用则附 window），不以字符数补造 token。70%/90% 为警告/危险阈值。`ConservativeContextBudget` 继续服务于发送前拒绝和压缩候选有效性比较，不再驱动主状态。
-- 捕获值以可选 `header.panel.contextUsage` 与 `throughEntryId` 一起原子写入 transcript。迁移采用惰性、向后兼容策略：旧 transcript 缺少字段时直接显示未知，下一次成功生成或压缩才写入；无需批量重写。回滚到旧版本时，宽松 transcript header 解析会忽略该附加字段，权威消息不需转换；需要清理时可在备份后删除该可选对象。
-- `settings.json` v1 增加 `conversation.showStatus`，默认 `true`。旧文件允许缺少整个 `conversation` 对象并补默认值，其他未知字段仍按损坏或非法请求拒绝。该开关为账户级服务端偏好，不使用 `localStorage` 作为权威值。
-
-### 8.7 Markdown 渲染与复制（新增 2026-07-12，公式更新 2026-07-15）
-
-- **Markdown 渲染（已实现）**：user 与 assistant 的 text block 进入同一渲染管线；当前支持标题、粗体/斜体/删除线、有序/无序列表、代码块（行内与围栏）、表格、链接和引用。未列出的 Markdown 扩展不应假定已支持，原始 HTML 始终按文本处理。
-- **安全第一**：渲染必须走安全 DOM，禁止执行任意 HTML / 脚本，链接不自动跳转到危险协议。这与 §6.4 工具调用/思考块的安全渲染是同一条硬要求（v1 已有安全 DOM 渲染，MD 渲染沿用同一管线，不新开不受信任的 `innerHTML` 路径）。选库时优先选默认转义、可配置 allowlist 的方案；若库自带代码高亮与复制按钮，可直接复用。
-- **外部图片隐私默认**：最终消息、stream preview、memory viewer 与 memory candidate 必须复用同一个 renderer。任意外部绝对 HTTP(S) 图片在用户动作前只生成含 alt 与规范化 origin 的可访问占位，不生成 `<img>`、`fetch` 或服务端代理。仅当 URL hostname 与面板不同，才提供文字明确的“打开外部图片”链接；链接固定新标签、`noopener noreferrer` 与 `no-referrer`。面板同 hostname 但 scheme/port 不同的 origin 不提供链接，因为 host-only Cookie 不按端口隔离。只有精确同源、无 query/fragment 且匹配 `/api/v1/files/<id>/preview` 的既有认证附件预览可继续内联；其它同源 URL、相对路径、`file:`、`data:`、`blob:`、`javascript:` 均显示为不可操作原文。页面 CSP 固定 `img-src 'self' blob:`，不得为 Markdown 恢复全局 `http:` / `https:`。
-- **整条消息复制（已实现）**：每条含正文的 user 或 assistant 消息提供“复制消息”动作，复制原始 Markdown 文本到剪贴板（不是渲染后的 HTML），便于粘贴他处仍保留 Markdown 与 LaTeX 源码。
-- **代码块单独复制**：每个围栏代码块右上角提供复制按钮，复制该块原始代码。很多 Markdown / 高亮库自带此能力，优先复用。
-- **代码块样式**：等宽字体，语言标签可选显示，长代码横向滚动不撑破布局（回应 v1 已修的 `constrain conversation layout`）。
-- **语法高亮（已实现）**：只按 fenced code 的显式语言标签高亮，不自动猜测；显示规范化语言名，未知语言退化为纯文本。高亮继续使用安全 DOM，不引入 `innerHTML`。
-- **LaTeX 数学公式（已实现）**：行内支持 `$...$` 与 `\(...\)`；块级支持 `$$...$$` 与 `\[...\]`。块级定界符既可包在同一行，也可让开闭定界符分别独占一行。公式使用 KaTeX 渲染，复制整条消息和导出 Markdown 时仍保留原始 LaTeX。
-- **解析优先级与误判控制**：围栏代码和行内代码高于公式解析，代码里的 `$...$` 不渲染；普通金额等无法形成合法闭合对的美元符号保留为文本，且不得跨越到后面的公式吞并内容。当前不在普通段落中把 `$$` 当作行内公式。
-- **公式安全与供应链边界**：KaTeX `0.16.x` 浏览器产物、样式与 WOFF2 字体放在 `src/frontend/vendor/katex/`，与页面同源加载，现有 CSP 不新增 CDN 域名。调用固定为 `trust:false`，并限制 `maxSize` 与 `maxExpand`；Markdown 自研渲染器仍不使用 `innerHTML`。KaTeX 上游产物内部负责构造其公式 DOM，不向输入开放受信任 HTML 命令。
-- **失败降级**：KaTeX 未加载、语法错误或超出限制时，公式节点显示包含定界符的原始文本并提供错误提示；单个公式失败不能中断该消息或后续消息的渲染。块公式允许横向滚动，不撑破桌面或移动端会话布局。
-
-验收（纯本地，可完整自测）：
-- 用含各类已支持语法（标题、强调、列表、表格、引用、多语言代码块）的样本消息渲染，视觉正确、无布局溢出。
-- 构造含 `<script>`、`onerror=`、`javascript:` 链接的恶意 Markdown 样本，渲染后不执行、不产生可点击的危险协议链接（安全回归测试）。
-- 用真实 Firefox 与本地计数 server 覆盖外部图片：渲染前后两个 probe 路径请求数均为 0；唯一跨主机显式链接点击后只对应路径变为 1，且请求没有 Referer 或 panel Cookie；面板同 hostname 异端口路径继续为 0。DOM 同时确认没有外部 `<img>`、只有跨主机占位有导航链接，并保留认证同源附件预览。
-- 复制整条消息得到的是原始 Markdown 文本；复制代码块得到的是该块原始代码。
-- 用四种定界符分别验证行内与块公式进入 KaTeX，块公式启用 display mode；验证金额文本与行内代码不进入 KaTeX。
-- 让 KaTeX 对非法公式抛错，确认界面保留原始公式且后续内容继续渲染；在窄屏检查长块公式可横向滚动。
-- 静态资源测试确认 KaTeX JS/CSS/WOFF2 均从面板自身路径返回正确 MIME，且 CSP 仍保持 `script-src 'self'; style-src 'self'`。
-
-### 8.8 会话阅读与本地便利功能（已实现 2026-07-13）
-
-- 草稿按 agent + session 存在浏览器本地，刷新或切回会话时恢复；发送及结构化命令成功后清除，失败时保留。单轮“需要文件”开关使用相同作用域（尚未创建会话时按 Agent 隔离），默认关闭；新会话创建后随草稿转移，服务器接受创建 run 后关闭，明确提交失败时保留供重试。添加输入附件不自动开启，斜杠命令不提交该标志。localStorage 不可用或超额时静默降级，不影响发送。
-- 长会话仅在用户位于底部附近时自动跟随；用户上翻阅读时保留位置，有新内容则显示“回到底部”入口。
-- Project 标题可折叠，包含明确的“未分组”组；折叠状态按 agent 存浏览器本地。
-- 会话列表提供置顶、归档/恢复和导出 Markdown 快捷操作；桌面 hover/键盘聚焦可见，触屏设备始终可访问，且不会误触打开会话。
-
----
-
-## 9. 给 Codex 的工作方式建议
-
-- 用任务清单管理进度，每完成一项标记，并记下自测结果。
-- 遇到 §0 任何约束无法保证、或 §7 实测结果与本规格矛盾时，停下并在清单里写清楚问题，转去做其它不受影响的任务，等 Owl 醒来。
-- 每个 commit 只包含一件事，commit message 说清做了什么、自测是否通过。不要 push。
-- 代码风格、命名跟随你建立的项目约定，保持一致。
+- 终态 run 无限期保留；尚无 retention + tombstone 回收策略；
+- 只支持 OpenClaw `2026.6.11`；升级前必须重验软耦合面；
+- active/reset 只读，不能从 panel 写回真实渠道会话；
+- 搜索只在选定 agent 内，普通/归档由当前视图决定，无 source-kind 筛选；
+- Markdown 外部图片不内联；只有显式跨 hostname 导航；
+- runtime/bootstrap/memory/proxy/TLS/SSE 的当前真实部署状态在 #48 前为 unknown；
+- memory candidate/rebuild 不复用普通聊天的保守上下文预算 preflight；它不得静默截断
+  完整来源，但真实容量与失败行为须由 #48 验收；
+- `/reset`、`/bash`、配置/重启、任意命令透传和自动压缩均不支持。

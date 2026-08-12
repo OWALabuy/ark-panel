@@ -1,10 +1,15 @@
-# ark-panel
+# ark-panel 部署、备份与恢复
 
 本地会话面板服务。Node.js 22，默认只监听 `127.0.0.1`。真实 OpenClaw agent 的 sessions 目录只作为只读数据源；所有新建、fork、编辑重发和后续推理结果只写入 `PANEL_DATA_DIR`。
 
-面板自建 / fork 会话支持首批面板原生命令和只读信息命令。普通消息接口仍会在调用 gateway 前拒绝以 `/` 开头的输入；命令必须走独立结构化派发接口。支持范围和隔离原则见[斜杠命令决定](../decisions/slash-commands.md)。
+面板自建 / fork 会话支持当前 panel-native、持久压缩和只读信息命令。普通消息接口
+仍会在调用 Gateway 前拒绝以 `/` 开头的输入；命令必须走独立结构化派发接口。支持
+范围和隔离原则见[斜杠命令决定](../decisions/slash-commands.md)。
 
-首版已完成能力、明确不做的范围和上线前需要用户参与的事项见 [首版完成状态](../v1-completion.md)。当前 SSE 提供 run 生命周期状态，gateway 完成后整组刷新消息，不宣称逐 token 输出。
+当前产品范围见根目录 [`README.md`](../../README.md) 与
+[`README.zh-CN.md`](../../README.zh-CN.md)。SSE 可重新订阅持久 run snapshot，并转发
+临时文本/工具预览；完成后浏览器重新读取经校验、原子提交的完整 transcript。预览不
+承诺逐 token，也不能决定 run completion。
 
 ## 安装与测试
 
@@ -24,7 +29,7 @@ npm run password-hash -- '替换为实际密码'
 所有秘密通过环境变量传入，不要写进仓库：
 
 ```sh
-export PANEL_USERNAME='owl'
+export PANEL_USERNAME='panel-user'
 export PANEL_PASSWORD_HASH='scrypt:...'
 export PANEL_SESSION_SECRET='至少32字符的随机秘密'
 export PANEL_DATA_DIR="$HOME/.local/share/ark-panel"
@@ -39,22 +44,29 @@ export PANEL_GATEWAY_RUN_TIMEOUT_MS='1800000'
 export PANEL_RUN_WATCHER_GRACE_MS='30000'
 
 export PANEL_READ_AGENTS='{
-  "claude":{"label":"Claude","sessionsRoot":"/home/USER/.openclaw/agents/claude/sessions"},
-  "main":{"label":"Main","sessionsRoot":"/home/USER/.openclaw/agents/main/sessions"}
+  "assistant":{"label":"Assistant","sessionsRoot":"/srv/openclaw/agents/assistant/sessions"}
 }'
 
 export PANEL_AGENT_RUNTIMES='{
-  "claude":{"runtimeAgentId":"panel-runtime-claude","sessionsRoot":"/home/USER/.openclaw/agents/panel-runtime-claude/sessions","workspaceRoot":"/home/USER/claude"},
-  "main":{"runtimeAgentId":"panel-runtime-main","sessionsRoot":"/home/USER/.openclaw/agents/panel-runtime-main/sessions","workspaceRoot":"/home/USER/clawd"}
+  "assistant":{"runtimeAgentId":"panel-runtime-assistant","sessionsRoot":"/srv/openclaw/agents/panel-runtime-assistant/sessions","workspaceRoot":"/srv/openclaw/workspaces/assistant"}
 }'
 export PANEL_MEMORY_RUNTIMES='{
-  "claude":{"runtimeAgentId":"panel-memory-claude","sessionsRoot":"/home/USER/.openclaw/agents/panel-memory-claude/sessions"}
+  "assistant":{"runtimeAgentId":"panel-memory-assistant","sessionsRoot":"/srv/openclaw/agents/panel-memory-assistant/sessions"}
 }'
 ```
 
-`PANEL_READ_AGENTS` 是可浏览的真实 agent allowlist。`PANEL_AGENT_RUNTIMES` 把面板会话所属 agent 映射到无渠道绑定的专用推理 agent；禁止把真实 agent 本身配置成 runtime。`workspaceRoot` 是服务端可信配置，用于创建本轮隔离的模型产出目录；不配置时仍可上传附件，但不会启用该目录的产出收集。`paneltest` 只允许用于显式集成测试。
+`PANEL_READ_AGENTS` 是可浏览的真实 agent allowlist。`PANEL_AGENT_RUNTIMES` 把面板
+会话所属 agent 映射到无渠道绑定的专用推理 agent；禁止把真实 agent 本身配置成
+runtime。`workspaceRoot` 是服务端可信配置，用于创建本轮隔离的模型产出目录；不配置
+时仍可上传附件，但不会启用该目录的产出收集。示例 ID 和路径都是占位符，部署时替换
+为当前机器的专用目录；测试 runtime 只允许用于明确的隔离集成测试。
 
-`PANEL_MEMORY_RUNTIMES` 可选。配置前先在 OpenClaw 中创建独立、无渠道绑定的 `panel-memory-*` agent，让它与对应普通 runtime 共享 workspace，并把工具限制为无工具或仅 `memory_search` / `memory_get`。面板会在每次提炼前核对实际工具目录；不能证明无副作用时拒绝提炼。首次启用必须按记忆模块决定在隔离环境验收，不要直接以真实 agent 做首验。
+`PANEL_MEMORY_RUNTIMES` 可选。配置前先在 OpenClaw 中创建独立、无渠道绑定的
+`panel-memory-*` agent，让它与对应普通 runtime 共享 workspace，并把工具限制为无工具
+或仅 `memory_search` / `memory_get`。面板创建每个内部 session 后会核对其
+`tools.effective` 清单；不能证明无副作用时拒绝提炼。首次启用必须按记忆模块决定在
+指定隔离环境验收，不要直接以渠道绑定的真实 agent 做首验。当前真实 bootstrap、召回、
+逐会话有效工具、模型执行和索引刷新状态在 #48 前未知。
 
 附件 blob、manifest 和会话引用都在 `PANEL_DATA_DIR/files` / `PANEL_DATA_DIR/sessions` 下，因此现有离线备份会一并包含它们。workspace 中的 `.openclaw/tmp/ark-panel/<run-id>` 只是运行期暂存，不应单独备份；服务会在内容安全复制进面板存储后清理。
 
@@ -130,13 +142,14 @@ server {
 `PANEL_SECURE_COOKIE`，重启面板后回到仅本机/SSH 转发的 HTTP 信任边界。该变化
 不修改任何会话或配置存储 schema。
 
-第一版固定支持 OpenClaw `2026.6.11`，升级 OpenClaw 前应重跑集成测试。
+当前固定支持 OpenClaw `2026.6.11`，升级 OpenClaw 前必须按 support/acceptance matrix
+重跑受控集成验收。
 
 ## 数据与并发语义
 
 - `GET /api/v1/sessions` 返回每条记录的 `revision` 和 `updatedAt`。
 - `GET /api/v1/revisions?agentId=...` 提供轻量轮询数据。
-- 新建 panel 会话：`POST /api/v1/sessions`，请求体为 `{ "agentId": "claude", "title": "可选标题" }`。
+- 新建 panel 会话：`POST /api/v1/sessions`，请求体为 `{ "agentId": "assistant", "title": "可选标题" }`。
 - 生成消息时可在请求体带当前 `revision`；版本不一致会拒绝写入。
 - 同一 panel 会话同一时刻只允许一轮生成。
 - 客户端重试应复用 UUID 格式的 `Idempotency-Key`。相同 key 与相同消息会共享或返回已完成结果；把同一 key 用于不同消息会被拒绝。
@@ -149,7 +162,7 @@ gateway 单轮执行默认最多等待 30 分钟，随后再给轨迹观察器 3
 都必须确认 OpenClaw 已释放对应运行槽位后才能删除临时 session；若无法确认，面板会保留清理信息并报告失败，
 不会把它误报为“已停止”。
 
-## 第一版长上下文保护
+## 长上下文保护
 
 面板在创建 gateway 临时 session 之前，对“完整历史 + 本轮用户消息”执行保守预算检查。默认历史预算为 `100000` tokens，可通过 `PANEL_CONTEXT_HISTORY_BUDGET_TOKENS` 调整（至少 1024）。
 
@@ -163,8 +176,8 @@ gateway 单轮执行默认最多等待 30 分钟，随后再给轨迹观察器 3
 
 仓库提供 [../../deploy/ark-panel.service](../../deploy/ark-panel.service) 示例。它固定使用 `127.0.0.1` 上的应用服务、从独立 `EnvironmentFile` 读取配置，并把真实会话目录声明为只读。
 
-1. 复制示例到 `~/.config/systemd/user/ark-panel.service`，替换其中的 `USER`、仓库路径和专用 runtime 目录。
-2. 建立 `~/.config/ark-panel/panel.env`，权限设为 `0600`；该文件包含账号、密码哈希和 session secret，不能提交到 git。
+1. 复制示例到用户服务目录，替换其中的占位用户、仓库路径和专用 runtime 目录。
+2. 建立权限为 `0600` 的专用 EnvironmentFile；该文件包含账号、密码哈希和 session secret，不能提交到 git。
 3. 确保数据目录为 `0700`，runtime sessions 目录只属于当前用户；不要把真实 agent sessions 放进 `ReadWritePaths`。启用记忆整理时，OpenClaw 配置中的真实 agent、普通 runtime 和记忆 runtime 都必须已经建立各自的 `agent/` 数据库目录，并把这些目录加入 `ReadWritePaths`，以便确认后刷新派生记忆索引；这不允许写真实 agent 的 `sessions/`。
 4. Node 若不在 systemd 默认 `PATH` 中，在 EnvironmentFile 设置受控的 `PATH`，或把 `ExecStart` 改成 Node 22 的绝对路径。
 5. 启动并检查：
@@ -199,15 +212,16 @@ npm run test:deployment
 
 ## 离线备份、恢复与迁移
 
-备份工具只处理 `PANEL_DATA_DIR`，不会连接 gateway，也显式拒绝 `.openclaw/agents/...` 路径。操作前应停止用户服务，以得到同一时点的一致快照：
+备份工具只处理 `PANEL_DATA_DIR`，不会连接 Gateway，也显式拒绝 OpenClaw agent 根。
+操作前应停止用户服务，以得到同一时点的一致快照。以下路径均为部署占位符：
 
 ```sh
 systemctl --user stop ark-panel.service
-cd /home/USER/awa/ark-panel
+cd /srv/ark-panel
 npm run build
-mkdir -m 700 -p "$HOME/.local/backup/ark-panel"
-npm run backup -- backup "$PANEL_DATA_DIR" "$HOME/.local/backup/ark-panel" before-upgrade
-npm run backup -- verify "$HOME/.local/backup/ark-panel/before-upgrade"
+mkdir -m 700 -p /srv/backups/ark-panel
+npm run backup -- backup "$PANEL_DATA_DIR" /srv/backups/ark-panel before-upgrade
+npm run backup -- verify /srv/backups/ark-panel/before-upgrade
 ```
 
 每份备份含逐文件大小/SHA-256 和空目录清单的 `manifest.json`。工具拒绝 symlink、特殊文件、路径越界、源/目标重叠、已有同名备份，以及超过清单、条目、单文件或总字节上限的输入；先在备份根下完成权限为 `0700/0600` 的临时树并同步，再原子改名发布。恢复使用目标名锁避免并发操作，在实际复制时逐文件再次核对大小和哈希，并复核目标父目录身份；恢复目标仍必须不存在。
@@ -215,18 +229,24 @@ npm run backup -- verify "$HOME/.local/backup/ark-panel/before-upgrade"
 恢复永远写入一个不存在的新目录，校验全部文件后才原子就位，不覆盖现有数据：
 
 ```sh
-npm run backup -- restore "$HOME/.local/backup/ark-panel/before-upgrade" "$HOME/.local/share/ark-panel-restored"
+npm run backup -- restore /srv/backups/ark-panel/before-upgrade /srv/ark-panel-data-restored
 ```
 
 随后把 `PANEL_DATA_DIR` 指向新目录并启动服务，通过 health check、登录、会话数量和抽样 transcript 验收。跨机器迁移使用相同步骤；备份含明文私人会话，离开本机前必须再用 age、git-crypt 或等价方式加密。密码哈希和 session secret 位于独立的 EnvironmentFile，不包含在数据备份中，应通过单独加密渠道迁移；若不迁移 session secret，所有旧登录 cookie 会自然失效。
 
-## 隔离集成测试
+## 显式隔离集成验收
 
-以下命令会调用模型，但只允许使用无渠道绑定的 `paneltest` runtime，并会清理临时 session artifacts：
+以下命令会调用模型并操作 OpenClaw runtime；不要把它们当作普通部署检查运行。只有当
+任务已明确指定无渠道绑定的测试 agent、相关 workspace/session roots，并满足对应确认
+条件时才可执行：
 
 ```sh
 npm run test:paneltest
 npm run test:app-paneltest
 ```
 
-第二条覆盖：登录、真实 agent 只读摘要、新建 panel 会话、经 `paneltest` 生成、持久化读取、搜索和 fork。测试使用临时 `PANEL_DATA_DIR`，不会向真实活会话发送消息。
+第二条覆盖登录、只读来源摘要、新建 panel 会话、测试 runtime 生成、持久化读取、搜索
+和 fork。配置必须使用临时 `PANEL_DATA_DIR`，不能向 active/reset 或任何渠道绑定的 agent
+发送消息。更多命令、前置条件和当前结论以 [`../testing/README.md`](../testing/README.md)
+为准；日期化结果本身不是当前部署保证。当前真实 runtime、bootstrap、memory、proxy/
+TLS 和 SSE 状态在 #48 完成前均为 unknown。

@@ -2,11 +2,15 @@
 
 更新日期：2026-08-13
 
+本文记录当前绑定的工程与安全决定。早期施工顺序和已被取代的方案不具规范性；
+当前组件边界见 [`../architecture.md`](../architecture.md)，可执行细节见
+[`../implementation-spec.md`](../implementation-spec.md)。
+
 ## 技术栈
 
 - Node.js 22，npm，TypeScript（严格模式）。
-- 服务端使用 Node 自带 HTTP 能力，第一阶段不引入 Web 框架；接口增多后再评估 Fastify。这样核心存储代码不依赖 Web 框架。
-- 前端预定 React + Vite；第一阶段先提供能启动和做健康检查的服务端骨架，避免在数据接口未稳定时堆积界面代码。
+- 服务端使用 Node 自带 HTTP 能力，不使用 Web 框架；存储与领域层不依赖 transport。
+- 前端使用原生 HTML、CSS 和 JavaScript，不使用 React、Vite 或其它前端框架。
 - 测试使用 Node 自带的 `node:test`，编译后运行，不引入测试框架。
 
 ## 目录
@@ -17,7 +21,7 @@
 - `src/storage/`：扫描、导入、索引和原子文件操作。
 - `src/gateway/`：OpenClaw 版本检查、推理桥接与受限清理。
 - `src/server/`：HTTP API 和 SSE。
-- `test/fixtures/`：完全虚构、脱敏的测试数据。
+- `test/`：确定性的 `node:test` 覆盖与完全虚构、脱敏的内联/浏览器 fixture。
 
 运行数据不放进源码目录。`PANEL_DATA_DIR` 指定面板数据根目录；没有设置时拒绝启动正式读写服务。agent 和对应 runtime agent 通过服务端配置 allowlist，浏览器不能提交文件路径。
 
@@ -25,9 +29,15 @@
 
 API 统一位于 `/api/v1`。成功响应是 `{ "data": ... }`；失败响应是 `{ "error": { "code": "...", "message": "...", "requestId": "..." } }`。错误码使用稳定的大写英文标识，用户可见说明用中文。
 
-生成接口使用 SSE，事件固定为 `run.started`、`run.delta`、`run.completed`、`run.failed`、`run.aborted`。每个事件的 `data` 是 JSON，并带 `runId`。SSE 只负责显示；权威 transcript 只在完整 run 校验通过后提交。
+生成接口将 run 建模为持久服务端资源：创建返回 run snapshot；浏览器可查询并通过
+SSE 重新订阅。SSE 首帧为 `run.snapshot`，后续为 `run.updated`，终态再发送
+`run.completed`、`run.failed` 或 `run.aborted`。每个事件的 `data` 是规范化 JSON
+snapshot，并带 `runId`。SSE 与 Gateway text/tool stream 只负责显示；权威 transcript
+只在完整 run 校验通过后原子提交。
 
-服务只监听 `127.0.0.1`。修改请求必须通过严格同源检查；实现登录后再加双重提交 CSRF token。日志不记录消息正文、提示词、token 或完整路径。
+服务只监听 `127.0.0.1`。登录要求严格 Origin 检查和频率限制；其它 mutation 要求
+登录态、严格 Origin 与双重提交 CSRF token。所有请求校验实际 Host。日志不记录消息
+正文、提示词、token 或完整路径。
 
 ## Markdown 外部图片网络边界（2026-08-13）
 
@@ -44,7 +54,7 @@ API 统一位于 `/api/v1`。成功响应是 `{ "data": ... }`；失败响应是
 - 默认信任仅为实际监听端口上的 `127.0.0.1` 与 `localhost` HTTP。`PANEL_TRUSTED_HOSTS` 只允许补充有限数量的精确 Host，不支持 wildcard，也不能用重复值表达优先级。
 - origin/Host 在启动时和请求时使用同一规范化规则。只接受 HTTP(S)、ASCII DNS/规范 IP 与精确端口；拒绝 userinfo、路径、query、fragment、IDN/punycode、替代数字 IP 和非规范 IPv6 表示。HTTPS 外部 origin 必须启用 Secure cookie。
 - 请求只以实际 `Host` 和浏览器 `Origin` 为依据。服务不读取 `Forwarded` 或任何 `X-Forwarded-*`，也不会从请求动态学习 origin；未来若支持这些头，必须另立 trusted-proxy 身份边界。
-- Host 校验覆盖健康检查、静态资源、API 与 SSE，失败继续使用 `421 HOST_REJECTED`。登录和所有 mutation 继续要求显式匹配的 Origin；缺失/`null`/跨源保持拒绝，mutation 还必须通过登录态与 CSRF token，错误码保持既有 `ORIGIN_REJECTED` / `CSRF_REJECTED`。
+- Host 校验覆盖健康检查、静态资源、API 与 SSE，失败继续使用 `421 HOST_REJECTED`。登录和其它 mutation 继续要求显式匹配的 Origin；缺失/`null`/跨源保持拒绝，其它 mutation 还必须通过登录态与 CSRF token，错误码保持既有 `ORIGIN_REJECTED` / `CSRF_REJECTED`。
 - 配置校验错误和启动日志只说明变量或监听地址，不回显外部部署名称、请求头、凭据或路径。
 
 ## 存储
@@ -59,15 +69,19 @@ API 统一位于 `/api/v1`。成功响应是 `{ "data": ... }`；失败响应是
 
 ## OpenClaw 兼容与推理 runtime
 
-第一版只支持 OpenClaw `2026.6.11`。启动推理功能前核对 CLI/gateway 版本；不匹配时返回 `OPENCLAW_VERSION_UNSUPPORTED`，不执行清理或推理。
+当前只支持 OpenClaw `2026.6.11`。启动推理功能前核对 CLI/Gateway 版本；不匹配时返回 `OPENCLAW_VERSION_UNSUPPORTED`，不执行清理或推理。
 
-每个真实 agent 对应一个不绑定渠道的专用 runtime agent。runtime 与目标 agent共用 workspace，以获得相同的系统文件、记忆和工具配置；两者的 sessions 目录隔离。每次推理创建一个临时 session，不能复用。
+每个真实 agent 对应一个不绑定渠道的专用 runtime agent。配置合同要求 runtime 与目标
+agent 共用 workspace，且两者 sessions 目录隔离；共用 workspace 不能证明实际获得相同
+系统文件、bootstrap、记忆或工具。每次推理创建一个临时 session，不能复用。所有注入
+与 recall 假设仍须在 #48 的指定隔离 runtime 逐项复验；确定性测试不能把当前真实
+bootstrap、tools 或 memory 状态证明为已通过。
 
 清理顺序固定为：先调用官方 `sessions.delete` 注销，再删除 runtime agent 专用 sessions 根目录中、与本次已验证 sessionId 严格匹配的已知 artifact。清理函数只接受服务端刚创建并登记的 UUID；只允许 `.jsonl.deleted.*`、`.trajectory.jsonl`、`.trajectory-path.json` 等经过当前版本验证的类型；拒绝符号链接、目录越界和未知文件。真实 agent 的 sessions 根目录永远不进入清理 allowlist。
 
 ## Gateway WebSocket 权限范围与凭据生命周期（2026-08-12）
 
-**决定：接受一条带管理权限的本机控制连接。** 面板服务端复用一条持久 Gateway WebSocket 承担观察、生成控制、结构化命令和临时 session 生命周期；本批不拆成多条连接或多份凭据。该决定只适用于版本门禁固定的 OpenClaw `2026.6.11`。
+**决定：接受一条带管理权限的本机控制连接。** 面板服务端复用一条持久 Gateway WebSocket 承担观察、生成控制、结构化命令和临时 session 生命周期；当前不拆成多条连接或多份凭据。该决定只适用于版本门禁固定的 OpenClaw `2026.6.11`。
 
 握手身份固定为 `client.id=gateway-client`、`client.mode=backend`、`role=operator`，并且请求的 scope 集合必须恰好是 `operator.read`、`operator.write`、`operator.admin`。Gateway `hello.auth.scopes` 也必须与该集合完全相同：缺少任一项或返回额外项都拒绝连接，不尝试动态加权、降权或扩大权限。每次 socket 都有独立 generation；只有当前 source 在该 generation 完成精确 hello 和订阅后才能投递事件，旧 socket 的迟到 open/message/challenge/hello/error/close/send callback 全部忽略。当前 socket 发送失败或 ready 状态失效则清空该 generation 的授权与 pending、关闭 socket 并重新握手。握手失败和 RPC 拒绝只向面板上层返回稳定、归一化、脱敏的错误；token、password、原始上游 payload、消息正文和 prompt 不得进入错误或日志。
 
@@ -83,34 +97,35 @@ API 统一位于 `/api/v1`。成功响应是 `{ "data": ... }`；失败响应是
 
 scope 集合只描述 Gateway 连接具备的上游能力，不替代面板自己的 typed API、登录、CSRF 和 default-deny allowlist。尤其是持有 `operator.admin` 会令内部命令满足 owner 判定，因此普通消息路径继续拒绝所有 `/` 文本，D 类管理命令也不因连接有 admin scope 而获得面板入口。
 
-配置文件本身属于 provenance 边界。控制 resolver 只解析严格 JSON。`PANEL_OPENCLAW_CONFIG_PATH` 是声明 `OPENCLAW_PROFILE` 时唯一允许的显式路径；没有它则 profile 在其他 selector 前 fail closed。否则依次使用官方 `OPENCLAW_CONFIG_PATH`、`OPENCLAW_STATE_DIR` 内 new/legacy 候选、`OPENCLAW_HOME` 内四候选、legacy `OPENCLAW_CONFIG`；无 selector 时在 OS home 内按同一四候选顺序查找。目录候选只对缺失继续，已找到但不可读/解析失败或显式路径空白即拒绝且不落到低优先级来源。本批拒绝 JSON5，也拒绝严格 JSON 中任何 `$include` 或未转义 `${VAR}`，避免部分解析；`$${VAR}` 保持字面量。失败只影响 Gateway 控制可用性并保持脱敏。这是当前固定版本 resolver 的兼容边界，后续若扩展必须另做版本门禁与验收。
+配置文件本身属于 provenance 边界。控制 resolver 只解析严格 JSON。`PANEL_OPENCLAW_CONFIG_PATH` 是声明 `OPENCLAW_PROFILE` 时唯一允许的显式路径；没有它则 profile 在其他 selector 前 fail closed。否则依次使用官方 `OPENCLAW_CONFIG_PATH`、`OPENCLAW_STATE_DIR` 内 new/legacy 候选、`OPENCLAW_HOME` 内四候选、legacy `OPENCLAW_CONFIG`；无 selector 时在 OS home 内按同一四候选顺序查找。目录候选只对缺失继续，已找到但不可读/解析失败或显式路径空白即拒绝且不落到低优先级来源。当前兼容层拒绝 JSON5，也拒绝严格 JSON 中任何 `$include` 或未转义 `${VAR}`，避免部分解析；`$${VAR}` 保持字面量。失败只影响 Gateway 控制可用性并保持脱敏。这是当前固定版本 resolver 的兼容边界，后续若扩展必须另做版本门禁与验收。
 
 这是 trusted-local、single-operator 部署中的纵深 guardrail，不是强多租户隔离边界。共享 token/password 按 owner 级 secret 管理，只能存在于服务端环境或 OpenClaw 配置中，不下发浏览器。上游即使允许 direct-loopback `auth.mode=none`，面板也无条件拒绝由同一本机端点的该 mode 建立 admin 连接。`token` / `password` mode 只使用对应字段；`trusted-proxy` 仅允许同机直连 password fallback，要求非空白 `gateway.auth.trustedProxy.userHeader`、元素均非空白的非空 `gateway.trustedProxies` 列表、最终选中非空 password，并拒绝任意配置 token presence（含 SecretRef）或已声明的 `PANEL_OPENCLAW_GATEWAY_TOKEN`；连接只发送 password。mode 未配置时恰有一种配置凭据才可推导，两种同时存在因歧义拒绝。声明面板环境凭据时，只覆盖已知 mode 选择的值；整组全为空白不得回落。
 
 端点与凭据是一个不可拆分的 provenance 边界。本机 endpoint scheme 由 `gateway.tls.enabled` 推导；port 优先级为非空合法 `OPENCLAW_GATEWAY_PORT` > 合法 `gateway.port` > `18789`，环境值已声明但空白或非法时拒绝而不回落。端点以 scheme、port 和带类型 host 比较；loopback alias 不能使用会与真实 DNS hostname 碰撞的字符串 sentinel。remote mode 不回落本机地址，配置型 remote 端点必须有有效 URL、显式 `transport: "direct"` 且未配置 `tlsFingerprint`，其凭据不受本机 auth mode 影响；非空 panel credential group 可覆盖 remote 凭据值但不能改变 provenance 或绕过门禁。面板不建立 SSH tunnel，也不实现 remote fingerprint pin。与配置 remote URL 同源的 panel URL 还必须带该凭据组，并继续通过 direct / no-fingerprint 检查。只有 panel URL 改变 origin，或配置 remote URL 缺失时，URL + 非空 panel credential group 才是自包含的独立端点，不继承磁盘 secret、transport 或 pin；本机 panel URL 改变 origin 时也采用这一独立边界。公网端点必须使用 `wss://`，明文只允许固定版本定义的 loopback/private/link-local/CGNAT/ULA、`.local` 与 `.ts.net`；TLS 证书验证始终开启。SecretRef 会参与 presence、歧义与互斥判断，但面板不执行 env/file/exec provider；选中的 ref 必须由对应非空 `PANEL_*` 明文覆盖，否则控制 transport 不可用。完整 provider resolution 另立权限/版本门禁工作项。独立端点配置只构成 operator assertion，不证明服务端实际校验 secret，必须同步部署并由 #48 验证。当前 scope 契约不改存储且无需重新签发凭据。
 
-凭据轮换必须把 Gateway 与面板视为同一个发布单元：先准备新 secret，同步更新两端，再重启 Gateway 与面板并确认精确 scope 握手；不得让新旧 secret 长期并存。若轮换需回滚，则在两端恢复受保护的上一份 secret 并再次同步重启。部署本批代码只需正常重启面板以启用握手强制；不改存储格式、不改 OpenClaw pin。若精确 scope 校验与既有部署不兼容，回滚到上一版面板即可，凭据与 OpenClaw 配置无需转换，同时保留版本门禁，不能以接受未知或额外 scope 作为临时绕过。
+凭据轮换必须把 Gateway 与面板视为同一个发布单元：先准备新 secret，同步更新两端，再重启 Gateway 与面板并确认精确 scope 握手；不得让新旧 secret 长期并存。若轮换需回滚，则在两端恢复受保护的上一份 secret 并再次同步重启。启用当前精确 scope 握手只需正常重启面板；不改存储格式、不改 OpenClaw pin，也不要求重新签发凭据。若精确 scope 校验与既有部署不兼容，回滚到上一版面板即可，凭据与 OpenClaw 配置无需转换，同时保留版本门禁，不能以接受未知或额外 scope 作为临时绕过。
 
 `PANEL_OPENCLAW_STREAMING=0` 只关闭临时文本/工具预览；同一控制 WebSocket 及上述三个 scope 仍用于生成、结构化命令、附件和 admin 生命周期。预览订阅失败而控制连接仍可用时只降级预览；生产无法解析固定配置、端点或凭据时不创建连接，并向 Gateway 调用面注入只返回 `GATEWAY_TRANSPORT_UNAVAILABLE` 的拒绝 transport。所有这类拒绝保持稳定且脱敏，错误与日志不得包含 token/password、SecretRef 细节、配置正文或所选私有路径。凭据缺失、控制连接不可用、scope 不匹配或 RPC 被拒绝时，相关 Gateway 操作失败关闭，本地权威会话的只读浏览仍可用，不能回落为逐次 Gateway CLI RPC。
 
-备选方案——把观察、写入与管理拆成独立连接/身份——需要新增凭据模型、部署迁移与回滚步骤，并对固定版本重新做隔离 runtime 验收；它是独立工作项，不在本批静默引入。本决定没有宣称完成新的真实 runtime 验收，真实环境复验仍按版本门禁和专门验收流程执行。
+备选方案——把观察、写入与管理拆成独立连接/身份——需要新增凭据模型、部署迁移与回滚步骤，并对固定版本重新做隔离 runtime 验收；它是独立工作项，不属于当前合同。本决定没有宣称完成新的真实 runtime 验收，真实环境复验仍按版本门禁和专门验收流程执行。
 
 ## 版本控制与升级维护（2026-07-12）
 
 面板核心数据（transcript JSONL、metadata）是自主的、可迁移的，不绑定 OpenClaw；读取索引由这些数据重建。但 2a′ 混合架构对 OpenClaw 保留了一层**软耦合**：更换或升级 OpenClaw 时，这层是唯一需要重新验证/适配的面。集中记录，避免升级时到处找。
 
 ### 软耦合面（升级后逐项复核）
-1. **版本门禁**：第一版固定 `2026.6.11`。启动推理前核对 CLI/gateway 版本；不匹配返回 `OPENCLAW_VERSION_UNSUPPORTED`，拒绝推理与清理。升级 = 抬高这个 pin，且必须在抬高前跑完下面的复核。
+1. **版本门禁**：当前固定 `2026.6.11`。启动推理前核对 CLI/Gateway 版本；不匹配返回 `OPENCLAW_VERSION_UNSUPPORTED`，拒绝推理与清理。升级 = 抬高这个 pin，且必须在抬高前跑完下面的复核。
 2. **transcript 格式**：会话头 `version:3`、`id`/`parentId` 树、content block 类型（text / tool_use / tool_result / thinking / model_change / thinking_level_change / custom）。schema 变了，解析器与 fork 回溯都要改。
 3. **推理桥接 RPC 与流程**：`sessions.create` → 覆盖 transcript → `sessions.send` → 读新增 entry → `sessions.delete` + 受限清理。RPC 名称、参数、一次性 session 行为都可能随版本变。
 4. **握手、鉴权与 scope 矩阵**：`gateway-client/backend` + operator 角色 + 共享 token/password、direct-loopback backend self-pairing 分支、请求和 `hello` 精确匹配 `operator.read` / `operator.write` / `operator.admin`，以及上表每个 RPC 的 scope 归属。
 5. **清理 artifact 类型**：`.jsonl.deleted.*`、`.trajectory.jsonl`、`.trajectory-path.json`。版本若新增/改名 artifact 类型，清理 allowlist 要同步扩充，否则残留累积。
-6. **记忆机制假设**：共享 workspace 的记忆文件与 bootstrap 注入、内置 engine 对 `MEMORY.md` / `memory/**/*.md` 的索引、文件 watcher、dreaming/promote 和压缩前 flush 的行为（见 `panel-memory.md`）。`scratch` 与 `eligible` 都读取既有记忆；面板只为 eligible 维护每会话一份独立的滚动短期文件。普通 session 缺少按路径只读和动态工具 deny 的限制，以及临时 runtime transcript 是否可能被 dreaming 摄取，升级或启用 dreaming 前都须重验。
+6. **记忆机制假设**：共享 workspace 的记忆文件与 bootstrap 注入、内置 engine 对 `MEMORY.md` / `memory/**/*.md` 的索引、文件 watcher、dreaming/promote 和压缩前 flush 的行为（见 `panel-memory.md`）。`scratch` 与 `eligible` 必须采用同一普通聊天记忆配置合同；是否实际注入和召回须逐 runtime 验证。面板只为 eligible 维护每会话一份独立滚动短期文件。普通 session 缺少按路径只读和动态工具 deny 的限制，以及临时 runtime transcript 是否可能被 dreaming 摄取，升级或启用 dreaming 前都须重验。
 7. **打包源码路径**：`~/.nvm/.../node_modules/openclaw/dist/*.js` 的文件名带内容哈希后缀，升级必变；任何靠读 dist 得出的结论都要重查，不能假设文件名不变。
 
 ### 升级流程（不在真实 agent 上首验）
 1. 先在隔离的 `paneltest`（无渠道绑定）上装新版本，跑推理桥接冒烟 + 上述 2–7 项复核；握手 scope 与 RPC 权限矩阵必须逐项重验。
-2. 复核通过后再抬高版本 pin，并更新本文与 `architecture.md §四` 里标注的版本号。
+2. 复核通过后再抬高版本 pin，并更新本文与
+   [`architecture.md`](../architecture.md)“Gateway 适配与权限”中的版本号。
 3. 复核未过时，面板对新版本继续走版本门禁拒绝推理，直到适配完成；期间只读浏览仍可用（只读不依赖桥接）。
 4. OpenClaw 升级与面板自身发布相互独立：面板可在不升 OpenClaw 时发版；升 OpenClaw 必须过版本门禁。
 5. 面板自身依赖（npm 包）用锁文件固定版本；升级依赖后跑 `npm test` 与部署 smoke 再发布。
@@ -119,13 +134,13 @@ scope 集合只描述 Gateway 连接具备的上游能力，不替代面板自�
 - 面板遵循语义化版本；破坏 transcript / metadata 存储格式的改动记为不兼容变更，并附带迁移步骤（存储是权威数据，格式变更必须可迁移、可回滚）。进程内读取索引没有迁移格式。
 - 支持的 OpenClaw 版本范围在 README 与本文各记一处，发布说明里点明。
 
-## 长上下文保护（第一版）
+## 长上下文保护
 
 推理适配层在任何 gateway `sessions.create` / `sessions.send` 之前执行上下文预算检查。接口输入是面板将物化的完整 `TranscriptDocument` 与本轮用户消息，输出包括 `estimatedTokens`、`budgetTokens`、`remainingTokens` 和估算方法版本。
 
 当前采用 `utf8-bytes-upper-bound-v3`：先按 OpenClaw 2026.6.11 `buildSessionContext` 语义投影当前分支；若存在压缩，只计算最新摘要、`firstKeptEntryId` 起的 inclusive kept tail 与压缩后消息，再把投影和本轮消息的 UTF-8 字节数作为 token 上界并增加固定结构开销。它不是精确 tokenizer，会有意高估普通文本；默认历史预算为 100000 tokens，刻意为 gateway 注入的系统提示、记忆、工具 schema 和回复输出留余量。预算通过 `PANEL_CONTEXT_HISTORY_BUDGET_TOKENS` 配置。
 
-超过预算时返回稳定错误 `CONTEXT_BUDGET_EXCEEDED`，不调用 gateway、不写入本轮 user entry，并提供“压缩上下文”操作。该保守上界是内部安全判定，不作为界面的当前 token 用量。界面仅采用 OpenClaw `sessions.list` 标记为 fresh 的 `totalTokens/contextTokens`；缺失时显示未知。首版只手动压缩，不静默自动执行。压缩记录是完整 transcript 中的边界，fork 在边界前不继承摘要、在边界及之后继承摘要。
+超过预算时返回稳定错误 `CONTEXT_BUDGET_EXCEEDED`，不调用 Gateway、不写入本轮 user entry，并提供“压缩上下文”操作。该保守上界是内部安全判定，不作为界面的当前 token 用量。界面仅采用 OpenClaw `sessions.list` 标记为 fresh 的 `totalTokens/contextTokens`；缺失时显示未知。当前只手动压缩，不静默自动执行。压缩记录是完整 transcript 中的边界，fork 在边界前不继承摘要、在边界及之后继承摘要。
 
 OpenClaw 返回 `compacted: true` 只代表上游执行了压缩流程，不足以证明面板的有效上下文已经减少。面板在采纳候选 compaction 前，必须用生成保护所用的 `ConservativeContextBudget` 分别估算当前权威 document 与候选 document；只有候选 `estimatedTokens` 严格更小时才原子提交。若完整历史仍从 `firstKeptEntryId` 保留、摘要只被额外加入，或任何其他候选未产生有效减少，返回 `compacted: false`、reason `NO_EFFECTIVE_REDUCTION`，不改变 transcript 与 revision。面板不得自行改写上游边界来丢弃未被可靠摘要的消息。
 

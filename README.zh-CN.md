@@ -16,7 +16,12 @@ ark-panel 是一个自托管的 OpenClaw 会话面板——一个类似 claude.a
 
 ark-panel 在本地基于 Node.js 22 运行，默认监听 `127.0.0.1`。已有的 OpenClaw 智能体会话目录作为只读数据源使用。新建的会话、派生分支、编辑后的分支，以及生成的回复，都保存在 `PANEL_DATA_DIR` 下。
 
-面板自有的会话通过一套独立的结构化命令接口支持 `/model`、`/think`、`/reasoning`、`/new`、`/commands`、`/help`、`/status` 和 `/models`。以 `/` 开头的输入仍会被普通的消息接口拒绝，绝不会被转发到网关的内联命令分发器。边界的划分见[斜杠命令的决策记录](docs/decisions/slash-commands.md)。
+面板自有会话通过独立的结构化命令接口支持 `/model`、`/think`、`/reasoning`、`/new`、
+`/compact`、`/commands`、`/help`、`/status`、`/models`、`/tools` 和 `/usage`。
+`/tools` 返回配置层 runtime 工具目录，不保证当前 run 一定可用其中每项；`/usage`
+汇总当前权威 transcript 分支里模型上报的用量，不是账单或 tokenizer 估算。以 `/` 开头
+的输入仍会被普通消息接口拒绝，也绝不会转发给网关的内联命令分发器。边界见
+[斜杠命令决策](docs/decisions/slash-commands.md)。
 
 生成运行是服务器端拥有的资源，而不是某一次浏览器请求的附属状态。面板会持久化它们的生命周期和幂等状态，允许浏览器在 SSE 连接断开后重新查询或重新订阅，并且只在一次运行确认完成后才清除草稿。OpenClaw 运行期间，面板还会转发它汇聚后的助手文本更新，以及工具的开始/完成事件，作为临时的实时预览。这是对上游事件的转发，并不承诺每个 token 一个事件。
 
@@ -76,14 +81,14 @@ $$
 | 命令 | `/model`、`/think`、`/reasoning`、`/new` | ✅ | 面板原生的结构化操作;命令文本绝不作为普通提示词转发 |
 | 命令 | `/commands`、`/help`、`/status`、`/models`、`/tools`、`/usage` | ✅ | 只读的结构化命令接口，采用默认拒绝的允许列表;tools 为配置的运行时目录，usage 为当前对话分支的模型上报数据 |
 | 命令 | `/reset`、`/bash`、配置/重启，以及任意透传 | ⛔ | 因生命周期、主机和网关安全风险而有意排除 |
-| 记忆 | 存储每会话的 `scratch` / `eligible` 处置状态 | ✅ | 默认为 `scratch`;两种状态都读取目标 agent 的既有记忆，只有 eligible 可进入面板沉淀流程 |
+| 记忆 | 存储每会话的 `scratch` / `eligible` 处置状态 | ✅ | 默认为 `scratch`;两种状态采用相同的聊天 runtime 记忆配置合同，只有 eligible 可进入面板沉淀流程；实际召回能力依 runtime 而定且当前未知 |
 | 记忆 | 处置界面与只读记忆中心 | ✅ | 齿轮上方直接进入按 Agent 切换的树状页面与 Markdown 阅读区，安全查看允许的记忆文件并跳回来源会话 |
-| 记忆 | eligible 会话的增量整理 | ✅ | 每会话一份滚动记忆；文件被移除后可选择快照恢复或从完整会话重新生成；确认后原子替换并刷新三份 OpenClaw 索引 |
+| 记忆 | 面板管理的记忆整理流程 | ✅ | eligible 会话的候选、确认、滚动文件与恢复事务已实现；真实模型执行、有效工具和三份索引刷新在 #48 前未知 |
 | 外观 | 可切换主题与命名强调色 | ✅ | 系统/浅色/深色，外加 Gruvbox hard/medium/soft 的浅色和深色变体;账号级、跨设备;所有内置强调色组合均满足 WCAG AA |
 | 外观 | 设置抽屉 | ✅ | 齿轮图标直接打开外观/阅读设置;登出留在底部;账号偏好在服务器端持久化 |
 | 外观 | 每个智能体的自定义头像 | ✅ | 1:1 裁剪预览、限制大小的位图上传、服务器端校验/重新编码、恢复默认，以及账号级共享 |
 | 外观 | 可调的阅读字号 | ✅ | 设备本地的 85%–130% 滑块，作用于消息、Markdown、代码、工具和数学公式，不影响导航/布局缩放 |
-| 外观 | 对话状态(模型覆盖、上下文安全预算、最近活跃) | ✅ | 紧凑的头部摘要;账号级服务器设置可跨设备隐藏;上下文明确标注为面板的保守估算 |
+| 外观 | 对话状态(模型覆盖、上下文用量、最近活跃) | ✅ | 紧凑的头部摘要;账号级服务器设置可跨设备隐藏;上下文只采用新鲜的 OpenClaw 模型上报用量，否则显示未知，保守估算仅用于发送保护 |
 | 会话 | 可折叠的侧栏 | ✅ | 折叠两侧桌面侧栏，仍保留新建会话、搜索、10 条最近会话、设置和智能体切换;移动端流程仍为全屏 |
 | 生成 | 后台完成通知 | ✅ | 每会话、设备本地的未读状态，跨智能体/列表标记，以及并发运行时的标题计数;失败会通知，用户主动中止不通知 |
 | 对话 | 文档标题反映会话与智能体 | ✅ | 格式为 `会话 - 智能体`;同时带有后台完成标记 |
@@ -92,7 +97,17 @@ $$
 | 访问 | 界面内修改密码 | ⛔ | 保持仅限命令行(`npm run password-hash`);登出仍位于设置抽屉底部 |
 | 运维 | 备份、完整性校验、恢复、健康检查和 systemd 示例 | ✅ | 包含部署冒烟测试和基于固定用例的浏览器验收覆盖 |
 
-外观、侧栏、头像、标题、对话状态、后台完成、双语界面、可审阅记忆流程和手动持久长上下文策略已经完成。`scratch` 仍完整读取既有记忆，只是不进入面板沉淀流程；压缩不会删除面板完整 transcript，也不会自动静默执行。详细边界见[记忆模块决定](docs/decisions/panel-memory.md)。OpenClaw 兼容性属于持续的日常维护。体验功能的取舍理由见[体验功能决策记录](docs/decisions/ux-features.md);详细的约束和验收标准见[实现规格说明](docs/implementation-spec.md)。
+外观、侧栏、头像、标题、对话状态、后台完成、双语界面、面板自有的可审阅记忆流程
+和手动持久长上下文策略均已提供。配置合同为 `scratch` 与 `eligible` 聊天采用相同的
+workspace/bootstrap/tool 策略，只有 `eligible` 进入面板沉淀流程；特定 runtime 是否
+实际注入并召回记忆在 #48 前未知。压缩不会删除面板完整 transcript，也不会自动静默
+执行。终态 run 目前无限期保留以维持
+幂等语义；回收策略必须另行设计长期 tombstone。详细边界见
+[记忆模块决定](docs/decisions/panel-memory.md)。OpenClaw 兼容性保持版本门禁。真实 runtime、
+bootstrap、memory、proxy/TLS 和部署后的 SSE 当前状态，在当前矩阵记录的 #48 受控验收
+完成前均为未知；日期化证据不是永久保证。体验功能的取舍理由见
+[体验功能决策记录](docs/decisions/ux-features.md)；详细的约束和验收标准见
+[实现规格说明](docs/implementation-spec.md)。
 
 ## 安装与测试
 
@@ -116,7 +131,7 @@ npm run password-hash -- 'replace-with-your-password'
 密钥应放在环境变量中，绝不要写入仓库:
 
 ```sh
-export PANEL_USERNAME='owl'
+export PANEL_USERNAME='panel-user'
 export PANEL_PASSWORD_HASH='scrypt:...'
 export PANEL_SESSION_SECRET='a-random-secret-with-at-least-32-characters'
 export PANEL_DATA_DIR="$HOME/.local/share/ark-panel"
@@ -133,22 +148,20 @@ export PANEL_RUN_WATCHER_GRACE_MS='30000'
 export PANEL_OPENCLAW_STREAMING='1'
 
 export PANEL_READ_AGENTS='{
-  "claude":{"label":"Claude","sessionsRoot":"/home/USER/.openclaw/agents/claude/sessions"},
-  "main":{"label":"Main","sessionsRoot":"/home/USER/.openclaw/agents/main/sessions"}
+  "assistant":{"label":"Assistant","sessionsRoot":"/srv/openclaw/agents/assistant/sessions"}
 }'
 
 export PANEL_AGENT_RUNTIMES='{
-  "claude":{"runtimeAgentId":"panel-runtime-claude","sessionsRoot":"/home/USER/.openclaw/agents/panel-runtime-claude/sessions","workspaceRoot":"/home/USER/claude"},
-  "main":{"runtimeAgentId":"panel-runtime-main","sessionsRoot":"/home/USER/.openclaw/agents/panel-runtime-main/sessions","workspaceRoot":"/home/USER/clawd"}
+  "assistant":{"runtimeAgentId":"panel-runtime-assistant","sessionsRoot":"/srv/openclaw/agents/panel-runtime-assistant/sessions","workspaceRoot":"/srv/openclaw/workspaces/assistant"}
 }'
 export PANEL_MEMORY_RUNTIMES='{
-  "claude":{"runtimeAgentId":"panel-memory-claude","sessionsRoot":"/home/USER/.openclaw/agents/panel-memory-claude/sessions"}
+  "assistant":{"runtimeAgentId":"panel-memory-assistant","sessionsRoot":"/srv/openclaw/agents/panel-memory-assistant/sessions"}
 }'
 ```
 
 `PANEL_READ_AGENTS` 是允许浏览的真实智能体的允许列表。`PANEL_AGENT_RUNTIMES` 把每个可浏览的智能体映射到一个没有渠道绑定的专用运行时;绝不要把真实的、绑定了渠道的智能体用作面板运行时。为每个受信任的 `workspaceRoot` 设置路径，即可开启按需的输出目录兜底与只读记忆中心。浏览器只能为本轮请求文件，无法选择这个路径。
 
-`PANEL_MEMORY_RUNTIMES` 是可选配置，用于开启经用户审阅的记忆整理。每项必须指向独立、无渠道绑定的 `panel-memory-*` OpenClaw agent，并让它与对应 `workspaceRoot` 使用同一 workspace。该 agent 应不配置工具，或只保留 `memory_search` 与 `memory_get`；ark-panel 每次提炼前都会检查实际工具目录，发现其它工具就拒绝运行。不能复用普通聊天 runtime。
+`PANEL_MEMORY_RUNTIMES` 是可选配置，用于开启经用户审阅的记忆整理。每项必须指向独立、无渠道绑定的 `panel-memory-*` OpenClaw agent，并让它与对应 `workspaceRoot` 使用同一 workspace。该 agent 应不配置工具，或只保留 `memory_search` 与 `memory_get`；ark-panel 创建每个内部 session 后都会检查其逐会话有效工具清单，发现其它工具就拒绝运行。不能复用普通聊天 runtime。配置和这道失败关闭门禁都不能证明某个 runtime 的 bootstrap、记忆召回、模型执行或索引刷新可用；它们在 #48 记录受控结果前均为未知。
 
 上传的文件存放在 `PANEL_DATA_DIR/files` 下，采用内容寻址的私有存储，并纳入常规备份。Office 文件有意不做转换:OpenClaw 收到原始文件，模型可以用自己的 Python/技能工具去检视。面板始终收集 OpenClaw 的本轮运行产物，且不会为此改写用户消息。只有输入框本轮开启“需要文件”时，服务端才会在配置的工作区下创建 `.openclaw/tmp/ark-panel/<run-id>/outputs`，并把对应产出指令附加到发送给 runtime 的本轮消息。文件复制进面板存储后再删除临时目录。符号链接、硬链接、特殊文件、路径逃逸、过多的文件数量和过大的体积都会被拒绝。
 
@@ -156,13 +169,13 @@ export PANEL_MEMORY_RUNTIMES='{
 
 面板复用服务器端一条到本机 OpenClaw Gateway 的控制 WebSocket，同时让浏览器只连接面板已认证的 SSE 端点；Gateway 凭据绝不会发送到浏览器。对固定适配的 OpenClaw `2026.6.11`，连接身份为 `gateway-client/backend`、角色为 `operator`，且只请求 `operator.read`、`operator.write`、`operator.admin` 这三个 scope；`hello` 授权缺项、重复或多出任何 scope 都会被拒绝。read 用于状态/目录/session 观察和 artifact 收集，write 用于创建临时 session、发送消息（包括 Base64 附件）与停止，admin 用于 session override、压缩和删除。显式、版本化的 RPC 允许列表会在发帧前本地拒绝任何未经评审的方法。
 
-控制连接 resolver 只加载一份严格 JSON 的 OpenClaw 配置。`PANEL_OPENCLAW_CONFIG_PATH` 是声明 `OPENCLAW_PROFILE` 时唯一可显式指定配置的 selector；没有它时，任何已声明 profile 都在考虑 `OPENCLAW_CONFIG_PATH`、state、home 或 legacy selector 前 fail closed。否则顺序为官方 `OPENCLAW_CONFIG_PATH`、`OPENCLAW_STATE_DIR` 下的 `openclaw.json` / `clawdbot.json`、`OPENCLAW_HOME` 下的四个默认/legacy 候选，最后是兼容旧版的 `OPENCLAW_CONFIG`。空白显式路径直接拒绝；目录 selector 仅在候选不存在时继续同目录的下一个候选，绝不落到低优先级 selector，已找到文件不可读或解析失败即拒绝。未声明 selector 时，才在 OS home 下依次查找 `~/.openclaw/openclaw.json`、`~/.openclaw/clawdbot.json`、`~/.clawdbot/openclaw.json`、`~/.clawdbot/clawdbot.json`。本批兼容层拒绝 JSON5，也拒绝严格 JSON 树中任何 `$include` 或未转义的 `${VAR}`，绝不部分解释；`$${VAR}` 保持字面量。解析/定位失败只影响 Gateway 控制可用性，绝不暴露配置正文或路径。
+控制连接 resolver 只加载一份严格 JSON 的 OpenClaw 配置。`PANEL_OPENCLAW_CONFIG_PATH` 是声明 `OPENCLAW_PROFILE` 时唯一可显式指定配置的 selector；没有它时，任何已声明 profile 都在考虑 `OPENCLAW_CONFIG_PATH`、state、home 或 legacy selector 前 fail closed。否则顺序为官方 `OPENCLAW_CONFIG_PATH`、`OPENCLAW_STATE_DIR` 下的 `openclaw.json` / `clawdbot.json`、`OPENCLAW_HOME` 下的四个默认/legacy 候选，最后是兼容旧版的 `OPENCLAW_CONFIG`。空白显式路径直接拒绝；目录 selector 仅在候选不存在时继续同目录的下一个候选，绝不落到低优先级 selector，已找到文件不可读或解析失败即拒绝。未声明 selector 时，才在 OS home 下依次查找 `~/.openclaw/openclaw.json`、`~/.openclaw/clawdbot.json`、`~/.clawdbot/openclaw.json`、`~/.clawdbot/clawdbot.json`。当前兼容层拒绝 JSON5，也拒绝严格 JSON 树中任何 `$include` 或未转义的 `${VAR}`，绝不部分解释；`$${VAR}` 保持字面量。解析/定位失败只影响 Gateway 控制可用性，绝不暴露配置正文或路径。
 
 本机端点的 scheme 来自 `gateway.tls.enabled`。port 优先级为已声明且非空合法的 `OPENCLAW_GATEWAY_PORT`、合法的 `gateway.port`、最后默认 `18789`；环境变量一旦声明为空白或非法就 fail closed，不向后回落。对同一端点，显式 `mode=none` 即使残留字段或面板环境凭据也始终禁用连接；`token` 和 `password` 模式只采用对应字段；未写 mode 时仅在恰有一种凭据时推导。`trusted-proxy` 仅在同机 password fallback 满足以下全部条件时接受：`gateway.auth.trustedProxy.userHeader` 非空白、`gateway.trustedProxies` 是元素均非空白的非空列表、配置中没有 token、未声明 `PANEL_OPENCLAW_GATEWAY_TOKEN`，并且最终选中非空 password；连接只发送 password。声明 `PANEL_OPENCLAW_GATEWAY_TOKEN` / `PASSWORD` 只覆盖该已知 mode 选中的凭据，整组全为空白时 fail closed，不回落配置文件。SecretRef 字符串或对象会参与 mode、歧义和互斥判断，但面板有意不执行 env/file/exec secret provider；选中的 SecretRef 必须有对应的非空 `PANEL_*` 明文覆盖，否则控制面保持不可用，错误和日志也不会记录 ref 细节。完整 provider 解析需另行评审集成。
 
 remote mode 与本机 `gateway.auth` 完全独立，且绝不回落本机默认端点。配置型 remote 端点必须有非空且传输安全的 `gateway.remote.url`、显式 `transport: "direct"`、未配置 `tlsFingerprint`；未声明面板凭据覆盖时只使用 `gateway.remote` 凭据。非空面板凭据组可覆盖这些凭据值，但不会改变端点 provenance 或绕过 transport 门禁。若声明的 `PANEL_OPENCLAW_GATEWAY_URL` 与配置 remote URL 的带类型 origin 相同，还必须同时声明该面板凭据组；它仍属于配置型 remote provenance，因此继续要求 `direct` 且无 fingerprint。面板不创建 SSH tunnel，也不实现 fingerprint pin；direct TLS 使用宿主机正常证书校验。只有面板 URL 指向不同 origin，或配置 remote URL 缺失时，它才可成为自包含的独立端点；此时必须同时提供非空面板凭据组，且不继承任何磁盘 secret、transport 或 pin 假设。本机模式下，若面板 URL 改变带类型的 WebSocket origin（scheme、规范化 host 类型或 port），也必须使用独立凭据；各 loopback 别名可视为同一主机，但名为 `loopback` 的普通 DNS hostname 绝不会与本机 sentinel 混同。公网端点必须使用 `wss://`；明文 `ws://` 仅允许 loopback、私网/link-local/CGNAT/ULA 字面地址以及 `.local`、`.ts.net`，与固定版本的默认传输策略一致。TLS 证书校验始终开启，自签或私有 CA 端点必须先由宿主机信任。端点断言不会改变目标 Gateway 服务端 auth mode，只能与确实强制相同 token/password 的配置同步部署，并留待 #48 验证。
 
-最终选中的共享密钥是单一受信 operator 的 owner 级凭据，不是多租户隔离边界，并应保留默认 loopback。轮换时同步更新 Gateway 与面板并重启两端，回滚时也同步恢复；本次发布不要求重新签发凭据。若服务端无法解析合法的配置、端点、transport 或凭据，面板只读访问仍可用，所有 Gateway 控制操作以稳定的 `GATEWAY_TRANSPORT_UNAVAILABLE` 失败；错误和日志不会暴露凭据、SecretRef 细节、配置正文或选中的私有路径，生产也不会回落为逐请求 Gateway CLI 连接。`PANEL_OPENCLAW_STREAMING=0` 只关闭临时文本/工具预览，同一控制 WebSocket 和三个 scope 仍用于生成、typed 命令、附件和临时 session 生命周期。预览失败不能决定 run 是否完成，但控制连接不可用时，需要 Gateway RPC 的操作会失败。经过校验的完整 transcript 始终是权威版本，并以原子方式替换任何预览。
+最终选中的共享密钥是单一受信 operator 的 owner 级凭据，不是多租户隔离边界，并应保留默认 loopback。轮换时同步更新 Gateway 与面板并重启两端，回滚时也同步恢复；启用当前精确 scope 握手本身不要求重新签发凭据。若服务端无法解析合法的配置、端点、transport 或凭据，面板只读访问仍可用，所有 Gateway 控制操作以稳定的 `GATEWAY_TRANSPORT_UNAVAILABLE` 失败；错误和日志不会暴露凭据、SecretRef 细节、配置正文或选中的私有路径，生产也不会回落为逐请求 Gateway CLI 连接。`PANEL_OPENCLAW_STREAMING=0` 只关闭临时文本/工具预览，同一控制 WebSocket 和三个 scope 仍用于生成、typed 命令、附件和临时 session 生命周期。预览失败不能决定 run 是否完成，但控制连接不可用时，需要 Gateway RPC 的操作会失败。经过校验的完整 transcript 始终是权威版本，并以原子方式替换任何预览。
 
 构建并启动:
 
@@ -226,20 +239,20 @@ server {
 边界。缺失或为 `null` 的 Origin 仍会让登录和修改请求失败，既有 CSRF token
 也仍然必需。不设置这些变量时，本机与 SSH 端口转发的 HTTP 默认行为保持不变。
 
-首个版本固定适配 OpenClaw `2026.6.11`;升级 OpenClaw 前请重新运行集成验收。
+当前固定适配 OpenClaw `2026.6.11`;升级 OpenClaw 前请重新运行集成验收。
 
 ## 文档
 
 - [架构](docs/architecture.md)
 - [实现规格说明](docs/implementation-spec.md)
 - [工程决策](docs/decisions/engineering-decisions.md)
-- [版本 1 完成状态](docs/v1-completion.md)
-- [运行时验收流程](docs/testing/runtime-acceptance.md)
-- [流式协议验收](docs/testing/streaming-acceptance.md)
-- [浏览器验收结果](docs/testing/browser-acceptance.md)
+- [文档角色与索引](docs/README.md)
+- [已取代的版本 1 上线清单](docs/v1-completion.md)
+- [当前支持与验收矩阵](docs/testing/README.md)
+- [运行时验收 runbook](docs/testing/runtime-acceptance.md)
+- [日期化流式验收证据](docs/testing/streaming-acceptance.md)
+- [日期化浏览器验收证据](docs/testing/browser-acceptance.md)
 - [开发存档](docs/archive/development-notes/)
-
-随着首次生产部署的完成，运维和验收文档仍在整理合并中。
 
 ## 许可证
 
