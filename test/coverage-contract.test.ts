@@ -6,6 +6,7 @@ const expectedExclusions = [
   "src/gateway/paneltest-smoke.ts",
   "src/gateway/runtime-acceptance-cli.ts",
   "src/gateway/stream-probe.ts",
+  "src/gateway/tool-result-schema-probe-cli.ts",
   "src/ops/backup-cli.ts",
   "src/ops/deployment-smoke.ts",
   "src/server/main.ts",

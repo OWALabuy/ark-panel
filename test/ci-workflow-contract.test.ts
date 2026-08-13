@@ -134,7 +134,7 @@ function validateWorkflow(workflow: string): void {
   const uses = [...workflow.matchAll(/^\s+uses:\s+([^\s#]+)(?:\s+#.*)?$/gmu)].map(match => match[1]!);
   assert.ok(uses.length > 0);
   for (const action of uses) assert.match(action, /^[^@\s]+@[0-9a-f]{40}$/u);
-  assert.doesNotMatch(workflow, /continue-on-error\s*:|\$\{\{\s*secrets\.|PANEL_ALLOW_(?:PANELTEST_INTEGRATION|STREAM_PROBE|RUNTIME_ACCEPTANCE|CLAUDE_RUNTIME_ACCEPTANCE)|test:(?:paneltest|stream-probe|runtime-acceptance|app-paneltest|panel-claude-runtime)/u);
+  assert.doesNotMatch(workflow, /continue-on-error\s*:|\$\{\{\s*secrets\.|PANEL_ALLOW_(?:PANELTEST_INTEGRATION|STREAM_PROBE|TOOL_RESULT_SCHEMA_PROBE|RUNTIME_ACCEPTANCE|CLAUDE_RUNTIME_ACCEPTANCE)|test:(?:paneltest|stream-probe|tool-result-schema-probe|runtime-acceptance|app-paneltest|panel-claude-runtime)/u);
 }
 
 test("CI workflow statically locks the deterministic Node 22 contract", async () => {

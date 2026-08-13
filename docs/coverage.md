@@ -50,6 +50,7 @@ The executable source of truth is the `exclusions` object in `scripts/test-cover
 | `src/gateway/paneltest-smoke.ts` | Requires a real OpenClaw test agent and gateway. |
 | `src/gateway/runtime-acceptance-cli.ts` | Live runtime acceptance command entry point. |
 | `src/gateway/stream-probe.ts` | Requires a real authenticated OpenClaw gateway. |
+| `src/gateway/tool-result-schema-probe-cli.ts` | Explicitly authorized live tool-result schema probe entry point. |
 | `src/ops/backup-cli.ts` | Manual operations command entry point; `backup.ts` remains included. |
 | `src/ops/deployment-smoke.ts` | Entry point exercised by the isolated deployment fixture CI job. |
 | `src/server/main.ts` | Production startup and dependency-composition entry point. |

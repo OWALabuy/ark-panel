@@ -27,7 +27,8 @@ export interface ToolSchemaEventShape {
   sameCallAsStart: boolean;
   namePresent: boolean;
   isError: boolean | null;
-  field: "args" | "partialResult" | "result" | "none";
+  canaryPresent: boolean | null;
+  field: "args" | "partialResult" | "result" | "terminalData" | "none";
   shape?: ToolValueShape;
 }
 
@@ -42,6 +43,7 @@ export interface ToolSchemaReport {
 }
 
 export interface ToolSchemaCollector {
+  readonly terminal: Promise<void>;
   report(): ToolSchemaReport;
   finish(): ToolSchemaReport;
 }
@@ -61,6 +63,8 @@ interface CollectorState {
   attributedUpdates: number;
   attributedTerminals: number;
   unattributedEvents: number;
+  resolveTerminal(): void;
+  canary: string | undefined;
 }
 
 const states = new WeakMap<ToolSchemaCollector, CollectorState>();
@@ -95,6 +99,14 @@ function valueAtPath(value: unknown, path: string): unknown {
   return current;
 }
 
+function terminalDataShape(data: Record<string, unknown>): Record<string, unknown> | undefined {
+  const selected: Record<string, unknown> = {};
+  for (const key of ["content", "details", "text", "stdout", "stderr", "output", "aggregated", "exitCode"] as const) {
+    if (Object.prototype.hasOwnProperty.call(data, key)) selected[key] = data[key];
+  }
+  return Object.keys(selected).length ? selected : undefined;
+}
+
 function shapeOf(value: unknown): ToolValueShape {
   let serializedBytes: number | null = null;
   try {
@@ -127,6 +139,14 @@ function shapeOf(value: unknown): ToolValueShape {
   return Object.freeze({ rootKind: kind(value), serializedBytes, ...totals, candidateKinds: Object.freeze(candidateKinds) });
 }
 
+function containsString(value: unknown, expected: string, depth = 0, visited = { count: 0 }): boolean {
+  if (visited.count >= MAX_NODES || depth > MAX_DEPTH) return false;
+  visited.count++;
+  if (typeof value === "string") return value.includes(expected);
+  if (Array.isArray(value)) return value.some(item => containsString(item, expected, depth + 1, visited));
+  const valueRecord = record(value); return valueRecord ? Object.values(valueRecord).some(item => containsString(item, expected, depth + 1, visited)) : false;
+}
+
 function immutableReport(state: CollectorState): ToolSchemaReport {
   return Object.freeze({ eventCount: state.events.length, droppedEventCount: state.droppedEventCount,
     sourceCounts: Object.freeze({ ...state.sourceCounts }), phaseCounts: Object.freeze({ ...state.phaseCounts }),
@@ -137,15 +157,18 @@ function immutableReport(state: CollectorState): ToolSchemaReport {
     events: Object.freeze(state.events.map(event => Object.freeze({ ...event }))) });
 }
 
-export function createToolSchemaCollector(sessionKey: string, runId: string): ToolSchemaCollector {
+export function createToolSchemaCollector(sessionKey: string, runId: string, canary?: string): ToolSchemaCollector {
   if (!nonEmpty(sessionKey) || !nonEmpty(runId)) throw new Error("tool schema collector requires an exact session and run");
+  if (canary !== undefined && !nonEmpty(canary)) throw new Error("tool schema collector requires a non-empty canary");
+  let resolveTerminal!: () => void;
+  const terminal = new Promise<void>(resolve => { resolveTerminal = resolve; });
   const current = (): CollectorState => { const state = states.get(collector); if (!state) throw new Error("tool schema collector is closed"); return state; };
-  const collector: ToolSchemaCollector = Object.freeze({ report: () => immutableReport(current()), finish: () => {
+  const collector: ToolSchemaCollector = Object.freeze({ terminal, report: () => immutableReport(current()), finish: () => {
     const report = immutableReport(current()); states.delete(collector); return report;
   } });
   states.set(collector, { sessionKey, runId, events: [], droppedEventCount: 0, sourceCounts: { agent: 0, sessionTool: 0 },
     phaseCounts: { start: 0, update: 0, terminal: 0 }, previousSequence: undefined, equalCount: 0, regressionCount: 0,
-    calls: new Set(), startedCalls: 0, attributedUpdates: 0, attributedTerminals: 0, unattributedEvents: 0 });
+    calls: new Set(), startedCalls: 0, attributedUpdates: 0, attributedTerminals: 0, unattributedEvents: 0, resolveTerminal, canary });
   return collector;
 }
 
@@ -171,12 +194,15 @@ export function observeToolSchemaFrame(collector: ToolSchemaCollector, eventName
   if (phase === "start") { if (!sameCallAsStart) { state.calls.add(callId); state.startedCalls++; } }
   else if (sameCallAsStart) { if (phase === "update") state.attributedUpdates++; else state.attributedTerminals++; }
   else state.unattributedEvents++;
+  const directTerminal = phase === "terminal" && data.result === undefined ? terminalDataShape(data) : undefined;
   const field = phase === "start" && data.args !== undefined ? "args" : phase === "update" && data.partialResult !== undefined ? "partialResult" :
-    phase === "terminal" && data.result !== undefined ? "result" : "none";
-  const value = field === "none" ? undefined : data[field];
+    phase === "terminal" && data.result !== undefined ? "result" : directTerminal ? "terminalData" : "none";
+  const value = field === "terminalData" ? directTerminal : field === "none" ? undefined : data[field];
   const event: ToolSchemaEventShape = Object.freeze({ source: eventName, phase, sequenceRelation,
     sameCallAsStart: phase === "start" ? true : sameCallAsStart, namePresent: Boolean(nonEmpty(data.name) ?? nonEmpty(data.toolName)),
-    isError: typeof data.isError === "boolean" ? data.isError : null, field, ...(field === "none" ? {} : { shape: shapeOf(value) }) });
+    isError: typeof data.isError === "boolean" ? data.isError : null,
+    canaryPresent: phase === "terminal" && state.canary ? containsString(value, state.canary) : null,
+    field, ...(field === "none" ? {} : { shape: shapeOf(value) }) });
   state.events.push(event); state.sourceCounts[eventName === "agent" ? "agent" : "sessionTool"]++; state.phaseCounts[phase]++;
-  if (phase === "terminal") state.calls.delete(callId);
+  if (phase === "terminal") { state.calls.delete(callId); if (sameCallAsStart && field !== "none") state.resolveTerminal(); }
 }

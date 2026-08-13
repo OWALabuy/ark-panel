@@ -33,6 +33,44 @@ npm run test:stream-probe
 
 成功输出只含版本、事件计数和连接状态，不打印 token、prompt、工具 stdout 或 Gateway 密钥。OpenClaw 版本升级后必须先重新运行此探针，再调整版本门禁。
 
+## 当前 tool-result schema 探针（尚未实机执行）
+
+`test:tool-result-schema-probe` 是 #27 的独立、默认关闭入口。它只回答真实
+`2026.6.11` Gateway 上一次 `exec` 调用的事件顺序与 result 字段结构，不实现或启用
+result/stdout 呈现，也不能代替 #48 的 bootstrap、skills 或 memory runtime 验收。
+
+命令不会提供 agent、配置或 sessions root 默认值，也不会在 npm script 中自动开启
+gate。运行前必须由人核对专用 agent、显式配置文件与隔离 sessions root，然后同时给出
+环境 gate 和精确确认串：
+
+```sh
+PANEL_ALLOW_TOOL_RESULT_SCHEMA_PROBE=1 \
+PANEL_TOOL_RESULT_SCHEMA_SESSIONS_ROOT=/explicit/openclaw/agents/panel-probe-example/sessions \
+PANEL_TOOL_RESULT_SCHEMA_CONFIG_PATH=/explicit/openclaw/openclaw.json \
+npm run --silent test:tool-result-schema-probe -- \
+  --agent panel-probe-example \
+  --expected-version 2026.6.11 \
+  --scenario exec-printf-v1 \
+  --max-tool-calls 1 \
+  --cleanup delete-created-session-v1 \
+  --confirm tool-result-schema:panel-probe-example:2026.6.11
+```
+
+这是模板，不是当前机器的已授权目标，不能直接照抄执行。两个敏感路径只通过环境变量
+传入，受支持命令必须带 `--silent`，防止 npm 在 CLI 启动前回显它们。preflight 在创建 session 前
+验证 strict JSON 配置、目标零 bindings、root 的 canonical 路径/dev/inode、固定版本和
+Gateway 认证；创建一次性 session 后还要求 effective tool inventory **精确等于**
+`{exec}`，否则零 send 并清理。发送内容固定，不接受 prompt 参数。完成必须同时看到
+同一次调用的 sanitized terminal result shape 和权威 trajectory terminal；没有固定
+`250ms` sleep，也不会重发。
+
+`maxToolCalls=1` 是观察后的失败关闭界限，不是工具沙箱：第二个 start 被观察时，调用
+可能已经开始。因此只有经明确授权的专用、零绑定 agent 才能运行。输出只含固定 shape
+种类、计数和字节数；不含配置/root、Gateway URL、凭据、session/run/call ID、tool 名、
+prompt、args、result/stdout 值、动态 key、hash 或 artifact 名。失败只输出固定错误码。
+直到一次获授权的实际运行产生日期化证据前，upstream result schema 仍是 `unknown`，
+#27 仍保持 open。
+
 ## 降级边界
 
 流式观察器只负责体验，不负责完成判定。认证失败、WebSocket 断开、事件丢失或服务重启都不得重发请求或破坏 run；生成继续由原有 CLI 提交与 trajectory watcher 监督。最终 transcript 仍经过完整 entry 校验和原子提交，正常完成时替换临时预览。

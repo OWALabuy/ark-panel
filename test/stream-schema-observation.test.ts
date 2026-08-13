@@ -54,3 +54,18 @@ test("tool schema observation is scoped, sequence-aware, bounded, and fail-close
   assert.equal(report.lifecycle.unattributedEvents, 61, "terminal closes attribution for every later update");
   assert.equal(report.events[2]?.shape?.rootKind, "null");
 });
+
+test("terminal data-level result candidates exclude identities, names, and dynamic keys", () => {
+  const collector = createToolSchemaCollector("agent:fixture:target", "target-run");
+  observeToolSchemaFrame(collector, "session.tool", { runId: "target-run", sessionKey: "agent:fixture:target", seq: 1, stream: "tool",
+    data: { phase: "start", toolCallId: "private-call", name: "private-name", args: {} } });
+  observeToolSchemaFrame(collector, "session.tool", { runId: "target-run", sessionKey: "agent:fixture:target", seq: 2, stream: "tool",
+    data: { phase: "result", toolCallId: "private-call", name: "private-name", stdout: "private-stdout", output: ["private-output"],
+      "private-dynamic-key": "private-dynamic-value" } });
+  const terminal = collector.finish().events[1];
+  assert.equal(terminal?.field, "terminalData");
+  assert.deepEqual(terminal?.shape?.candidateKinds, { stdout: "string", output: "array" });
+  const encoded = JSON.stringify(terminal);
+  for (const value of ["private-call", "private-name", "private-stdout", "private-output", "private-dynamic-key", "private-dynamic-value"])
+    assert.equal(encoded.includes(value), false);
+});
