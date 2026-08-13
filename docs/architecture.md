@@ -112,6 +112,9 @@ Gateway 的 `chat` 与 `agent` / `session.tool` 事件只形成进程内临时�
 SSE 断开不表示 run 完成，预览丢失也不能决定终态。只有完成后重新读取、校验并原子
 提交的完整 transcript 才是权威版本；失败或中止不持久化部分预览。
 
+浏览器内的 run registry 只拥有按会话索引的内存快照和 v1 `localStorage` 持久化；
+网络恢复、SSE 观察、composer 所有权与界面协调仍由应用层编排。
+
 ## 5. Gateway 适配与权限
 
 当前适配固定为 OpenClaw `2026.6.11`。面板复用一条服务端控制 WebSocket，身份为

@@ -3,8 +3,9 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 test("frontend renders untrusted metadata with DOM text nodes", async () => {
-  const source=await readFile("src/frontend/app.js","utf8"),runEventStream=await readFile("src/frontend/run-event-stream.js","utf8"),composerState=await readFile("src/frontend/composer-state.js","utf8"),markdown=await readFile("src/frontend/markdown.js","utf8"),i18n=await readFile("src/frontend/i18n/index.js","utf8"),zh=await readFile("src/frontend/i18n/zh-CN.js","utf8");
+  const source=await readFile("src/frontend/app.js","utf8"),runRegistry=await readFile("src/frontend/run-registry.js","utf8"),runEventStream=await readFile("src/frontend/run-event-stream.js","utf8"),composerState=await readFile("src/frontend/composer-state.js","utf8"),markdown=await readFile("src/frontend/markdown.js","utf8"),i18n=await readFile("src/frontend/i18n/index.js","utf8"),zh=await readFile("src/frontend/i18n/zh-CN.js","utf8");
   assert.doesNotMatch(source,/\.innerHTML\s*=/);
+  assert.doesNotMatch(runRegistry,/\b(?:window|document|localStorage|globalThis|composerState)\b/);
   assert.doesNotMatch(composerState,/\.innerHTML\s*=/);
   assert.doesNotMatch(markdown,/\.innerHTML\s*=/);
   assert.match(source,/textContent=/);
@@ -91,13 +92,14 @@ test("frontend renders untrusted metadata with DOM text nodes", async () => {
   assert.match(source,/function renderStreamPreview\(run\)/);
   assert.match(source,/className="message assistant streaming stream-preview"/);
   assert.match(source,/terminalRun\(run\.status\)\|\|!stream/);
-  assert.match(source,/Object\.prototype\.hasOwnProperty\.call\(raw,"stream"\)\?raw\.stream:undefined/);
+  assert.match(runRegistry,/own\(raw,"stream"\)\?raw\.stream:undefined/);
   assert.match(styles,/\.message\.streaming/);
   assert.match(runEventStream,/if\(!terminal\)throw dropped/);
-  assert.match(source,/RUN_PREFIX="ark-panel:run:v1:"/);
-  assert.match(source,/runsBySession=new Map\(\)/);
+  assert.match(runRegistry,/RUN_PREFIX="ark-panel:run:v1:"/);
+  assert.match(runRegistry,/runs=new Map\(\)/);
   assert.match(source,/function recoverStoredRuns/);
   assert.match(source,/function reconcileCreatedRun/);
+  assert.match(source,/function rememberServerRun\(value,local\)\{[\s\S]*?if\(local&&!same\)discardRun\(local\);[\s\S]*?runRegistry\.rememberServer/);
   assert.match(source,/"idempotency-key":run\.runId/);
   assert.match(source,/submittedDraft:message/);
   assert.match(source,/if\(run\.status==="completed"\)\{const agentId=run\.agentId\|\|activeAgent,scope=composerScope\(run\.recordId,agentId\),currentDraft=/);
@@ -123,10 +125,10 @@ test("frontend renders untrusted metadata with DOM text nodes", async () => {
 });
 
 test("generation state only locks the composer for its own session", async () => {
-  const source=await readFile("src/frontend/app.js","utf8");
+  const source=await readFile("src/frontend/app.js","utf8"),runRegistry=await readFile("src/frontend/run-registry.js","utf8");
 
-  assert.match(source,/runsBySession=new Map\(\)/);
-  assert.match(source,/function syncActiveRun\(\)\{activeRun=runsBySession\.get\(activeSession\)\|\|null\}/);
+  assert.match(runRegistry,/runs=new Map\(\)/);
+  assert.match(source,/function syncActiveRun\(\)\{activeRun=.*runRegistry\.get\(activeSession\).*\|\|null\}/);
   assert.match(source,/activeSession=id;[\s\S]*?syncActiveRun\(\);[\s\S]*?restoreDraft\(id\);[\s\S]*?updateComposer\(\)/);
   assert.match(source,/const textarea=\$\("#message"\),running=Boolean\(activeRun\)/);
   assert.match(source,/textarea\.disabled=busy\|\|!writable/);
@@ -439,6 +441,7 @@ test("all Markdown surfaces share the external-image privacy renderer", async ()
 
 test("composer uploads raw attachments and preserves their ids for idempotent run recovery", async () => {
   const source=await readFile("src/frontend/app.js","utf8");
+  const runRegistry=await readFile("src/frontend/run-registry.js","utf8");
   const composerState=await readFile("src/frontend/composer-state.js","utf8");
   const html=await readFile("src/frontend/index.html","utf8");
   const styles=await readFile("src/frontend/styles.css","utf8");
@@ -449,7 +452,7 @@ test("composer uploads raw attachments and preserves their ids for idempotent ru
   assert.match(source,/addEventListener\("paste"/);
   assert.match(source,/addEventListener\("drop"/);
   assert.match(source,/attachmentIds:run\.submittedAttachmentIds/);
-  assert.match(source,/submittedAttachmentIds:run\.submittedAttachmentIds/);
+  assert.match(runRegistry,/submittedAttachmentIds:run\.submittedAttachmentIds/);
   assert.match(source,/composerState\.complete\(scope,run,currentDraft\)/);
   assert.match(source,/composerState\.commitSubmission\(submissionReceipt,idempotencyKey,attachmentIds\)/);
   assert.match(source,/\/api\/v1\/files\/\$\{encodeURIComponent\(block\.id\)\}\/download/);
@@ -467,6 +470,7 @@ test("composer uploads raw attachments and preserves their ids for idempotent ru
 
 test("per-turn output intent is accessible, draft-scoped, and preserved until run acceptance", async () => {
   const source=await readFile("src/frontend/app.js","utf8");
+  const runRegistry=await readFile("src/frontend/run-registry.js","utf8");
   const html=await readFile("src/frontend/index.html","utf8");
   const styles=await readFile("src/frontend/styles.css","utf8");
 
@@ -475,14 +479,14 @@ test("per-turn output intent is accessible, draft-scoped, and preserved until ru
   assert.match(html,/class="request-outputs-icon"[^>]*>▧</);
   assert.doesNotMatch(html,/id="request-outputs"[^>]*>[\s\S]*?data-i18n="composer\.requestOutputs"/);
   assert.match(source,/composerState\.promoteSubmission\(submissionReceipt,previousScope,createdScope\)/);
-  assert.match(source,/submittedRequestOutputs:run\.submittedRequestOutputs/);
+  assert.match(runRegistry,/submittedRequestOutputs:run\.submittedRequestOutputs/);
   assert.match(source,/requestOutputs:run\.submittedRequestOutputs/);
   assert.match(source,/clearAcceptedOutputIntent\(accepted\);if\(!await settleRun\(accepted\)\)/);
   assert.match(source,/function clearAcceptedOutputIntent\(run\)\{composerState\.acceptOutputIntent\(composerScope\(run\.recordId,run\.agentId\|\|activeAgent\),run\.submittedRequestOutputs===true\)\}/);
-  assert.match(source,/status:run\.status,createPhase:run\.createPhase/);
+  assert.match(runRegistry,/status:run\.status,createPhase:run\.createPhase/);
   assert.match(source,/createPhase:"provisional",submittedDraft:message/);
   assert.match(source,/recoverPersistedRun\(run,\{getRun:/);
-  assert.match(source,/if\(acknowledgedStorageAction\(run\)==="remove"\)forgetRun\(run\)/);
+  assert.match(source,/if\(acknowledgedStorageAction\(run\)==="remove"\)runRegistry\.forget\(run\.recordId\)/);
   assert.match(source,/\$\("#request-outputs"\)\.disabled=busy\|\|!writable\|\|command/);
   assert.match(source,/textContent=enabled\?"✓":"▧"/);
   assert.match(styles,/\.request-outputs\[aria-pressed="true"\]/);
