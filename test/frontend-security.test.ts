@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 test("frontend renders untrusted metadata with DOM text nodes", async () => {
-  const source=await readFile("src/frontend/app.js","utf8"),composerState=await readFile("src/frontend/composer-state.js","utf8"),markdown=await readFile("src/frontend/markdown.js","utf8"),i18n=await readFile("src/frontend/i18n/index.js","utf8"),zh=await readFile("src/frontend/i18n/zh-CN.js","utf8");
+  const source=await readFile("src/frontend/app.js","utf8"),runEventStream=await readFile("src/frontend/run-event-stream.js","utf8"),composerState=await readFile("src/frontend/composer-state.js","utf8"),markdown=await readFile("src/frontend/markdown.js","utf8"),i18n=await readFile("src/frontend/i18n/index.js","utf8"),zh=await readFile("src/frontend/i18n/zh-CN.js","utf8");
   assert.doesNotMatch(source,/\.innerHTML\s*=/);
   assert.doesNotMatch(composerState,/\.innerHTML\s*=/);
   assert.doesNotMatch(markdown,/\.innerHTML\s*=/);
@@ -65,7 +65,7 @@ test("frontend renders untrusted metadata with DOM text nodes", async () => {
   assert.match(markdown,/function mathBlock/);
   assert.match(styles,/\.math-display/);
   assert.doesNotMatch(markdown,/insertAdjacentHTML|document\.write|eval\(/);
-  assert.match(source,/text\/event-stream/);
+  assert.match(runEventStream,/text\/event-stream/);
   assert.match(source,/\/search\?q=/);
   assert.match(source,/\/fork/);
   assert.match(source,/\/resend/);
@@ -87,13 +87,13 @@ test("frontend renders untrusted metadata with DOM text nodes", async () => {
   assert.match(source,/\/runs\/\$\{encodeURIComponent\(run\.runId\)\}\/abort/);
   assert.match(source,/\/runs\/\$\{encodeURIComponent\(run\.runId\)\}\/events/);
   assert.match(source,/\/sessions\/\$\{encodeURIComponent\(recordId\)\}\/runs\/active/);
-  assert.match(source,/streamDropped/);
+  assert.match(runEventStream,/streamDropped/);
   assert.match(source,/function renderStreamPreview\(run\)/);
   assert.match(source,/className="message assistant streaming stream-preview"/);
   assert.match(source,/terminalRun\(run\.status\)\|\|!stream/);
   assert.match(source,/Object\.prototype\.hasOwnProperty\.call\(raw,"stream"\)\?raw\.stream:undefined/);
   assert.match(styles,/\.message\.streaming/);
-  assert.match(source,/if\(!terminal\)throw Object\.assign/);
+  assert.match(runEventStream,/if\(!terminal\)throw dropped/);
   assert.match(source,/RUN_PREFIX="ark-panel:run:v1:"/);
   assert.match(source,/runsBySession=new Map\(\)/);
   assert.match(source,/function recoverStoredRuns/);
