@@ -127,8 +127,11 @@ SSE 断开不表示 run 完成，预览丢失也不能决定终态。只有完�
 run creation reconciler factory 协调；存储扫描和会话 active-run 接管由 DOM-free 的 run
 bootstrap factory 编排。新会话 scope 提升、附件上传、submission receipt 提交、provisional
 run、服务端接管与不确定创建恢复由 DOM-free 的 generation submission coordinator 按固定
-顺序编排。各模块的持久化、传输、终态处理、composer 所有权与界面反馈均由 `app.js`
-通过显式 capability port 注入；模块不读取 DOM、locale、全局 fetch 或隐式浏览器状态。
+顺序编排。run controller 统一拥有本地与服务端快照接管、持久化失败关闭、替换 run 丢弃、
+completed/failed/aborted 终态结算和 abort 后的继续观察；它通过显式 capability port 调用
+registry、composer、传输与展示效果，不读取 DOM、locale、全局 fetch 或隐式浏览器状态。
+`app.js` 只提供同源 API adapter、当前会话投影和本地化界面效果，再把 controller 方法接到
+observer、creation reconciler、bootstrap 与 submission coordinator。
 
 ## 5. Gateway 适配与权限
 

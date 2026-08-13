@@ -8,7 +8,8 @@ import {createRunObserver} from "./run-observer.js";
 import {createRunCreationReconciler} from "./run-creation-reconciler.js";
 import {createRunBootstrap} from "./run-bootstrap.js";
 import {createGenerationSubmissionCoordinator} from "./generation-submission.js";
-import {acknowledgedStorageAction,uncertainCreateError} from "./run-recovery-policy.js";
+import {createRunController} from "./run-controller.js";
+import {uncertainCreateError} from "./run-recovery-policy.js";
 import {consumeRunEventStream} from "./run-event-stream.js";
 
 // Mirrors the normalized response DTOs constructed by src/server/app.ts. Keep
@@ -263,16 +264,32 @@ function readDraft(sessionId=activeSession,agentId=activeAgent){return composerS
 function saveDraft(value,sessionId=activeSession,agentId=activeAgent){composerState.saveDraft(composerScope(sessionId,agentId),value)}
 function readOutputIntent(sessionId=activeSession,agentId=activeAgent){return composerState.readOutputIntent(composerScope(sessionId,agentId))}
 function saveOutputIntent(value,sessionId=activeSession,agentId=activeAgent){composerState.saveOutputIntent(composerScope(sessionId,agentId),value)}
-function terminalRun(status){return status==="completed"||status==="failed"||status==="aborted"}
+const runController=createRunController({
+  registry:runRegistry,
+  composer:composerState,
+  activeContext:()=>({agentId:activeAgent,recordId:activeSession}),
+  currentDraft:scope=>composerState.scopeKey(scope)===attachmentDraftKey()?$("#message").value:composerState.currentDraft(scope),
+  invalidRunError:()=>new Error(t("error.runInvalid")),
+  requestAbort:run=>api(`/runs/${encodeURIComponent(String(run.runId))}/abort`,{method:"POST",body:"{}"}),
+  watch:run=>watchRun(/** @type {ClientRunDto} */(run)),
+  events:{
+    remembered:run=>setRunUi(/** @type {ClientRunDto} */(run)),
+    discarded:()=>{syncActiveRun();updateComposer()},
+    terminal:run=>setUnreadRun(/** @type {ClientRunDto} */(run)),
+    terminalActive:run=>setRunUi(/** @type {ClientRunDto} */(run)),
+    failedActive:run=>{const value=/** @type {ClientRunDto} */(run),error=runError(value);showError(error,error.code==="CONTEXT_BUDGET_EXCEEDED"&&activeSource==="panel"?()=>void requestCompact():()=>{$("#composer").requestSubmit()});if(!document.hidden)clearUnreadRun(value.recordId)},
+    completedActive:async run=>{if(run.revision)activeRevision=String(run.revision);await openSession(String(run.recordId))},
+    settled:()=>{syncActiveRun();renderPendingAttachments();updateComposer()},
+    abortUnknown:(run,error)=>{if(activeSession===run.recordId){$("#subtitle").textContent=t("error.stopUnknown");showError(new Error(t("error.stopUnconfirmed",{message:error instanceof Error?error.message:t("error.network")})))}}
+  }
+});
+function terminalRun(status){return runController.isTerminal(status)}
 /** @param {RunInputDto|null|undefined} value @param {RunInputDto} [fallback] @returns {ClientRunDto} */
-function normalizeRun(value,fallback={}){return /** @type {ClientRunDto} */(runRegistry.normalize(value,fallback))}
+function normalizeRun(value,fallback={}){return /** @type {ClientRunDto} */(runController.normalize(/** @type {Record<string,unknown>} */(value),/** @type {Record<string,unknown>} */(fallback)))}
 /** @param {ClientRunDto} run */
-// A stale provisional is discarded synchronously before its replacement is
-// remembered; acknowledged run ids remain queryable and cannot be replaced
-// while active, so the storage-only branch cannot race a newer local run.
-function discardRun(run){const current=/** @type {ClientRunDto|undefined} */(runRegistry.get(run.recordId));if(current?.runId===run.runId)runRegistry.delete(run.recordId);else runRegistry.forget(run.recordId);composerState.discardCompletionOwnership(run.runId);syncActiveRun();updateComposer()}
+function discardRun(run){runController.discard(run)}
 /** @param {RunInputDto} value @param {ClientRunDto|undefined} local */
-function rememberServerRun(value,local){const server=normalizeRun(value),same=Boolean(local&&local.runId===server.runId&&local.recordId===server.recordId);if(local&&!same)discardRun(local);const candidate=normalizeRun(server,same?local:undefined);candidate.agentId=candidate.agentId||activeAgent;const run=/** @type {ClientRunDto} */(runRegistry.rememberServer(candidate,same?local:undefined));if(acknowledgedStorageAction(run)==="remove")runRegistry.forget(run.recordId);setRunUi(run);return run}
+function rememberServerRun(value,local){return /** @type {ClientRunDto} */(runController.rememberServer(/** @type {Record<string,unknown>} */(value),local))}
 function syncActiveRun(){activeRun=/** @type {ClientRunDto|undefined} */(runRegistry.get(activeSession))||null}
 /** @param {ClientRunDto} run */
 function setRunUi(run){if(activeSession!==run.recordId)return;syncActiveRun();$("#subtitle").textContent=t(run.stream?.state==="degraded"?"run.degraded":`run.${run.status}`);$("#send").textContent=terminalRun(run.status)?"↑":"■";$("#send").setAttribute("aria-label",t(run.status==="aborting"?"composer.aborting":terminalRun(run.status)?"composer.send":"composer.stop"));renderStreamPreview(run);updateComposer()}
@@ -281,11 +298,11 @@ function renderStreamPreview(run){const root=$("#messages"),existing=root.queryS
 /** @param {ClientRunDto} run */
 function runError(run){const value=run.error;return Object.assign(new Error(typeof value==="string"?value:value?.message||value?.code||run.message||t("run.failed")),{code:typeof value==="object"?value?.code:undefined})}
 /** @param {ClientRunDto} run */
-async function settleRun(run){run=normalizeRun(run);if(!terminalRun(run.status))return false;runRegistry.delete(run.recordId);setUnreadRun(run);if(run.status==="completed"){const agentId=run.agentId||activeAgent,scope=composerScope(run.recordId,agentId),currentDraft=composerState.scopeKey(scope)===attachmentDraftKey()?$("#message").value:composerState.currentDraft(scope);composerState.complete(scope,run,currentDraft);if(activeSession===run.recordId){if(run.revision)activeRevision=String(run.revision);await openSession(run.recordId)}}else{composerState.discardCompletionOwnership(run.runId);if(activeSession===run.recordId){setRunUi(run);if(run.status==="failed"){const error=runError(run);showError(error,error.code==="CONTEXT_BUDGET_EXCEEDED"&&activeSource==="panel"?()=>void requestCompact():()=>{$("#composer").requestSubmit()});if(!document.hidden)clearUnreadRun(run.recordId)}}}syncActiveRun();renderPendingAttachments();updateComposer();return true}
+async function settleRun(run){return runController.settle(run)}
 /** @param {ClientRunDto} run @returns {Promise<ClientRunDto>} */
 async function queryRun(run){return normalizeRun(await api(`/runs/${encodeURIComponent(run.runId)}`),run)}
 /** @param {RunInputDto} value @returns {ClientRunDto} */
-function rememberRun(value){const candidate=normalizeRun(value);if(!candidate.runId||!candidate.recordId)throw new Error(t("error.runInvalid"));candidate.agentId=candidate.agentId||activeAgent;const run=/** @type {ClientRunDto} */(runRegistry.remember(candidate));if(acknowledgedStorageAction(run)==="remove")runRegistry.forget(run.recordId);setRunUi(run);return run}
+function rememberRun(value){return /** @type {ClientRunDto} */(runController.rememberLocal(/** @type {Record<string,unknown>} */(value)))}
 function resizeComposer(){const textarea=$("#message");textarea.style.height="auto";if(textarea.value)textarea.style.height=textarea.scrollHeight+"px"}
 function restoreDraft(sessionId=activeSession){const textarea=$("#message");textarea.value=activeSource==="panel"?readDraft(sessionId):"";resizeComposer();renderPendingAttachments()}
 function renderOutputIntent(){const button=$("#request-outputs"),enabled=readOutputIntent();button.setAttribute("aria-pressed",String(enabled));button.setAttribute("aria-label",t("composer.requestOutputsLabel"));button.title=t("composer.requestOutputsHelp");button.querySelector(".request-outputs-icon").textContent=enabled?"✓":"▧"}
@@ -447,7 +464,7 @@ $("#image-preview-dialog").addEventListener("close",()=>{$("#image-preview-image
 $("#image-preview-dialog").addEventListener("click",event=>{if(event.target===$("#image-preview-dialog"))$("#image-preview-dialog").close()});
 $("#message").addEventListener("paste",event=>{const images=[...(event.clipboardData?.files||[])].filter(file=>file.type.startsWith("image/"));if(!images.length)return;event.preventDefault();addPendingFiles(images)});
 let composerDragDepth=0;const composer=$("#composer"),dragHasFiles=event=>[...(event.dataTransfer?.types||[])].includes("Files");composer.addEventListener("dragenter",event=>{if(!dragHasFiles(event))return;event.preventDefault();composerDragDepth++;composer.classList.add("dragging")});composer.addEventListener("dragover",event=>{if(!dragHasFiles(event))return;event.preventDefault();event.dataTransfer.dropEffect="copy"});composer.addEventListener("dragleave",()=>{composerDragDepth=Math.max(0,composerDragDepth-1);if(!composerDragDepth)composer.classList.remove("dragging")});composer.addEventListener("drop",event=>{composerDragDepth=0;composer.classList.remove("dragging");if(!event.dataTransfer?.files.length)return;event.preventDefault();addPendingFiles(event.dataTransfer.files)});
-$("#send").addEventListener("click",async event=>{if(!activeRun)return;event.preventDefault();const run=activeRun;rememberRun({...run,status:"aborting"});try{const snapshot=rememberRun(await api(`/runs/${encodeURIComponent(run.runId)}/abort`,{method:"POST",body:"{}"}));if(!await settleRun(snapshot))void watchRun(snapshot)}catch(error){if(activeSession===run.recordId){$("#subtitle").textContent=t("error.stopUnknown");showError(new Error(t("error.stopUnconfirmed",{message:error.message||t("error.network")})))}void watchRun(run)}});
+$("#send").addEventListener("click",event=>{if(!activeRun)return;event.preventDefault();void runController.abort(activeRun)});
 $("#composer").addEventListener("submit",event=>{const message=$("#message").value;if(!message.trimStart().startsWith("/"))return;event.preventDefault();event.stopImmediatePropagation();if(!message.trim()||!activeSession||activeRun||isAttachmentSubmissionActive())return;if(currentPendingAttachments().length){showError(new Error(t("attachment.commandForbidden")));return}void dispatchCommand(message).catch(error=>showError(error,()=>$("#composer").requestSubmit()))},{capture:true});
 $("#composer").onsubmit=async event=>{
   event.preventDefault();const textarea=$("#message"),message=textarea.value,pending=currentPendingAttachments(),requestOutputs=readOutputIntent();
