@@ -16,6 +16,7 @@ import {
 } from "../dist/test/browser-startup-ownership.js";
 import { spawnOwnedGeckodriver, waitForOwnedGeckodriverStatus } from "../dist/test/geckodriver-service.js";
 import { withTimeout } from "../dist/test/test-helpers.js";
+import { inspectBrowserSuccessScreenshot } from "../dist/test/browser-success-screenshot.js";
 import { startBrowserFixture } from "./browser-fixture.mjs";
 
 const WAIT_MS = 10_000;
@@ -297,6 +298,24 @@ async function retainFailureScreenshot(driver, name, diagnostics) {
   } catch { diagnostics.push("SCREENSHOT_WRITE_FAILED"); }
 }
 
+async function assertSuccessScreenshot(driver, expected) {
+  const state = await driver.executeAsyncScript(`
+    const done=arguments[arguments.length-1],root=document.documentElement,error=document.querySelector('#error');
+    root.dataset.theme='light';root.dataset.accent='default';
+    Promise.resolve(document.fonts?.ready).then(()=>requestAnimationFrame(()=>requestAnimationFrame(()=>done({
+      theme:root.dataset.theme,accent:root.dataset.accent,errorHidden:error.hidden,
+      appVisible:getComputedStyle(document.querySelector('#app')).display!=='none',width:innerWidth,height:innerHeight
+    }))));
+  `);
+  assert.deepEqual({ theme: state.theme, accent: state.accent, errorHidden: state.errorHidden, appVisible: state.appVisible },
+    { theme: "light", accent: "default", errorHidden: true, appVisible: true });
+  assert.ok(state.width >= expected.minWidth && state.width <= expected.maxWidth, JSON.stringify(state));
+  assert.ok(state.height >= expected.minHeight && state.height <= expected.maxHeight, JSON.stringify(state));
+  const encoded = await withTimeout(driver.takeScreenshot(), "sanitized browser success screenshot", CLEANUP_MS);
+  const result = await inspectBrowserSuccessScreenshot(encoded, { width: state.width, height: state.height });
+  assert.ok(result.uniqueColors >= 16); assert.ok(result.entropy >= 0.25);
+}
+
 function asError(error) {
   return error instanceof Error ? error : new Error("Browser scenario rejected with a non-Error value");
 }
@@ -569,6 +588,7 @@ test("desktop browser acceptance covers security and session lifecycle", {
     await reloadAuthenticated(driver);
     await openSession(driver, "fixture-1");
     assert.equal(await driver.executeScript("return document.querySelector('#conversation-status').hidden"), false);
+    await assertSuccessScreenshot(driver, { minWidth: 1440, maxWidth: 1440, minHeight: 720, maxHeight: 900 });
     assert.equal(await driver.executeScript("return globalThis.__fixtureXss"), null);
     assert.equal(await driver.executeScript("return document.querySelectorAll('#messages script').length"), 0);
     assert.equal(await driver.executeScript("return [...document.querySelectorAll('#messages a')].some(link => link.href.startsWith('javascript:'))"), false);
@@ -1106,5 +1126,6 @@ test("coarse mobile browser acceptance uses touch-safe controls", {
     await waitText(driver, "#messages", "虚构 SSE 回复：移动端第一行");
     await waitEnabled(driver, "#message", true);
     assert.equal(await (await visible(driver, "#request-outputs")).getAttribute("aria-pressed"), "false");
+    await assertSuccessScreenshot(driver, { minWidth: 320, maxWidth: 760, minHeight: 600, maxHeight: 844 });
   });
 });

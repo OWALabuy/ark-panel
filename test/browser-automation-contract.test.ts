@@ -35,6 +35,11 @@ test("browser harness preserves primary failures and diagnoses bounded cleanup",
   assert.match(harness, /Object\.freeze\(\{\s*desktop: resolve\(FAILURE_ROOT, "desktop\.png"\),\s*mobile: resolve\(FAILURE_ROOT, "mobile\.png"\)/);
   assert.match(harness, /SCREENSHOT_CAPTURE_FAILED/);
   assert.match(harness, /SCREENSHOT_WRITE_FAILED/);
+  assert.match(harness, /inspectBrowserSuccessScreenshot\(encoded, \{ width: state\.width, height: state\.height \}\)/);
+  assert.match(harness, /driver\.takeScreenshot\(\), "sanitized browser success screenshot"/);
+  assert.match(harness, /assertSuccessScreenshot\(driver, \{ minWidth: 1440, maxWidth: 1440, minHeight: 720, maxHeight: 900 \}\)/);
+  assert.match(harness, /assertSuccessScreenshot\(driver, \{ minWidth: 320, maxWidth: 760, minHeight: 600, maxHeight: 844 \}\)/);
+  assert.doesNotMatch(harness, /writeFileSync\([^\n]*success/i);
   assert.match(harness, /BrowserCleanupController/);
   assert.match(harness, /cleanup\.beginStartup\(\)/);
   assert.match(harness, /attachOwnedProcessesOrStop\(cleanup, service, CLEANUP_MS\)/);
