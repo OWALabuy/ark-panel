@@ -58,6 +58,19 @@ The executable source of truth is the `exclusions` object in `scripts/test-cover
 
 The positive `dist/src/**/*.js` inclusion boundary excludes compiled tests, fixtures, dependencies, vendored assets, generated declarations/source maps, and operational shell scripts without per-line ignore directives. Pure implementation behind an excluded entry point remains included when it lives in another module.
 
+The single-context coverage runner also omits exactly seven compiled tests listed
+in `testHarnessExclusions`: the browser cleanup/startup ownership tests,
+geckodriver launcher/service tests, and Linux process supervisor tests. These
+files exercise only test-owned modules and real Linux process, `/proc`, socket,
+and IPC fixtures; they do not cover any `dist/src` module. Under coverage
+instrumentation their process-heavy work delays unrelated short-timeout core
+tests without changing the measured production inventory. The runner freezes
+their exact basenames and fails if the list no longer maps to existing compiled
+tests. They remain mandatory in ordinary `npm test`. This work item also ran a
+dated 20-round focused repetition recorded in the browser acceptance evidence.
+The real Firefox command uses the test-only helpers, but `npm run test:browser`
+does not directly execute these seven compiled test files.
+
 ## Known boundaries
 
 Node 22 reports the executed compiled JavaScript paths rather than remapping coverage to TypeScript source paths. The runner therefore validates the build inventory and records the explicit mapping in `summary.json`; reviewers should read an LCOV path such as `dist/src/storage/index.js` as the result for `src/storage/index.ts`.

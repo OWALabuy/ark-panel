@@ -102,6 +102,19 @@ active-run 恢复语义。
 三轮的移动场景也全部通过，结束后没有 fixture 目录、截图或 fixture 拥有的 listener。
 这是本修复的日期化 fixture 证据，不替代真实 runtime 或后续 CI 结果。
 
+2026-08-13 的 browser teardown race 修复在提交前隔离 worktree 中，使用同一
+Node.js、Firefox 与 geckodriver 版本，先将 cleanup、startup ownership、launcher
+协议、service 与 Linux supervisor 的 33 项 focused tests 连续执行五轮，每轮
+33/33 通过。移除 fake service 的无条件 10 秒退出后，又将 service、launcher 和
+supervisor 的 15 项进程密集测试连续执行 20 轮，每轮 15/15 通过，结束后精确
+geckodriver/launcher residual 均为 0。随后真实 Firefox 执行四份顺序 suite 与一批
+两份并发 suite，共 12 个
+desktop/mobile 场景全部通过；其中两次 desktop 的 WebDriver HTTP `quit` 超过 5 秒，
+但各自已捕获的 owned tree 都在 TERM 阶段确定退出，因此按契约记为 clean。每批结束
+后按 launcher/geckodriver 的精确进程身份与 session、`rust_mozprofile` 目录以及
+fixture-owned listener 复核均无 owned residual。主机上另有不属于测试 session 的
+既有 Firefox 实例，本证据不声称系统全局 Firefox 进程计数不变。
+
 ## 自动化矩阵
 
 | 视口 | 输入能力 | 覆盖 |
@@ -120,6 +133,30 @@ WebDriver 和 HTTP server，运行中未启动真实 OpenClaw。失败时只在
 截图不可用时 action 明确告警，而真正的上传失败仍会使上传步骤失败。截图或
 WebDriver 清理失败会以不含页面正文、URL、凭据或主机路径的诊断码附加到原始
 测试失败，不会覆盖或静默吞掉主错误。
+
+当前 harness 的确定性 teardown 只在 Linux 运行；其它平台会明确跳过，因为
+进程归属和监听端口验证依赖 `/proc`。测试先以 detached session 启动一个本地
+launcher；launcher 发出 `LAUNCHER_READY` 后仍不创建 target，父进程先捕获其
+PID/starttime/session，成功后才发 `START` 创建继承同一 session 的 geckodriver。
+捕获失败会发 `ABORT` 并等待未创建 target 的 launcher 关闭，因此不存在
+spawn→capture 期间未受监管的 geckodriver 或后代。geckodriver 使用 `--port 0`，
+readiness 端口来自 launcher 转发的有界 target stderr/stdout，并通过
+`/proc/<pid>/fd` 与 `/proc/net/tcp` 复核监听 socket 属于该 child。WebDriver 使用
+不拥有 service 的 external Executor，HTTP `quit` 超时或拒绝只记录阶段；只要
+owned process tree 最终确定为空，就不把慢 `quit` 单独判为失败。
+
+场景在首次 await 前安装 `t.after`、watchdog 和 startup token。cleanup 若先于
+fixture、driver 或 process supervisor 完成 attach 而启动，会等待 token 在
+startup 的 `finally` 中关闭，并纳入窗口内迟到的资源；重复 attach、重复 token 或
+cleanup 已关闭后的 attach 均 fail closed。每个资源的 create→attach 还带局部
+fallback，保证 attach 自身抛错时立即关闭刚创建的 fixture、停止刚 spawn 的树或
+对半建 WebDriver session 发出有界 quit。
+
+Linux supervisor 每次发送 `SIGTERM`/`SIGKILL` 前都按 PID 与 `/proc` starttime
+复核 identity，从不向 process group 发信号，也不向复用 PID 发信号。每轮等待都
+重新完整扫描 `/proc`，捕获已 reparent 但仍在相同 session 的后代并逐个处理；只有
+连续两次完整扫描均无 owned identity 才判定树已清理。最终仍有 identity、identity
+不明、完整扫描失败或信号失败都会产生 fatal cleanup diagnostic。
 
 ## 验证边界
 

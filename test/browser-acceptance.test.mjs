@@ -6,11 +6,27 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { By, Key } from "selenium-webdriver";
 import firefox from "selenium-webdriver/firefox.js";
+import { Executor, HttpClient } from "selenium-webdriver/http/index.js";
+import { waitForServer } from "selenium-webdriver/http/util.js";
+import { BrowserCleanupController } from "../dist/test/browser-cleanup.js";
+import {
+  attachDriverOrQuit,
+  attachFixtureOrClose,
+  attachOwnedProcessesOrStop
+} from "../dist/test/browser-startup-ownership.js";
+import { spawnOwnedGeckodriver, waitForOwnedGeckodriverStatus } from "../dist/test/geckodriver-service.js";
 import { withTimeout } from "../dist/test/test-helpers.js";
 import { startBrowserFixture } from "./browser-fixture.mjs";
 
 const WAIT_MS = 10_000;
 const CLEANUP_MS = 5_000;
+const CLEANUP_WORST_CASE_MS = CLEANUP_MS * 3;
+const CLEANUP_MARGIN_MS = 5_000;
+const CLEANUP_HOOK_MS = CLEANUP_WORST_CASE_MS + CLEANUP_MARGIN_MS;
+const DESKTOP_TEST_TIMEOUT_MS = 90_000;
+const DESKTOP_WATCHDOG_MS = 65_000;
+const MOBILE_TEST_TIMEOUT_MS = 40_000;
+const MOBILE_WATCHDOG_MS = 18_000;
 const FAILURE_ROOT = fileURLToPath(new URL("../browser-artifacts/", import.meta.url));
 const FAILURE_SCREENSHOTS = Object.freeze({
   desktop: resolve(FAILURE_ROOT, "desktop.png"),
@@ -66,7 +82,7 @@ function clearFailureScreenshot(name) {
 
 for (const name of Object.keys(FAILURE_SCREENSHOTS)) clearFailureScreenshot(name);
 
-async function buildDriver({ mobile }, diagnostics) {
+async function buildDriver({ mobile }, cleanup) {
   const firefoxBinary = configuredExecutable("PANEL_FIREFOX_BINARY", [
     "/snap/firefox/current/usr/lib/firefox/firefox",
     "/usr/local/bin/firefox",
@@ -78,18 +94,36 @@ async function buildDriver({ mobile }, diagnostics) {
     .setPreference("ui.primaryPointerCapabilities", mobile ? 1 : 6)
     .setPreference("ui.allPointerCapabilities", mobile ? 1 : 6);
   if (firefoxBinary) options.setBinary(firefoxBinary);
-  const service = new firefox.ServiceBuilder(geckodriverBinary || undefined).build();
-  const driver = firefox.Driver.createSession(options, service);
+  if (!geckodriverBinary) throw new Error("GECKODRIVER_EXECUTABLE_UNAVAILABLE");
+  const service = spawnOwnedGeckodriver(geckodriverBinary);
+  await attachOwnedProcessesOrStop(cleanup, service, CLEANUP_MS);
+  const endpoint = await waitForOwnedGeckodriverStatus(
+    service,
+    (origin, timeoutMs, closed) => waitForServer(origin, timeoutMs, closed),
+    WAIT_MS
+  );
+  const executor = new Executor(new HttpClient(endpoint.origin));
+  const driver = firefox.Driver.createSession(options, executor);
+  await attachDriverOrQuit(cleanup, driver, CLEANUP_MS);
+  let capabilities;
   try {
     await withTimeout(driver.getSession(), "Firefox WebDriver startup", WAIT_MS);
+    capabilities = await driver.getCapabilities();
+  } catch {
+    throw new Error("FIREFOX_SESSION_START_FAILED");
+  }
+  const browserProcessId = capabilities.get("moz:processID");
+  if (!Number.isSafeInteger(browserProcessId) || browserProcessId <= 0
+      || !await service.owns(browserProcessId)) {
+    throw new Error("FIREFOX_PROCESS_ID_UNOWNED");
+  }
+  try {
     await driver.manage().setTimeouts({ implicit: 0, pageLoad: WAIT_MS, script: WAIT_MS });
     await driver.manage().window().setRect(mobile ? { width: 390, height: 844, x: 0, y: 0 } : { width: 1440, height: 900, x: 0, y: 0 });
-    return { driver, service };
-  } catch (error) {
-    try { await withTimeout(service.kill(), "Firefox WebDriver startup cleanup", CLEANUP_MS); }
-    catch { diagnostics.push("DRIVER_STARTUP_CLEANUP_FAILED"); }
-    throw error;
+  } catch {
+    throw new Error("FIREFOX_SESSION_CONFIG_FAILED");
   }
+  return { driver };
 }
 
 async function visible(driver, selector, timeout = WAIT_MS) {
@@ -204,32 +238,55 @@ function reportDiagnostics(error, name, diagnostics) {
   process.stderr.write(`[browser-acceptance] ${name} diagnostics: ${diagnostics.join(",")}\n`);
 }
 
-async function scenario(name, options, run) {
+function reportTeardownPhases(name, phases) {
+  if (process.env.PANEL_BROWSER_TEARDOWN_TRACE !== "1") return;
+  process.stderr.write(`[browser-acceptance] ${name} teardown: ${phases.join(",")}\n`);
+}
+
+async function scenario(t, name, options, run) {
   const diagnostics = [];
+  const teardownPhases = [];
+  const cleanup = new BrowserCleanupController({
+    quitTimeoutMs: CLEANUP_MS,
+    processStopTimeoutMs: CLEANUP_MS,
+    fixtureCloseTimeoutMs: CLEANUP_MS
+  });
+  const startup = cleanup.beginStartup();
+  let startupClosed = false;
+  const closeStartup = () => {
+    if (startupClosed) return;
+    startupClosed = true;
+    startup.close();
+  };
+  let cleanupReported = false;
+  t.after(async () => {
+    const result = await cleanup.cleanup();
+    if (cleanupReported || !result.diagnostics.length) return;
+    const error = new Error("Browser scenario cleanup failed after test callback");
+    reportDiagnostics(error, name, result.diagnostics);
+    throw error;
+  }, { timeout: CLEANUP_HOOK_MS });
+  cleanup.armWatchdog(options.watchdogMs);
   let fixture;
   let browser;
   let primaryError;
   try {
     clearFailureScreenshot(name);
     fixture = await startBrowserFixture();
-    browser = await buildDriver(options, diagnostics);
+    await attachFixtureOrClose(cleanup, fixture, CLEANUP_MS);
+    browser = await buildDriver(options, cleanup);
+    closeStartup();
     await run({ driver: browser.driver, fixture });
   } catch (error) {
     primaryError = asError(error);
     await retainFailureScreenshot(browser?.driver, name, diagnostics);
   } finally {
-    if (browser) {
-      try { await withTimeout(browser.driver.quit(), "Firefox WebDriver quit", CLEANUP_MS); }
-      catch {
-        diagnostics.push("DRIVER_QUIT_FAILED");
-        try { await withTimeout(browser.service.kill(), "Firefox WebDriver service fallback", CLEANUP_MS); }
-        catch { diagnostics.push("DRIVER_SERVICE_FALLBACK_FAILED"); }
-      }
-    }
-    if (fixture) {
-      try { await withTimeout(fixture.close(), "browser fixture close", CLEANUP_MS); }
-      catch { diagnostics.push("FIXTURE_CLOSE_FAILED"); }
-    }
+    closeStartup();
+    const cleanupResult = await cleanup.cleanup();
+    cleanupReported = true;
+    diagnostics.push(...cleanupResult.diagnostics);
+    teardownPhases.push(...cleanupResult.phases);
+    reportTeardownPhases(name, teardownPhases);
     if (!primaryError && diagnostics.length) primaryError = new Error("Browser scenario cleanup failed");
     if (!primaryError) {
       try { clearFailureScreenshot(name); }
@@ -239,8 +296,11 @@ async function scenario(name, options, run) {
   if (primaryError) { reportDiagnostics(primaryError, name, diagnostics); throw primaryError; }
 }
 
-test("desktop browser acceptance covers security and session lifecycle", { timeout: 90_000 }, async () => {
-  await scenario("desktop", { mobile: false }, async ({ driver, fixture }) => {
+test("desktop browser acceptance covers security and session lifecycle", {
+  timeout: DESKTOP_TEST_TIMEOUT_MS,
+  skip: process.platform === "linux" ? false : "Linux process supervision is required"
+}, async t => {
+  await scenario(t, "desktop", { mobile: false, watchdogMs: DESKTOP_WATCHDOG_MS }, async ({ driver, fixture }) => {
     assert.deepEqual(fixture.externalImages.requests, {
       allowed: { count: 0, refererPresent: false, panelCookiePresent: false },
       sameHost: { count: 0 }
@@ -638,8 +698,11 @@ test("desktop browser acceptance covers security and session lifecycle", { timeo
   });
 });
 
-test("coarse mobile browser acceptance uses touch-safe controls", { timeout: 40_000 }, async () => {
-  await scenario("mobile", { mobile: true }, async ({ driver, fixture }) => {
+test("coarse mobile browser acceptance uses touch-safe controls", {
+  timeout: MOBILE_TEST_TIMEOUT_MS,
+  skip: process.platform === "linux" ? false : "Linux process supervision is required"
+}, async t => {
+  await scenario(t, "mobile", { mobile: true, watchdogMs: MOBILE_WATCHDOG_MS }, async ({ driver, fixture }) => {
     await login(driver, fixture.origin);
     assert.equal(await driver.executeScript("return matchMedia('(hover:none), (pointer:coarse)').matches"), true);
     assert.equal(await driver.executeScript("return matchMedia('(max-width:760px)').matches"), true);

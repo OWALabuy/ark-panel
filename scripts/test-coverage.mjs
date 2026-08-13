@@ -21,6 +21,15 @@ const exclusions = Object.freeze({
   "src/server/panel-claude-runtime-smoke.ts": "requires an explicitly authorized live runtime",
   "src/server/paneltest-app-smoke.ts": "requires an explicitly configured OpenClaw test runtime"
 });
+const testHarnessExclusions = Object.freeze({
+  "browser-cleanup-races.test.js": "test-only browser startup and cleanup race harness",
+  "browser-cleanup.test.js": "test-only browser cleanup controller harness",
+  "browser-startup-ownership.test.js": "test-only browser startup ownership harness",
+  "geckodriver-launcher.test.js": "Linux process and IPC fixture; no dist/src module coverage",
+  "geckodriver-service.test.js": "Linux process and socket ownership fixture; no dist/src module coverage",
+  "linux-process-supervisor-races.test.js": "Linux /proc race fixture; no dist/src module coverage",
+  "linux-process-supervisor.test.js": "Linux /proc process fixture; no dist/src module coverage"
+});
 
 function repositoryPath(path) {
   return relative(repositoryRoot, path).split(sep).join("/");
@@ -184,6 +193,8 @@ async function main() {
     .filter(path => !path.endsWith(".d.ts"));
   const compiledFiles = await filesBelow(join(repositoryRoot, "dist", "src"), ".js");
   const testFiles = await filesBelow(join(repositoryRoot, "dist", "test"), ".test.js");
+  const excludedTestNames = Object.keys(testHarnessExclusions);
+  const coverageTestFiles = testFiles.filter(path => !excludedTestNames.includes(path.split("/").at(-1) ?? ""));
   const excludedSources = Object.keys(exclusions).sort();
   const compiledExclusions = excludedSources.map(compiledPath);
   const includedSources = sourceFiles.filter(path => !Object.hasOwn(exclusions, path));
@@ -192,13 +203,18 @@ async function main() {
   assertSameFiles(excludedSources, excludedSources.filter(path => sourceFiles.includes(path)), "coverage exclusions");
   assertSameFiles(includedCompiled, includedSources.map(compiledPath), "TypeScript-to-JavaScript coverage inventory");
   if (testFiles.length === 0) throw new Error("coverage baseline found no compiled tests");
+  const excludedTestFiles = testFiles.filter(path => !coverageTestFiles.includes(path));
+  const expectedExcludedTestFiles = excludedTestNames
+    .map(name => `dist/test/${name}`)
+    .sort();
+  assertSameFiles(excludedTestFiles, expectedExcludedTestFiles, "coverage test-harness exclusions");
 
   await rm(coverageRoot, { recursive: true, force: true });
   await mkdir(coverageRoot, { recursive: true });
 
   let testExitCode;
   try {
-    testExitCode = await runCoverage(testFiles, compiledExclusions);
+    testExitCode = await runCoverage(coverageTestFiles, compiledExclusions);
     const observed = parseLcov(await readFile(lcovPath, "utf8"));
     const unexpected = observed.map(file => file.path).filter(path => !includedCompiled.includes(path));
     if (unexpected.length) throw new Error(`LCOV contains files outside the core inventory: ${JSON.stringify(unexpected)}`);
@@ -219,7 +235,8 @@ async function main() {
       thresholds,
       coverage,
       files: files.map(({ record: _record, ...file }) => file),
-      exclusions: excludedSources.map(path => ({ path, reason: exclusions[path] }))
+      exclusions: excludedSources.map(path => ({ path, reason: exclusions[path] })),
+      testExclusions: excludedTestNames.sort().map(name => ({ name, reason: testHarnessExclusions[name] }))
     };
     await writeFile(summaryPath, JSON.stringify(summary, null, 2) + "\n", "utf8");
     printAuthoritativeSummary(coverage, files.length, unloaded);

@@ -13,6 +13,16 @@ const expectedExclusions = [
   "src/server/paneltest-app-smoke.ts"
 ];
 
+const expectedTestHarnessExclusions = [
+  "browser-cleanup-races.test.js",
+  "browser-cleanup.test.js",
+  "browser-startup-ownership.test.js",
+  "geckodriver-launcher.test.js",
+  "geckodriver-service.test.js",
+  "linux-process-supervisor-races.test.js",
+  "linux-process-supervisor.test.js"
+];
+
 test("coverage isolation preserves the dynamic inventory, gates, and explicit exclusions", async () => {
   const source = await readFile("scripts/test-coverage.mjs", "utf8");
   assert.match(source, /const thresholds = Object\.freeze\(\{ lines: 90, branches: 78, functions: 89 \}\);/);
@@ -24,6 +34,15 @@ test("coverage isolation preserves the dynamic inventory, gates, and explicit ex
   const exclusionBlock = source.match(/const exclusions = Object\.freeze\(\{([\s\S]*?)\n\}\);/)?.[1] ?? "";
   const actualExclusions = [...exclusionBlock.matchAll(/^  "([^"]+)":/gm)].map(match => match[1]).sort();
   assert.deepEqual(actualExclusions, [...expectedExclusions].sort());
+
+  const testExclusionBlock = source.match(/const testHarnessExclusions = Object\.freeze\(\{([\s\S]*?)\n\}\);/)?.[1] ?? "";
+  const actualTestExclusions = [...testExclusionBlock.matchAll(/^  "([^"]+)":/gm)]
+    .map(match => match[1])
+    .sort();
+  assert.deepEqual(actualTestExclusions, [...expectedTestHarnessExclusions].sort());
+  assert.match(source, /assertSameFiles\(excludedTestFiles, expectedExcludedTestFiles, "coverage test-harness exclusions"\)/);
+  assert.match(source, /runCoverage\(coverageTestFiles, compiledExclusions\)/);
+  assert.match(source, /testExclusions: excludedTestNames\.sort\(\)\.map\(name => \(\{ name, reason: testHarnessExclusions\[name\] \}\)\)/);
 });
 
 test("ordinary tests and the CI baseline retain default process isolation", async () => {
