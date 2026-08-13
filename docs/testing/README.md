@@ -32,6 +32,7 @@ commit 是产生证据或引入当前自动检查的代码 commit，不是本文
 
 | Capability | Status | Evidence kind | Command | Date | Panel commit | OpenClaw version | Scope | Link |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| CI workflow structure and local failure propagation | `current automated` | deterministic workflow contract + isolated fault fixtures | `npm test` | 2026-08-14 | `a4a9a6e` | 不适用 | 锁定 Node 22 三个 job、固定 action SHA、无 secrets/live 命令，并证明 lock mismatch、TypeScript error、`node:test` failure 均非零退出；这是本地合同，不是 GitHub-hosted run | [workflow contract](../../test/ci-workflow-contract.test.ts) |
 | Strict server/storage/gateway/domain TypeScript | `current automated` | Node 22 static check；CI baseline | `npm run typecheck` | 2026-08-13 | `cfe53d9` | 不适用 | 严格 TypeScript；不执行运行时或浏览器路径 | [CI](../../.github/workflows/ci.yml) |
 | First-party frontend JavaScript types | `current automated` | `checkJs` static check；CI baseline | `npm run check:frontend` | 2026-08-13 | `cfe53d9` | 不适用 | `src/frontend/` 八个第一方脚本；不是浏览器动态覆盖率 | [CI](../../.github/workflows/ci.yml) |
 | Core compiled `node:test` suite | `current automated` | deterministic unit/integration fixtures；CI baseline | `npm test` | 2026-08-13 | `cfe53d9` | 不适用 | 构建后的 server、storage、gateway adapter、domain 和静态 frontend 合同；不连接真实 Gateway | [CI](../../.github/workflows/ci.yml) |
@@ -53,6 +54,7 @@ commit 是产生证据或引入当前自动检查的代码 commit，不是本文
 
 | Capability | Status | Evidence kind | Command | Date | Panel commit | OpenClaw version | Scope | Link |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| GitHub-hosted CI parse, triggers, job attribution, and clean-run result | `unknown` | workflow and local contract exist；default branch has no hosted run for the local commits | push/PR 后引用对应 GitHub Actions run（需明确远端写入授权） | 未执行 | `a4a9a6e` | 不适用 | 本地测试不能证明 GitHub 接受 workflow、触发 push/PR、展示三个 job、执行 Firefox 或传播 hosted failure；#37 仍 open | [workflow](../../.github/workflows/ci.yml) |
 | Historical Firefox desktop/mobile fixture | `historical pass` | manual Firefox 152/WebDriver with fictional in-memory fixture | `npm run build`，再运行 fixture 并手工驾驶 WebDriver | 2026-07-11 | `cf67b56` | 不适用 | 当时的登录、导航、会话、SSE 和安全渲染；不含后来 slash command、自动化或外部图片能力 | [2026-07-11 evidence](browser-acceptance-2026-07-11.md) |
 | Initial automated Firefox suite | `historical pass` | real Firefox 153.0.1 + geckodriver 0.37.0，三轮 2/2 | `npm run test:browser` | 2026-08-12 | `3a29ee4` | 不适用 | 当时自动化矩阵；三轮结束无 fixture-owned residual | [browser evidence](browser-acceptance.md) |
 | #43 external-image Firefox repetitions | `partial` | real Firefox 153.0.1 + geckodriver 0.37.0，local network probes | `npm run test:browser` | 2026-08-13 | `cfe53d9` | 不适用 | 三轮功能断言均完成且网络边界符合预期；仅一轮 2/2 clean，另外两轮命中 `DRIVER_QUIT_FAILED` | [browser evidence](browser-acceptance.md) |
