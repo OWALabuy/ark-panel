@@ -380,21 +380,23 @@ test("clearing the active conversation hides every session-scoped action", async
 
 test("background run notifications stay unread per session until the conversation is viewed", async () => {
   const source=await readFile("src/frontend/app.js","utf8");
+  const unreadStore=await readFile("src/frontend/unread-runs.js","utf8");
   const styles=await readApplicationStyles();
 
-  assert.match(source,/UNREAD_KEY="ark-panel:unread-runs:v1"/);
-  assert.match(source,/let unreadRuns=readUnreadRuns\(\)/);
-  assert.match(source,/new Map\(entries\.flatMap/);
-  assert.match(source,/status==="completed"\|\|status==="failed"/);
-  assert.match(source,/activeSession===run\.recordId&&!document\.hidden/);
-  assert.match(source,/unreadRuns\.set\(String\(run\.recordId\),\{agentId:String\(run\.agentId\|\|activeAgent\),status:run\.status\}\)/);
+  assert.match(source,/import \{createUnreadRunStore\} from "\.\/unread-runs\.js"/);
+  assert.match(source,/const unreadRuns=createUnreadRunStore\(\{storage:localStorage\}\)/);
+  assert.match(source,/unreadRuns\.mark\(run,\{activeRecordId:activeSession,documentHidden:document\.hidden,fallbackAgentId:activeAgent\}\)/);
+  assert.match(source,/event\.key!==unreadRuns\.key[\s\S]*unreadRuns\.reload\(\)/);
+  assert.match(unreadStore,/UNREAD_RUNS_KEY="ark-panel:unread-runs:v1"/);
+  assert.match(unreadStore,/status==="completed"\|\|status==="failed"/);
+  assert.match(unreadStore,/activeRecordId===recordId&&!context\?\.documentHidden/);
+  assert.doesNotMatch(unreadStore,/\b(?:window|document|localStorage|globalThis|composerState)\b/);
   assert.match(source,/if\(!document\.hidden\)clearUnreadRun\(id\)/);
   assert.match(source,/function handleDocumentVisibility\(\)\{if\(!document\.hidden&&activeSession\)clearUnreadRun\(activeSession\);updateDocumentTitle\(\)\}/);
   assert.match(source,/document\.addEventListener\("visibilitychange",handleDocumentVisibility\)/);
   assert.match(source,/count=document\.hidden\?unreadRuns\.size:0/);
   assert.match(source,/unread-marker/);
   assert.match(source,/unread\.some\(item=>item\.status==="failed"\)/);
-  assert.match(source,/if\(run\.status!=="completed"&&run\.status!=="failed"\)return/);
   assert.match(styles,/\.unread-marker\.failed/);
 });
 

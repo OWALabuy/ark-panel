@@ -226,6 +226,11 @@ composer 的可写来源、generation/upload/compaction 忙碌优先级、停止
 禁用条件，以及桌面/粗指针提示 key 由 DOM-free 的 composer policy 纯函数统一派生；
 `app.js` 只采集当前会话投影并把结果应用到控件和本地化文案。
 
+后台终态 run 的未读标记由 DOM-free 的 unread run store 持有。它只通过显式注入的
+storage 读写既有 v1 key，校验 completed/failed 与 agent/session identity，并返回隔离的
+只读 snapshot；可见会话、页面可见性、标题、跨 tab storage 事件和 DOM 渲染仍由
+`app.js` 组装。
+
 服务端日志、错误、fixture 和文档不得包含凭据、消息正文、prompt、原始上游 payload
 或不必要的私有路径。文件读取、上传、预览、下载、备份和清理都拒绝 traversal、
 symlink、需要时的 hardlink、特殊文件和 allowlist 根外路径。

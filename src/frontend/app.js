@@ -10,6 +10,7 @@ import {createRunBootstrap} from "./run-bootstrap.js";
 import {createGenerationSubmissionCoordinator} from "./generation-submission.js";
 import {createRunController} from "./run-controller.js";
 import {deriveComposerUiState} from "./composer-policy.js";
+import {createUnreadRunStore} from "./unread-runs.js";
 import {uncertainCreateError} from "./run-recovery-policy.js";
 import {consumeRunEventStream} from "./run-event-stream.js";
 
@@ -109,7 +110,7 @@ let memoryCandidateDialogRecordId="";
 /** @type {(MemoryFlowOptionsDto & {recordId:string})|null} */ let pendingMemoryRecovery=null;
 /** @type {Map<string,PendingMemoryCandidateDto>} */ const pendingMemoryCandidates=new Map();
 const composerState=createComposerState({storage:localStorage,createObjectURL:file=>URL.createObjectURL(file),revokeObjectURL:url=>URL.revokeObjectURL(url)});
-const UNREAD_KEY="ark-panel:unread-runs:v1";
+const unreadRuns=createUnreadRunStore({storage:localStorage});
 const runRegistry=createRunRegistry({storage:localStorage});
 const compactions=createScopedActivity(),memoryCandidateGenerations=createScopedActivity();
 const sourceName=source=>t({active:"session.active",reset:"session.resetArchive",panel:"session.panel"}[source]||"nav.sessions");
@@ -142,14 +143,11 @@ function nearMessagesBottom(root=$("#messages")){return root.scrollHeight-root.s
 function jumpButton(){let button=$("#jump-latest");if(button)return button;button=document.createElement("button");button.id="jump-latest";button.className="jump-latest";button.type="button";button.hidden=true;button.textContent=t("message.newAvailable");button.setAttribute("aria-label",t("message.newAvailableLabel"));button.onclick=()=>{const root=$("#messages");root.scrollTo({top:root.scrollHeight,behavior:"smooth"});button.hidden=true};$(".conversation").insertBefore(button,$("#composer"));return button}
 function collapsedProjects(){try{const value=JSON.parse(localStorage.getItem(`ark-panel:collapsed-projects:${activeAgent}`)||"[]");return new Set(Array.isArray(value)?value.map(String):[])}catch{return new Set()}}
 function saveCollapsedProjects(values){try{localStorage.setItem(`ark-panel:collapsed-projects:${activeAgent}`,JSON.stringify([...values]))}catch{}}
-function readUnreadRuns(){try{const value=JSON.parse(localStorage.getItem(UNREAD_KEY)||"{}"),entries=value&&typeof value==="object"&&!Array.isArray(value)?Object.entries(value):[];return new Map(entries.flatMap(([recordId,item])=>{const agentId=String(item?.agentId||""),status=String(item?.status||"");return recordId&&agentId&&(status==="completed"||status==="failed")?[[String(recordId),{agentId,status}]]:[]}))}catch{return new Map()}}
-let unreadRuns=readUnreadRuns();
-function persistUnreadRuns(){try{if(unreadRuns.size)localStorage.setItem(UNREAD_KEY,JSON.stringify(Object.fromEntries(unreadRuns)));else localStorage.removeItem(UNREAD_KEY)}catch{}}
 function updateDocumentTitle(){if(!activeAgent){document.title="ark-panel";return}const agent=agents.find(item=>String(item.id)===activeAgent),agentLabel=String(agent?.label||agent?.id||activeAgent),sessionTitle=shellView()==="show-memory"?t("memory.center"):activeSession?String($("#title")?.textContent||t("session.unnamed")):t("session.new"),count=document.hidden?unreadRuns.size:0;document.title=`${count?`(${count}) `:""}${sessionTitle} - ${agentLabel}`}
 function refreshUnreadUi(){renderAgents();renderRail();if($("#search")?.value.trim())void search();else renderSessions();updateDocumentTitle()}
 /** @param {ClientRunDto} run */
-function setUnreadRun(run){if(run.status!=="completed"&&run.status!=="failed")return;if(activeSession===run.recordId&&!document.hidden)return;unreadRuns.set(String(run.recordId),{agentId:String(run.agentId||activeAgent),status:run.status});persistUnreadRuns();refreshUnreadUi()}
-function clearUnreadRun(recordId){if(!unreadRuns.delete(String(recordId)))return;persistUnreadRuns();refreshUnreadUi()}
+function setUnreadRun(run){if(unreadRuns.mark(run,{activeRecordId:activeSession,documentHidden:document.hidden,fallbackAgentId:activeAgent}))refreshUnreadUi()}
+function clearUnreadRun(recordId){if(unreadRuns.clear(recordId))refreshUnreadUi()}
 function unreadMarker(status,label){const marker=document.createElement("span");marker.className=`unread-marker${status==="failed"?" failed":""}`;marker.setAttribute("aria-hidden","true");marker.title=label;return marker}
 /** @param {ConversationStatusDto|null|undefined} status */
 function renderConversationStatus(status){currentConversationStatus=status||null;const root=$("#conversation-status");if(!root)return;clear(root);root.hidden=!showConversationStatus||!activeSession||!status;if(root.hidden)return;const add=(text,className="",title="")=>{if(!text)return;const item=document.createElement("span");item.className=`conversation-status-item${className?` ${className}`:""}`;item.textContent=text;if(title)item.title=title;root.append(item)};add(status.modelOverride?t("status.model",{value:status.modelOverride}):t(activeSource==="panel"?"status.defaultModel":"status.sourceDefaultModel"),"conversation-status-model");if(status.thinkingLevel)add(t("status.thinking",{value:status.thinkingLevel}),"conversation-status-setting");if(status.reasoningLevel)add(t("status.reasoning",{value:status.reasoningLevel}),"conversation-status-setting");const usage=status.contextUsage,percentage=Number(usage?.percentage),used=Number(usage?.totalTokens),limit=Number(usage?.contextTokens),fresh=usage?.totalTokensFresh===true;if(fresh&&Number.isFinite(percentage)&&Number.isFinite(used)&&Number.isFinite(limit)&&limit>0){add(t("status.context",{used:compactTokenCount(used,getLocale()),budget:compactTokenCount(limit,getLocale()),percentage:Math.max(0,Math.round(percentage))}),`conversation-status-context ${contextStatusClass(percentage)}`.trim(),t("status.contextTitle",{used:formatNumber(used),budget:formatNumber(limit)}));if(percentage>=90&&activeSource==="panel"){const compact=document.createElement("button");compact.type="button";compact.className="conversation-status-item conversation-status-action";compact.textContent=t("compact.action");compact.disabled=Boolean(activeRun||isCompactionActive());compact.onclick=()=>void requestCompact();root.append(compact)}}else add(Number.isFinite(limit)&&limit>0?t("status.contextUnknownWithLimit",{budget:compactTokenCount(limit,getLocale())}):t("status.contextUnknown"),"conversation-status-context",t("status.contextUnknownTitle"));if(status.lastActiveAt){const date=new Date(status.lastActiveAt);add(relativeConversationTime(status.lastActiveAt,Date.now(),getLocale(),t),"conversation-status-activity",Number.isNaN(date.getTime())?"":formatDate(date,{dateStyle:"medium",timeStyle:"medium"}))}}
@@ -491,5 +489,5 @@ globalThis.addEventListener("resize",()=>{syncVisualViewport();positionProjectMe
 function handleDocumentVisibility(){if(!document.hidden&&activeSession)clearUnreadRun(activeSession);updateDocumentTitle()}
 document.addEventListener("visibilitychange",handleDocumentVisibility);
 setInterval(()=>{if(currentConversationStatus&&activeSession)renderConversationStatus(currentConversationStatus)},60_000);
-globalThis.addEventListener("storage",event=>{if(event.key!==UNREAD_KEY)return;unreadRuns=readUnreadRuns();refreshUnreadUi()});
+globalThis.addEventListener("storage",event=>{if(event.key!==unreadRuns.key)return;unreadRuns.reload();refreshUnreadUi()});
 boot();
