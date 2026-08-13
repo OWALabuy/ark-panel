@@ -8,7 +8,8 @@ const BASELINE_INVENTORY_FINGERPRINT = "d910da5d54f1c46388a1ecee3e474f47938511b2
 const TOKENS_THEMES_ORDERED_FINGERPRINT = "d1f5e91d299d6fd70d23a569113ee22d0d20d78a98bdfd8f0c286cd542610e61";
 const SHELL_NAVIGATION_ORDERED_FINGERPRINT = "5b855c56366188d9135d2c78ae57cc46083f39ae337894ddd6054a8799979ffb";
 const CONVERSATION_COMPOSER_ORDERED_FINGERPRINT = "b08cf93514aa210bc8022c85a8103f2d187e90965bac5d20a08e69d62eb7c575";
-const REMAINING_STYLES_ORDERED_FINGERPRINT = "f8b5e052447623ff1351f309e666d7c6f55af9c05b7778bd05ce6acaf5ca0da6";
+const SETTINGS_MEMORY_ORDERED_FINGERPRINT = "7062bbac02b0f5175e38a6e9a69a8aa805550742993163fc3b063d5bc4c00d3c";
+const REMAINING_STYLES_ORDERED_FINGERPRINT = "7e8ee2eae5e949b9d0c9a4fce72ca33f81baa20ff7ba152351016631535d4b9b";
 
 function stylesheetStatements(source: string): string[] {
   const withoutComments = source.replace(/\/\*[\s\S]*?\*\//g, "");
@@ -39,7 +40,7 @@ function fingerprint(statements: string[]): string {
 }
 
 test("application semantic stylesheets load in their explicit cascade order", async () => {
-  assert.deepEqual(await applicationStylesheetHrefs(), ["/tokens-themes.css", "/shell-navigation.css", "/conversation-composer.css", "/styles.css"]);
+  assert.deepEqual(await applicationStylesheetHrefs(), ["/tokens-themes.css", "/shell-navigation.css", "/conversation-composer.css", "/settings-memory.css", "/styles.css"]);
 });
 
 test("the application styles preserve the monolithic CSS rule inventory", async () => {
@@ -65,5 +66,12 @@ test("the token, shell, and remaining layers preserve their ordered responsibili
   assert.match(conversation,/\.composer\.dragging\{border-color:var\(--accent\)/);
   assert.match(conversation,/\.image-preview-dialog>img\{min-height:0;flex:1;height:auto\}/);
   assert.doesNotMatch(conversation,/@media|\.settings|\.memory|\.login|\.agents|\.sessions|\.session-quick/);
+  const settingsMemory=await readFile("src/frontend/settings-memory.css","utf8");
+  assert.equal(fingerprint(stylesheetStatements(settingsMemory)),SETTINGS_MEMORY_ORDERED_FINGERPRINT);
+  assert.match(settingsMemory,/\.settings-drawer\{position:absolute;[^}]*display:flex;flex-direction:column/);
+  assert.match(settingsMemory,/\.memory-page\{grid-column:2\/4;[^}]*display:grid/);
+  assert.match(settingsMemory,/\.shell\.show-memory>\.sessions,\.shell\.show-memory>\.conversation\{display:none\}/);
+  assert.match(settingsMemory,/\.memory-tree-group button\{position:relative;display:grid/);
+  assert.doesNotMatch(settingsMemory,/@media|\.composer|\.login|\.sessions header|\.editor-dialog/);
   assert.equal(fingerprint(stylesheetStatements(await readFile("src/frontend/styles.css","utf8"))),REMAINING_STYLES_ORDERED_FINGERPRINT);
 });

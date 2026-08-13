@@ -377,6 +377,23 @@ test("desktop browser acceptance covers security and session lifecycle", {
         agents:getComputedStyle(document.querySelector('.agents')).display,sessions:getComputedStyle(document.querySelector('.sessions')).display};
     `);
     assert.deepEqual(expandedShell, { columns: ["90px", "310px"], rail: "none", agents: "flex", sessions: "flex" });
+    const openMemory = await visible(driver, "#open-memory");
+    await openMemory.click();
+    await waitScript(driver, "return document.querySelector('#app').classList.contains('show-memory')");
+    assert.deepEqual(await driver.executeScript(`
+      const page=getComputedStyle(document.querySelector('#memory-page'));
+      const navigation=getComputedStyle(document.querySelector('.memory-navigation'));
+      const documentStyle=getComputedStyle(document.querySelector('.memory-document'));
+      return {page:page.display,navigation:navigation.display,navigationOverflow:navigation.overflow,
+        document:documentStyle.display,pressed:document.querySelector('#open-memory').getAttribute('aria-pressed')};
+    `), { page: "grid", navigation: "flex", navigationOverflow: "hidden", document: "flex", pressed: "true" });
+    await (await visible(driver, "#close-memory")).click();
+    await waitScript(driver, "return !document.querySelector('#app').classList.contains('show-memory')");
+    assert.equal(await driver.executeScript("return document.activeElement?.id"), "open-memory");
+    assert.equal(await driver.executeScript(`
+      const dialog=document.querySelector('#memory-candidate-dialog');dialog.showModal();
+      const width=getComputedStyle(dialog).width;dialog.close();return width;
+    `), "760px");
     await (await visible(driver, "#collapse-sidebar")).click();
     await waitScript(driver, "return document.querySelector('.shell').classList.contains('sidebar-collapsed')");
     assert.deepEqual(await driver.executeScript(`
@@ -755,6 +772,16 @@ test("desktop browser acceptance covers security and session lifecycle", {
     fixture.completeRun(editedRecordId);
     await waitText(driver, "#messages", "虚构 SSE 回复：编辑后的虚构消息");
 
+    await (await visible(driver, "#open-settings")).click();
+    await visible(driver, "#settings-drawer");
+    assert.deepEqual(await driver.executeScript(`
+      const layer=getComputedStyle(document.querySelector('#settings-layer'));
+      const drawer=getComputedStyle(document.querySelector('#settings-drawer'));
+      return {layer:layer.position,drawer:drawer.display,width:drawer.width};
+    `), { layer: "fixed", drawer: "flex", width: "400px" });
+    await driver.actions({ async: true }).sendKeys(Key.ESCAPE).perform();
+    await waitScript(driver, "return document.querySelector('#settings-layer').hidden");
+    assert.equal(await driver.executeScript("return document.activeElement?.id"), "open-settings");
     await (await visible(driver, "#open-settings")).click();
     await visible(driver, "#settings-drawer");
     await (await visible(driver, "#logout")).click();
