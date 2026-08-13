@@ -4,6 +4,7 @@ import {createComposerState} from "./composer-state.js";
 import {applyStaticTranslations,formatDate,formatNumber,getLocale,normalizeLocale,setLocale,t} from "./i18n/index.js";
 import {createScopedActivity} from "./scoped-activity.js";
 import {createRunRegistry} from "./run-registry.js";
+import {createRunObserver} from "./run-observer.js";
 import {acknowledgedStorageAction,inspectStoredRuns,recoverPersistedRun,uncertainCreateError} from "./run-recovery-policy.js";
 import {consumeRunEventStream} from "./run-event-stream.js";
 
@@ -105,7 +106,7 @@ let memoryCandidateDialogRecordId="";
 const composerState=createComposerState({storage:localStorage,createObjectURL:file=>URL.createObjectURL(file),revokeObjectURL:url=>URL.revokeObjectURL(url)});
 const UNREAD_KEY="ark-panel:unread-runs:v1";
 const runRegistry=createRunRegistry({storage:localStorage});
-/** @type {Map<string,Promise<void>>} */ const runWatchers=new Map(),creationReconcilers=new Map();
+/** @type {Map<string,Promise<void>>} */ const creationReconcilers=new Map();
 const compactions=createScopedActivity(),memoryCandidateGenerations=createScopedActivity();
 const sourceName=source=>t({active:"session.active",reset:"session.resetArchive",panel:"session.panel"}[source]||"nav.sessions");
 /** @type {Array<{name:string, usage?:string, usageKey?:string, description?:string, descriptionKey?:string, supported:boolean}>} */
@@ -375,7 +376,19 @@ function delay(ms){return new Promise(resolve=>setTimeout(resolve,ms))}
 function clearAcceptedOutputIntent(run){composerState.acceptOutputIntent(composerScope(run.recordId,run.agentId||activeAgent),run.submittedRequestOutputs===true)}
 /** @param {ClientRunDto} value */
 function reconcileCreatedRun(value){let run=normalizeRun(value);if(creationReconcilers.has(run.runId))return creationReconcilers.get(run.runId);const task=(async()=>{for(;;){const current=/** @type {ClientRunDto|undefined} */(runRegistry.get(run.recordId));if(current?.runId===run.runId)run=normalizeRun(current,run);const result=await recoverPersistedRun(run,{getRun:runId=>api(`/runs/${encodeURIComponent(runId)}`),getActive:recordId=>api(`/sessions/${encodeURIComponent(recordId)}/runs/active`),create:()=>api(`/sessions/${encodeURIComponent(run.recordId)}/runs`,{method:"POST",headers:{"idempotency-key":run.runId},body:JSON.stringify({message:run.submittedDraft,revision:run.submittedRevision||undefined,attachmentIds:run.submittedAttachmentIds,requestOutputs:run.submittedRequestOutputs})})});if(result.action==="watch"||result.action==="created"){const observed=rememberServerRun(result.snapshot,run);clearAcceptedOutputIntent(observed);if(!await settleRun(observed))void watchRun(observed);return}if(result.action==="discard"){discardRun(run);if(activeSession===run.recordId)showError(new Error(t("error.runMissing")));return}if(result.action==="failed"){discardRun(run);if(activeSession===run.recordId)showError(result.error,()=>void reconcileCreatedRun(run));return}if(activeSession===run.recordId){$("#subtitle").textContent=t(result.stage==="create"?"error.submitUnknown":"error.connectionLost");syncActiveRun();updateComposer()}await delay(1500)}})().finally(()=>creationReconcilers.delete(run.runId));creationReconcilers.set(run.runId,task);return task}
-function watchRun(value){let initial=normalizeRun(value);if(runWatchers.has(initial.runId))return runWatchers.get(initial.runId);const watcher=(async()=>{let run=initial;for(;;){try{run=rememberServerRun(await queryRun(run),run);if(await settleRun(run))return;const response=await fetch(`/api/v1/runs/${encodeURIComponent(run.runId)}/events`,{headers:{accept:"text/event-stream","x-csrf-token":csrf}}),terminal=await consumeRunEventStream(response,(name,data)=>{const status=name==="run.completed"||name==="run.failed"||name==="run.aborted"?name.slice(4):undefined;run=rememberServerRun(status?{...data,status}:data,run)},runEventStreamError);run=rememberServerRun(terminal,run);if(await settleRun(run))return}catch(error){if(error?.status===404){discardRun(run);if(activeSession===run.recordId)showError(new Error(t("error.runMissing")));return}if(activeSession===run.recordId){$("#subtitle").textContent=t("error.connectionLost");syncActiveRun();updateComposer()}await delay(1500)}}})().finally(()=>runWatchers.delete(initial.runId));runWatchers.set(initial.runId,watcher);return watcher}
+const runObserver=createRunObserver({
+  query:run=>queryRun(/** @type {ClientRunDto} */(run)),
+  openEvents:run=>fetch(`/api/v1/runs/${encodeURIComponent(run.runId)}/events`,{headers:{accept:"text/event-stream","x-csrf-token":csrf}}),
+  consumeEvents:(response,onEvent)=>consumeRunEventStream(/** @type {Response} */(response),onEvent,runEventStreamError),
+  remember:(value,local)=>rememberServerRun(/** @type {RunInputDto} */(value),/** @type {ClientRunDto} */(local)),
+  settle:run=>settleRun(/** @type {ClientRunDto} */(run)),
+  discard:run=>discardRun(/** @type {ClientRunDto} */(run)),
+  onMissing:run=>{if(activeSession===run.recordId)showError(new Error(t("error.runMissing")))},
+  onConnectionLost:run=>{if(activeSession===run.recordId){$("#subtitle").textContent=t("error.connectionLost");syncActiveRun();updateComposer()}},
+  delay
+});
+/** @param {RunInputDto} value */
+function watchRun(value){return runObserver.watch(normalizeRun(value))}
 async function reconcileSessionRun(recordId){const local=/** @type {ClientRunDto|undefined} */(runRegistry.get(recordId));if(local){void reconcileCreatedRun(local);return}try{const snapshot=await api(`/sessions/${encodeURIComponent(recordId)}/runs/active`);if(snapshot){const run=rememberServerRun(snapshot,undefined);if(!await settleRun(run))void watchRun(run)}}catch{}}
 function recoverStoredRuns(){try{const inspected=inspectStoredRuns(runRegistry.readStoredEntries(),runKey);for(const key of inspected.remove)localStorage.removeItem(key);for(const value of inspected.runs){const run=rememberRun(normalizeRun(value));void reconcileCreatedRun(run)}}catch{}}
 $("#search").addEventListener("input",()=>{clearTimeout(searchTimer);searchTimer=setTimeout(search,250)});$("#new-session").onclick=createSession;$("#archive-view").onclick=toggleArchiveView;$("#rename-session").onclick=renameActiveSession;$("#archive-session").onclick=toggleActiveArchive;$("#retry").onclick=()=>retryAction?.();$("#dismiss-error").onclick=hideError;$("#back-agents").onclick=()=>backShellView("");$("#back-sessions").onclick=()=>backShellView("show-sessions");$("#logout").onclick=async()=>{try{await api("/auth/logout",{method:"POST",body:"{}"});location.reload()}catch(error){showError(error)}};

@@ -3,9 +3,11 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 test("frontend renders untrusted metadata with DOM text nodes", async () => {
-  const source=await readFile("src/frontend/app.js","utf8"),runRegistry=await readFile("src/frontend/run-registry.js","utf8"),runEventStream=await readFile("src/frontend/run-event-stream.js","utf8"),composerState=await readFile("src/frontend/composer-state.js","utf8"),markdown=await readFile("src/frontend/markdown.js","utf8"),i18n=await readFile("src/frontend/i18n/index.js","utf8"),zh=await readFile("src/frontend/i18n/zh-CN.js","utf8");
+  const source=await readFile("src/frontend/app.js","utf8"),runRegistry=await readFile("src/frontend/run-registry.js","utf8"),runObserver=await readFile("src/frontend/run-observer.js","utf8"),runEventStream=await readFile("src/frontend/run-event-stream.js","utf8"),composerState=await readFile("src/frontend/composer-state.js","utf8"),markdown=await readFile("src/frontend/markdown.js","utf8"),i18n=await readFile("src/frontend/i18n/index.js","utf8"),zh=await readFile("src/frontend/i18n/zh-CN.js","utf8");
   assert.doesNotMatch(source,/\.innerHTML\s*=/);
   assert.doesNotMatch(runRegistry,/\b(?:window|document|localStorage|globalThis|composerState)\b/);
+  assert.doesNotMatch(runObserver,/\b(?:window|document|localStorage|globalThis|composerState|fetch)\b|\bt\(/);
+  assert.match(source,/import \{createRunObserver\} from "\.\/run-observer\.js"/);
   assert.doesNotMatch(composerState,/\.innerHTML\s*=/);
   assert.doesNotMatch(markdown,/\.innerHTML\s*=/);
   assert.match(source,/textContent=/);
