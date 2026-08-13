@@ -348,9 +348,33 @@ test("desktop browser acceptance covers security and session lifecycle", {
     `, appearanceMatrix), "fa06bed07f7526d5736cff3b3e0b29a885cbde2829caab57c0922b01825078b1");
     await driver.manage().window().setRect({ width: 760, height: 844, x: 0, y: 0 });
     assert.equal(await driver.executeScript("return getComputedStyle(document.querySelector('.agents')).position"), "absolute");
+    assert.deepEqual(await driver.executeScript(`
+      const action=getComputedStyle(document.querySelector('.session-quick-action'));
+      return {minHeight:action.minHeight,paddingTop:action.paddingTop,paddingRight:action.paddingRight,
+        paddingBottom:action.paddingBottom,paddingLeft:action.paddingLeft};
+    `), { minHeight: "44px", paddingTop: "8px", paddingRight: "10px", paddingBottom: "8px", paddingLeft: "10px" });
     await driver.manage().window().setRect({ width: 761, height: 844, x: 0, y: 0 });
     assert.equal(await driver.executeScript("return getComputedStyle(document.querySelector('.agents')).position"), "static");
     await driver.manage().window().setRect({ width: 1440, height: 900, x: 0, y: 0 });
+    const expandedShell = await driver.executeScript(`
+      const shell=getComputedStyle(document.querySelector('.shell'));
+      return {columns:shell.gridTemplateColumns.split(' ').slice(0,2),rail:getComputedStyle(document.querySelector('.sidebar-rail')).display,
+        agents:getComputedStyle(document.querySelector('.agents')).display,sessions:getComputedStyle(document.querySelector('.sessions')).display};
+    `);
+    assert.deepEqual(expandedShell, { columns: ["90px", "310px"], rail: "none", agents: "flex", sessions: "flex" });
+    await (await visible(driver, "#collapse-sidebar")).click();
+    await waitScript(driver, "return document.querySelector('.shell').classList.contains('sidebar-collapsed')");
+    assert.deepEqual(await driver.executeScript(`
+      const shell=getComputedStyle(document.querySelector('.shell'));
+      return {columns:shell.gridTemplateColumns.split(' ').slice(0,1),rail:getComputedStyle(document.querySelector('.sidebar-rail')).display,
+        agents:getComputedStyle(document.querySelector('.agents')).display,sessions:getComputedStyle(document.querySelector('.sessions')).display};
+    `), { columns: ["60px"], rail: "flex", agents: "none", sessions: "none" });
+    await (await visible(driver, "#expand-sidebar")).click();
+    await waitScript(driver, "return !document.querySelector('.shell').classList.contains('sidebar-collapsed')");
+    assert.deepEqual(await driver.executeScript(`
+      return {rail:getComputedStyle(document.querySelector('.sidebar-rail')).display,
+        agents:getComputedStyle(document.querySelector('.agents')).display,sessions:getComputedStyle(document.querySelector('.sessions')).display};
+    `), { rail: "none", agents: "flex", sessions: "flex" });
     const rejectedCsrf = await authenticatedFetch(driver, "/api/v1/sessions", {
       method: "POST",
       headers: { "content-type": "application/json", "x-csrf-token": "invalid-fixture-token" },

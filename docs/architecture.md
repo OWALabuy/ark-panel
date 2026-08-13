@@ -35,8 +35,10 @@ HTTPS 反向代理 origin 访问。反向代理只负责 TLS 和转发；它不�
 - `frontend` 只消费规范化 DTO，并以安全 DOM 渲染。
 
 浏览器样式继续作为同源静态资源直接加载，不引入构建链。`tokens-themes.css`
-只定义基础 token、主题和强调色，并先于 `styles.css` 的组件与响应式规则加载；后续
-语义样式层必须保持这一从 token 到使用方的覆盖顺序，不能跨层重复定义组件选择器。
+只定义基础 token、主题和强调色；`shell-navigation.css` 拥有桌面 shell、Agent、会话
+导航、分组、未读状态与折叠 rail。两层按上述顺序先于 `styles.css` 的其余组件和
+响应式覆盖加载；后续语义样式层必须保持从 token 到使用方再到响应式覆盖的顺序，
+不能跨层重复定义同一组件的基础规则。
 
 上游格式和 RPC 假设不能进入面板权威数据模型；浏览器 DTO 也不能暴露原始
 Gateway payload、凭据或主机路径。

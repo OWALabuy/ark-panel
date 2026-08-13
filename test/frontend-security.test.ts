@@ -27,7 +27,7 @@ test("frontend renders untrusted metadata with DOM text nodes", async () => {
   assert.match(i18n,/Intl\.DateTimeFormat/);
   assert.match(source,/className="message-body"/);
   assert.match(source,/className="message-meta"/);
-  const styles=await readFile("src/frontend/styles.css","utf8");
+  const styles=await readApplicationStyles();
   assert.match(styles,/\.composer textarea:placeholder-shown\{height:auto!important\}/);
   assert.match(source,/method:"PATCH"/);
   assert.match(source,/archived=\$\{viewingArchived\}/);
@@ -159,7 +159,7 @@ test("conversation operations only lock and surface results in their own session
 });
 
 test("mobile conversation keeps a constrained touch-scroll viewport", async () => {
-  const styles=await readFile("src/frontend/styles.css","utf8");
+  const styles=await readApplicationStyles();
 
   assert.match(styles,/\.shell\{height:100vh;height:100dvh;/);
   assert.match(styles,/@media\(max-width:760px\)\{/);
@@ -180,7 +180,7 @@ test("coarse-pointer keyboards insert new lines instead of submitting", async ()
 test("mobile conversation actions collapse and command menu stays inside the short viewport", async () => {
   const source=await readFile("src/frontend/app.js","utf8");
   const html=await readFile("src/frontend/index.html","utf8");
-  const styles=await readFile("src/frontend/styles.css","utf8");
+  const styles=await readApplicationStyles();
 
   assert.match(html,/id="session-actions-toggle"[^>]*aria-haspopup="menu"[^>]*aria-controls="session-actions"/);
   assert.match(source,/function closeSessionActions/);
@@ -193,7 +193,7 @@ test("mobile conversation actions collapse and command menu stays inside the sho
 
 test("conversation source label is visually stronger and centered with detail status", async () => {
   const html=await readFile("src/frontend/index.html","utf8");
-  const styles=await readFile("src/frontend/styles.css","utf8");
+  const styles=await readApplicationStyles();
 
   assert.match(html,/<span id="subtitle" aria-live="polite"><\/span>/);
   assert.doesNotMatch(html,/<small id="subtitle"/);
@@ -205,7 +205,7 @@ test("conversation source label is visually stronger and centered with detail st
 
 test("mobile navigation uses scrollable agent lists and finger-sized action menus", async () => {
   const source=await readFile("src/frontend/app.js","utf8");
-  const styles=await readFile("src/frontend/styles.css","utf8");
+  const styles=await readApplicationStyles();
 
   assert.match(source,/quickMenu\.className="session-quick-menu"/);
   assert.match(source,/quickToggle\.setAttribute\("aria-label",t\("session\.quickActions"/);
@@ -225,7 +225,7 @@ test("mobile navigation uses scrollable agent lists and finger-sized action menu
 test("mobile viewport follows software keyboards, safe areas, and browser history", async () => {
   const source=await readFile("src/frontend/app.js","utf8");
   const html=await readFile("src/frontend/index.html","utf8");
-  const styles=await readFile("src/frontend/styles.css","utf8");
+  const styles=await readApplicationStyles();
 
   assert.match(html,/viewport-fit=cover,interactive-widget=resizes-content/);
   assert.match(source,/function viewportMetrics\(\)/);
@@ -292,7 +292,7 @@ test("missing panel memory offers scoped restore, rebuild, and cancel choices", 
 test("memory center is a dedicated agent-aware tree beside the global settings entry", async () => {
   const source=await readFile("src/frontend/app.js","utf8");
   const html=await readFile("src/frontend/index.html","utf8");
-  const styles=await readFile("src/frontend/styles.css","utf8");
+  const styles=await readApplicationStyles();
   assert.ok(html.indexOf('id="open-memory"')<html.indexOf('id="open-settings"'));
   assert.ok(html.indexOf('id="rail-memory"')<html.indexOf('id="rail-settings"'));
   assert.match(html,/id="memory-page"[\s\S]*id="memory-tree" class="memory-tree"[^>]*role="tree"[\s\S]*id="memory-page-file-content"/);
@@ -329,7 +329,7 @@ test("conversation status is server-controlled and uses fresh OpenClaw context u
   const source=await readFile("src/frontend/app.js","utf8");
   const statusHelper=await readFile("src/frontend/conversation-status.js","utf8");
   const html=await readFile("src/frontend/index.html","utf8");
-  const styles=await readFile("src/frontend/styles.css","utf8");
+  const styles=await readApplicationStyles();
 
   assert.match(html,/class="conversation-meta"[\s\S]*id="subtitle"[\s\S]*id="conversation-status"/);
   assert.match(html,/id="show-conversation-status"[^>]*type="checkbox"/);
@@ -369,7 +369,7 @@ test("clearing the active conversation hides every session-scoped action", async
 
 test("background run notifications stay unread per session until the conversation is viewed", async () => {
   const source=await readFile("src/frontend/app.js","utf8");
-  const styles=await readFile("src/frontend/styles.css","utf8");
+  const styles=await readApplicationStyles();
 
   assert.match(source,/UNREAD_KEY="ark-panel:unread-runs:v1"/);
   assert.match(source,/let unreadRuns=readUnreadRuns\(\)/);
@@ -395,7 +395,7 @@ test("edit and resend opens a fork and submits the replacement through the norma
 test("desktop navigation can collapse to an accessible persistent rail", async () => {
   const source=await readFile("src/frontend/app.js","utf8");
   const html=await readFile("src/frontend/index.html","utf8");
-  const styles=await readFile("src/frontend/styles.css","utf8");
+  const styles=await readApplicationStyles();
 
   assert.match(html,/id="sidebar-rail"[\s\S]*id="expand-sidebar"[\s\S]*id="rail-recents"[^>]*aria-haspopup="menu"/);
   assert.match(html,/id="rail-agent"[^>]*aria-haspopup="menu"/);
@@ -453,7 +453,7 @@ test("composer uploads raw attachments and preserves their ids for idempotent ru
   const runRegistry=await readFile("src/frontend/run-registry.js","utf8");
   const composerState=await readFile("src/frontend/composer-state.js","utf8");
   const html=await readFile("src/frontend/index.html","utf8");
-  const styles=await readFile("src/frontend/styles.css","utf8");
+  const styles=await readApplicationStyles();
 
   assert.match(html,/id="attachment-input"[^>]*\.docx[^>]*\.xlsx[^>]*\.pptx[^>]*multiple/);
   assert.match(source,/body:file/);
@@ -481,7 +481,7 @@ test("per-turn output intent is accessible, draft-scoped, and preserved until ru
   const source=await readFile("src/frontend/app.js","utf8");
   const runRegistry=await readFile("src/frontend/run-registry.js","utf8");
   const html=await readFile("src/frontend/index.html","utf8");
-  const styles=await readFile("src/frontend/styles.css","utf8");
+  const styles=await readApplicationStyles();
 
   assert.match(html,/id="request-outputs"[^>]*aria-pressed="false"/);
   assert.match(html,/id="request-outputs"[^>]*aria-label="[^"]+"[^>]*title="[^"]+"/);
