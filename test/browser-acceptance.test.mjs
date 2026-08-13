@@ -356,6 +356,21 @@ test("desktop browser acceptance covers security and session lifecycle", {
     await driver.manage().window().setRect({ width: 761, height: 844, x: 0, y: 0 });
     assert.equal(await driver.executeScript("return getComputedStyle(document.querySelector('.agents')).position"), "static");
     await driver.manage().window().setRect({ width: 1440, height: 900, x: 0, y: 0 });
+    assert.deepEqual(await driver.executeScript(`
+      const conversation=getComputedStyle(document.querySelector('.conversation'));
+      const composer=getComputedStyle(document.querySelector('.composer'));
+      const commandNode=document.querySelector('.commands'),wasHidden=commandNode.hidden,probe=document.createElement('button');
+      commandNode.append(probe);commandNode.hidden=false;
+      let commands;
+      try{const commandStyle=getComputedStyle(commandNode);commands={display:commandStyle.display,
+        position:commandStyle.position,maxHeight:commandStyle.maxHeight,buttonDisplay:getComputedStyle(probe).display}}
+      finally{probe.remove();commandNode.hidden=wasHidden}
+      return {conversation:{display:conversation.display,overflow:conversation.overflow,position:conversation.position},
+        composer:{display:composer.display,position:composer.position,borderRadius:composer.borderRadius},
+        commands};
+    `), { conversation: { display: "flex", overflow: "hidden", position: "relative" },
+      composer: { display: "block", position: "relative", borderRadius: "18px" },
+      commands: { display: "block", position: "absolute", maxHeight: "320px", buttonDisplay: "grid" } });
     const expandedShell = await driver.executeScript(`
       const shell=getComputedStyle(document.querySelector('.shell'));
       return {columns:shell.gridTemplateColumns.split(' ').slice(0,2),rail:getComputedStyle(document.querySelector('.sidebar-rail')).display,

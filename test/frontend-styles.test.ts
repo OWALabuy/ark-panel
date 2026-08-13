@@ -7,7 +7,8 @@ import { applicationStylesheetHrefs, readApplicationStyles } from "./frontend-st
 const BASELINE_INVENTORY_FINGERPRINT = "d910da5d54f1c46388a1ecee3e474f47938511b2a79b30f8c974742f10ea2265";
 const TOKENS_THEMES_ORDERED_FINGERPRINT = "d1f5e91d299d6fd70d23a569113ee22d0d20d78a98bdfd8f0c286cd542610e61";
 const SHELL_NAVIGATION_ORDERED_FINGERPRINT = "5b855c56366188d9135d2c78ae57cc46083f39ae337894ddd6054a8799979ffb";
-const REMAINING_STYLES_ORDERED_FINGERPRINT = "29092d53b9fb9ecbfdb932d015edc27a9474f5bae94817c9af017fb111006b62";
+const CONVERSATION_COMPOSER_ORDERED_FINGERPRINT = "b08cf93514aa210bc8022c85a8103f2d187e90965bac5d20a08e69d62eb7c575";
+const REMAINING_STYLES_ORDERED_FINGERPRINT = "f8b5e052447623ff1351f309e666d7c6f55af9c05b7778bd05ce6acaf5ca0da6";
 
 function stylesheetStatements(source: string): string[] {
   const withoutComments = source.replace(/\/\*[\s\S]*?\*\//g, "");
@@ -38,7 +39,7 @@ function fingerprint(statements: string[]): string {
 }
 
 test("application semantic stylesheets load in their explicit cascade order", async () => {
-  assert.deepEqual(await applicationStylesheetHrefs(), ["/tokens-themes.css", "/shell-navigation.css", "/styles.css"]);
+  assert.deepEqual(await applicationStylesheetHrefs(), ["/tokens-themes.css", "/shell-navigation.css", "/conversation-composer.css", "/styles.css"]);
 });
 
 test("the application styles preserve the monolithic CSS rule inventory", async () => {
@@ -58,5 +59,11 @@ test("the token, shell, and remaining layers preserve their ordered responsibili
   assert.match(shell,/\.session-quick-menu\.opens-up \.session-quick-actions\{top:auto;bottom:46px\}/);
   assert.match(shell,/\.shell\.sidebar-collapsed\{grid-template-columns:60px minmax\(0,1fr\)\}/);
   assert.doesNotMatch(shell,/@media|\.conversation|\.composer|\.settings|\.memory|\.login/);
+  const conversation=await readFile("src/frontend/conversation-composer.css","utf8");
+  assert.equal(fingerprint(stylesheetStatements(conversation)),CONVERSATION_COMPOSER_ORDERED_FINGERPRINT);
+  assert.match(conversation,/\.conversation\{min-width:0;[^}]*display:flex;flex-direction:column\}/);
+  assert.match(conversation,/\.composer\.dragging\{border-color:var\(--accent\)/);
+  assert.match(conversation,/\.image-preview-dialog>img\{min-height:0;flex:1;height:auto\}/);
+  assert.doesNotMatch(conversation,/@media|\.settings|\.memory|\.login|\.agents|\.sessions|\.session-quick/);
   assert.equal(fingerprint(stylesheetStatements(await readFile("src/frontend/styles.css","utf8"))),REMAINING_STYLES_ORDERED_FINGERPRINT);
 });
