@@ -4,17 +4,19 @@ import test from "node:test";
 import { readApplicationStyles } from "./frontend-styles.js";
 
 test("frontend renders untrusted metadata with DOM text nodes", async () => {
-  const source=await readFile("src/frontend/app.js","utf8"),runRegistry=await readFile("src/frontend/run-registry.js","utf8"),runObserver=await readFile("src/frontend/run-observer.js","utf8"),runCreationReconciler=await readFile("src/frontend/run-creation-reconciler.js","utf8"),runBootstrap=await readFile("src/frontend/run-bootstrap.js","utf8"),runEventStream=await readFile("src/frontend/run-event-stream.js","utf8"),composerState=await readFile("src/frontend/composer-state.js","utf8"),markdown=await readFile("src/frontend/markdown.js","utf8"),i18n=await readFile("src/frontend/i18n/index.js","utf8"),zh=await readFile("src/frontend/i18n/zh-CN.js","utf8");
+  const source=await readFile("src/frontend/app.js","utf8"),runRegistry=await readFile("src/frontend/run-registry.js","utf8"),runObserver=await readFile("src/frontend/run-observer.js","utf8"),runCreationReconciler=await readFile("src/frontend/run-creation-reconciler.js","utf8"),runBootstrap=await readFile("src/frontend/run-bootstrap.js","utf8"),generationSubmission=await readFile("src/frontend/generation-submission.js","utf8"),runEventStream=await readFile("src/frontend/run-event-stream.js","utf8"),composerState=await readFile("src/frontend/composer-state.js","utf8"),markdown=await readFile("src/frontend/markdown.js","utf8"),i18n=await readFile("src/frontend/i18n/index.js","utf8"),zh=await readFile("src/frontend/i18n/zh-CN.js","utf8");
   assert.doesNotMatch(source,/\.innerHTML\s*=/);
   assert.doesNotMatch(runRegistry,/\b(?:window|document|localStorage|globalThis|composerState)\b/);
   assert.doesNotMatch(runObserver,/\b(?:window|document|localStorage|globalThis|composerState|fetch)\b|\bt\(/);
   assert.doesNotMatch(runCreationReconciler,/\b(?:window|document|localStorage|sessionStorage|globalThis|composerState|fetch)\b|(?:from|import\()["'][^"']*(?:i18n|composer)/);
   assert.doesNotMatch(runBootstrap,/\b(?:window|document|localStorage|sessionStorage|globalThis|composerState|fetch)\b|(?:from|import\()["'][^"']*(?:i18n|composer)/);
+  assert.doesNotMatch(generationSubmission,/\b(?:window|document|localStorage|sessionStorage|globalThis|fetch)\b|(?:from|import\()["'][^"']*(?:i18n|run-recovery)/);
   assert.match(runCreationReconciler,/import \{recoverPersistedRun\} from "\.\/run-recovery-policy\.js"/);
   assert.match(runBootstrap,/import \{inspectStoredRuns\} from "\.\/run-recovery-policy\.js"/);
   assert.match(source,/import \{createRunObserver\} from "\.\/run-observer\.js"/);
   assert.match(source,/import \{createRunCreationReconciler\} from "\.\/run-creation-reconciler\.js"/);
   assert.match(source,/import \{createRunBootstrap\} from "\.\/run-bootstrap\.js"/);
+  assert.match(source,/import \{createGenerationSubmissionCoordinator\} from "\.\/generation-submission\.js"/);
   assert.doesNotMatch(composerState,/\.innerHTML\s*=/);
   assert.doesNotMatch(markdown,/\.innerHTML\s*=/);
   assert.match(source,/textContent=/);
@@ -93,7 +95,7 @@ test("frontend renders untrusted metadata with DOM text nodes", async () => {
   assert.match(source,/calls\.get\(result\.callId\)/);
   assert.match(source,/call\.result=result/);
   assert.match(source,/block\.result\.isError/);
-  assert.match(source,/\/sessions\/\$\{encodeURIComponent\(sourceSession\)\}\/runs/);
+  assert.match(source,/createRun:run=>api\(`\/sessions\/\$\{encodeURIComponent\(run\.recordId\)\}\/runs`/);
   assert.match(source,/\/runs\/\$\{encodeURIComponent\(run\.runId\)\}\/abort/);
   assert.match(source,/\/runs\/\$\{encodeURIComponent\(run\.runId\)\}\/events/);
   assert.match(source,/\/sessions\/\$\{encodeURIComponent\(recordId\)\}\/runs\/active/);
@@ -110,7 +112,7 @@ test("frontend renders untrusted metadata with DOM text nodes", async () => {
   assert.match(source,/function reconcileCreatedRun/);
   assert.match(source,/function rememberServerRun\(value,local\)\{[\s\S]*?if\(local&&!same\)discardRun\(local\);[\s\S]*?runRegistry\.rememberServer/);
   assert.match(source,/"idempotency-key":String\(run\.runId\)/);
-  assert.match(source,/submittedDraft:message/);
+  assert.match(generationSubmission,/submittedDraft:message/);
   assert.match(source,/if\(run\.status==="completed"\)\{const agentId=run\.agentId\|\|activeAgent,scope=composerScope\(run\.recordId,agentId\),currentDraft=/);
   assert.match(source,/composerState\.complete\(scope,run,currentDraft\)/);
   assert.match(source,/t\("error\.stopUnknown"\)/);
@@ -118,7 +120,7 @@ test("frontend renders untrusted metadata with DOM text nodes", async () => {
   assert.match(source,/localStorage\.setItem/);
   assert.match(source,/localStorage\.removeItem/);
   assert.match(source,/restoreDraft\(id\)/);
-  assert.match(source,/sourceSession=activeSession,sourceRevision=activeRevision/);
+  assert.match(source,/generationSubmission\.submit\(\{scope,message,revision:activeRevision,requestOutputs,sessionTitle:title\}\)/);
   assert.doesNotMatch(source,/\/reset/);
   assert.match(source,/body:JSON\.stringify\(\{command:"compact",args:\[\],revision\}\)/);
   assert.match(source,/if\(parsed\.command==="compact"\)/);
@@ -145,14 +147,14 @@ test("generation state only locks the composer for its own session", async () =>
 });
 
 test("conversation operations only lock and surface results in their own session", async () => {
-  const source=await readFile("src/frontend/app.js","utf8");
+  const source=await readFile("src/frontend/app.js","utf8"),generationSubmission=await readFile("src/frontend/generation-submission.js","utf8");
 
   assert.match(source,/const composerState=createComposerState\(/);
   assert.match(source,/compactions=createScopedActivity\(\),memoryCandidateGenerations=createScopedActivity\(\)/);
   assert.match(source,/uploading=isAttachmentSubmissionActive\(\),compacting=isCompactionActive\(\),busy=running\|\|uploading\|\|compacting/);
-  assert.match(source,/composerState\.promoteSubmission\(submissionReceipt,previousScope,createdScope\)/);
-  assert.match(source,/composerState\.createdSession\(previousScope\)/);
-  assert.match(source,/composerState\.rememberCreatedSession\(previousScope,created\)/);
+  assert.match(generationSubmission,/composer\.promoteSubmission\(receipt,sourceScope,targetScope\)/);
+  assert.match(generationSubmission,/composer\.createdSession\(sourceScope\)/);
+  assert.match(generationSubmission,/composer\.rememberCreatedSession\(sourceScope,created\)/);
   assert.match(source,/if\(activeSession===recordId\)\{\$\("#subtitle"\)\.textContent=t\("compact\.running"\)/);
   assert.match(source,/pendingMemoryCandidates\.set\(recordId,\{candidate,thenCompact,compactionContext:context\}\)/);
   assert.match(source,/if\(!state\|\|activeSession!==recordId\|\|dialog\.open\)return/);
@@ -452,6 +454,7 @@ test("composer uploads raw attachments and preserves their ids for idempotent ru
   const source=await readFile("src/frontend/app.js","utf8");
   const runRegistry=await readFile("src/frontend/run-registry.js","utf8");
   const composerState=await readFile("src/frontend/composer-state.js","utf8");
+  const generationSubmission=await readFile("src/frontend/generation-submission.js","utf8");
   const html=await readFile("src/frontend/index.html","utf8");
   const styles=await readApplicationStyles();
 
@@ -463,7 +466,7 @@ test("composer uploads raw attachments and preserves their ids for idempotent ru
   assert.match(source,/attachmentIds:run\.submittedAttachmentIds/);
   assert.match(runRegistry,/submittedAttachmentIds:run\.submittedAttachmentIds/);
   assert.match(source,/composerState\.complete\(scope,run,currentDraft\)/);
-  assert.match(source,/composerState\.commitSubmission\(submissionReceipt,idempotencyKey,attachmentIds\)/);
+  assert.match(generationSubmission,/composer\.commitSubmission\(receipt,runId,attachmentIds\)/);
   assert.match(source,/\/api\/v1\/files\/\$\{encodeURIComponent\(block\.id\)\}\/download/);
   assert.match(source,/\/api\/v1\/files\/\$\{encodeURIComponent\(block\.id\)\}\/preview/);
   assert.match(composerState,/PREVIEW_IMAGE_MIMES=new Set\(\["image\/png","image\/jpeg","image\/webp"\]\)/);
@@ -480,6 +483,7 @@ test("composer uploads raw attachments and preserves their ids for idempotent ru
 test("per-turn output intent is accessible, draft-scoped, and preserved until run acceptance", async () => {
   const source=await readFile("src/frontend/app.js","utf8");
   const runRegistry=await readFile("src/frontend/run-registry.js","utf8");
+  const generationSubmission=await readFile("src/frontend/generation-submission.js","utf8");
   const html=await readFile("src/frontend/index.html","utf8");
   const styles=await readApplicationStyles();
 
@@ -487,13 +491,13 @@ test("per-turn output intent is accessible, draft-scoped, and preserved until ru
   assert.match(html,/id="request-outputs"[^>]*aria-label="[^"]+"[^>]*title="[^"]+"/);
   assert.match(html,/class="request-outputs-icon"[^>]*>▧</);
   assert.doesNotMatch(html,/id="request-outputs"[^>]*>[\s\S]*?data-i18n="composer\.requestOutputs"/);
-  assert.match(source,/composerState\.promoteSubmission\(submissionReceipt,previousScope,createdScope\)/);
+  assert.match(generationSubmission,/composer\.promoteSubmission\(receipt,sourceScope,targetScope\)/);
   assert.match(runRegistry,/submittedRequestOutputs:run\.submittedRequestOutputs/);
   assert.match(source,/requestOutputs:run\.submittedRequestOutputs/);
-  assert.match(source,/clearAcceptedOutputIntent\(accepted\);if\(!await settleRun\(accepted\)\)/);
+  assert.match(generationSubmission,/consumeAccepted\(accepted\);[\s\S]*if\(!await settle\(accepted\)\)void watch\(accepted\)/);
   assert.match(source,/function clearAcceptedOutputIntent\(run\)\{composerState\.acceptOutputIntent\(composerScope\(run\.recordId,run\.agentId\|\|activeAgent\),run\.submittedRequestOutputs===true\)\}/);
   assert.match(runRegistry,/status:run\.status,createPhase:run\.createPhase/);
-  assert.match(source,/createPhase:"provisional",submittedDraft:message/);
+  assert.match(generationSubmission,/createPhase:"provisional"/);
   assert.match(source,/const runCreationReconciler=createRunCreationReconciler\(\{/);
   assert.match(source,/if\(acknowledgedStorageAction\(run\)==="remove"\)runRegistry\.forget\(run\.recordId\)/);
   assert.match(source,/\$\("#request-outputs"\)\.disabled=busy\|\|!writable\|\|command/);

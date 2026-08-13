@@ -7,6 +7,7 @@ import {createRunRegistry} from "./run-registry.js";
 import {createRunObserver} from "./run-observer.js";
 import {createRunCreationReconciler} from "./run-creation-reconciler.js";
 import {createRunBootstrap} from "./run-bootstrap.js";
+import {createGenerationSubmissionCoordinator} from "./generation-submission.js";
 import {acknowledgedStorageAction,uncertainCreateError} from "./run-recovery-policy.js";
 import {consumeRunEventStream} from "./run-event-stream.js";
 
@@ -195,8 +196,8 @@ function humanFileSize(bytes){if(bytes<1024)return `${bytes} B`;if(bytes<1024*10
 function renderPendingAttachments(){const root=$("#pending-attachments");if(!root)return;clear(root);const values=currentPendingAttachments();root.hidden=!values.length;for(const item of values){const row=document.createElement("span"),label=document.createElement("span"),remove=document.createElement("button");row.className=`pending-attachment${item.previewUrl?" image":""}`;if(item.previewUrl){const image=document.createElement("img");image.src=item.previewUrl;image.alt="";row.append(image)}label.textContent=`${item.file.name} · ${humanFileSize(item.file.size)}`;remove.type="button";remove.textContent="×";remove.setAttribute("aria-label",t("attachment.remove",{name:item.file.name}));remove.disabled=Boolean(activeRun||isAttachmentSubmissionActive());remove.onclick=()=>{composerState.removePending(composerScope(),item.localId);renderPendingAttachments();updateComposer()};row.append(label,remove);root.append(row)}}
 function localizedAttachmentError(error){const value=/** @type {{code?:unknown,fileName?:unknown,limitMiB?:unknown,count?:unknown}} */(error&&typeof error==="object"?error:{}),name=String(value.fileName||"");if(value.code==="ATTACHMENT_UNSUPPORTED")return new Error(t("attachment.unsupported",{name}));if(value.code==="ATTACHMENT_EMPTY")return new Error(t("attachment.empty",{name}));if(value.code==="ATTACHMENT_TOO_LARGE")return new Error(t("attachment.tooLarge",{name,limit:Number(value.limitMiB)}));if(value.code==="ATTACHMENT_TOO_MANY")return new Error(t("attachment.tooMany",{count:Number(value.count)}));if(value.code==="ATTACHMENT_TOTAL_TOO_LARGE")return new Error(t("attachment.totalTooLarge"));if(value.code==="ATTACHMENT_INVALID_RESPONSE")return new Error(t("attachment.invalidResponse"));return error instanceof Error?error:new Error(String(error))}
 function addPendingFiles(files){if(activeRun||isAttachmentSubmissionActive())return;try{if(composerState.addPending(composerScope(),files)){renderPendingAttachments();updateComposer()}}catch(error){showError(localizedAttachmentError(error))}}
-/** @returns {Promise<Array<AttachmentDto & {recordId:string}>>} */
-async function uploadPendingAttachments(recordId,receipt){return /** @type {Promise<Array<AttachmentDto & {recordId:string}>>} */(composerState.uploadSubmission(receipt,recordId,async file=>{const response=await fetch(`/api/v1/sessions/${encodeURIComponent(recordId)}/attachments`,{method:"POST",headers:{"content-type":file.type||"application/octet-stream","x-file-name":encodeURIComponent(file.name),"x-csrf-token":csrf},body:file});let value=/** @type {ApiEnvelope<AttachmentDto>|null} */(null);try{value=/** @type {ApiEnvelope<AttachmentDto>} */(await response.json())}catch{}if(!response.ok)throw Object.assign(new Error(t("attachment.uploadFailed",{name:file.name})),{status:response.status,code:value?.error?.code});return value?.data}))}
+/** @param {string} recordId @param {File} file @returns {Promise<AttachmentDto|null|undefined>} */
+async function uploadAttachment(recordId,file){const response=await fetch(`/api/v1/sessions/${encodeURIComponent(recordId)}/attachments`,{method:"POST",headers:{"content-type":file.type||"application/octet-stream","x-file-name":encodeURIComponent(file.name),"x-csrf-token":csrf},body:file});let value=/** @type {ApiEnvelope<AttachmentDto>|null} */(null);try{value=/** @type {ApiEnvelope<AttachmentDto>} */(await response.json())}catch{}if(!response.ok)throw Object.assign(new Error(t("attachment.uploadFailed",{name:file.name})),{status:response.status,code:value?.error?.code});return value?.data}
 const APPEARANCE_KEY="ark-panel:appearance:v1",READING_SCALE_KEY="ark-panel:reading-scale:v1",SIDEBAR_KEY="ark-panel:sidebar-collapsed:v1",THEMES=new Set(["system","light","dark","gruvbox-dark-hard","gruvbox-dark-medium","gruvbox-dark-soft","gruvbox-light-hard","gruvbox-light-medium","gruvbox-light-soft"]),ACCENTS=new Set(["default","blue","green","red","yellow","magenta","cyan"]),MAX_AVATAR_BYTES=5*1024*1024;
 let accountAppearance={theme:"system",accent:"default"},confirmedAppearance=accountAppearance,desiredAppearance=accountAppearance,confirmedLocale=getLocale(),desiredLocale=getLocale(),showConversationStatus=true,confirmedShowConversationStatus=true,settingsPreviousFocus=null,appearanceSave=Promise.resolve(),localeSave=Promise.resolve(),conversationSettingSave=Promise.resolve(),railPreviousFocus=null,railTrigger=null,pendingAvatar=null;
 /** @type {ConversationStatusDto|null} */ let currentConversationStatus=null;
@@ -417,6 +418,24 @@ const runBootstrap=createRunBootstrap({
 });
 async function reconcileSessionRun(recordId){return runBootstrap.reconcileSession(recordId)}
 function recoverStoredRuns(){runBootstrap.recoverStored()}
+const generationSubmission=createGenerationSubmissionCoordinator({
+  composer:composerState,
+  createSession:async({agentId,title})=>{const created=/** @type {SessionRefDto} */(await api("/sessions",{method:"POST",body:JSON.stringify({agentId,title})}));return{agentId,sessionId:created.recordId,revision:created.revision}},
+  onSessionPromoted:async created=>{renderPendingAttachments();if(!activeSession&&activeAgent===created.agentId){await load();await openSession(created.sessionId);if(activeSession===created.sessionId)return{revision:activeRevision}}return{revision:created.revision}},
+  uploadAttachment,
+  randomUUID:()=>crypto.randomUUID(),
+  rememberProvisional:run=>rememberRun(/** @type {RunInputDto} */(run)),
+  createRun:run=>api(`/sessions/${encodeURIComponent(run.recordId)}/runs`,{method:"POST",headers:{"idempotency-key":run.runId},body:JSON.stringify({message:run.message,revision:run.revision,attachmentIds:run.attachmentIds,requestOutputs:run.requestOutputs})}),
+  rememberAccepted:(snapshot,provisional)=>rememberServerRun(/** @type {RunInputDto} */(snapshot),/** @type {ClientRunDto} */(provisional)),
+  consumeAccepted:run=>clearAcceptedOutputIntent(/** @type {ClientRunDto} */(run)),
+  settle:run=>settleRun(/** @type {ClientRunDto} */(run)),
+  watch:run=>watchRun(/** @type {ClientRunDto} */(run)),
+  discard:run=>discardRun(/** @type {ClientRunDto} */(run)),
+  isUncertainCreateError:uncertainCreateError,
+  reconcile:run=>reconcileCreatedRun(/** @type {ClientRunDto} */(run)),
+  onSubmissionChanged:()=>updateComposer()
+});
+function localizedSubmissionError(result){const error=result?.error;if(result?.stage==="upload")return localizedAttachmentError(error);const code=String(error?.code||"");return code.startsWith("SUBMISSION_")?new Error(t("error.requestFailed")):error instanceof Error?error:new Error(String(error||t("error.requestFailed")))}
 $("#search").addEventListener("input",()=>{clearTimeout(searchTimer);searchTimer=setTimeout(search,250)});$("#new-session").onclick=createSession;$("#archive-view").onclick=toggleArchiveView;$("#rename-session").onclick=renameActiveSession;$("#archive-session").onclick=toggleActiveArchive;$("#retry").onclick=()=>retryAction?.();$("#dismiss-error").onclick=hideError;$("#back-agents").onclick=()=>backShellView("");$("#back-sessions").onclick=()=>backShellView("show-sessions");$("#logout").onclick=async()=>{try{await api("/auth/logout",{method:"POST",body:"{}"});location.reload()}catch(error){showError(error)}};
 $("#messages").addEventListener("scroll",()=>{if(nearMessagesBottom()){const button=$("#jump-latest");if(button)button.hidden=true}},{passive:true});
 $("#message").addEventListener("input",event=>{saveDraft(event.target.value);resizeComposer();updateComposer();void showCommands()});$("#message").addEventListener("keydown",event=>{const menu=$("#command-menu");if(!menu.hidden&&(event.key==="ArrowDown"||event.key==="ArrowUp")){event.preventDefault();moveCommandSelection(event.key==="ArrowDown"?1:-1);return}if(!menu.hidden&&event.key==="Escape"){event.preventDefault();hideCommands();return}if(!menu.hidden&&event.key==="Tab"){const selected=menu.querySelector('[aria-selected="true"]')||menu.querySelector("button:not(:disabled)");if(selected){event.preventDefault();selected.click();return}}if(event.key==="Enter"&&!event.shiftKey&&!event.isComposing&&!coarsePointer.matches){event.preventDefault();$("#composer").requestSubmit()}});$("#message").addEventListener("blur",()=>setTimeout(hideCommands,0));
@@ -431,46 +450,12 @@ let composerDragDepth=0;const composer=$("#composer"),dragHasFiles=event=>[...(e
 $("#send").addEventListener("click",async event=>{if(!activeRun)return;event.preventDefault();const run=activeRun;rememberRun({...run,status:"aborting"});try{const snapshot=rememberRun(await api(`/runs/${encodeURIComponent(run.runId)}/abort`,{method:"POST",body:"{}"}));if(!await settleRun(snapshot))void watchRun(snapshot)}catch(error){if(activeSession===run.recordId){$("#subtitle").textContent=t("error.stopUnknown");showError(new Error(t("error.stopUnconfirmed",{message:error.message||t("error.network")})))}void watchRun(run)}});
 $("#composer").addEventListener("submit",event=>{const message=$("#message").value;if(!message.trimStart().startsWith("/"))return;event.preventDefault();event.stopImmediatePropagation();if(!message.trim()||!activeSession||activeRun||isAttachmentSubmissionActive())return;if(currentPendingAttachments().length){showError(new Error(t("attachment.commandForbidden")));return}void dispatchCommand(message).catch(error=>showError(error,()=>$("#composer").requestSubmit()))},{capture:true});
 $("#composer").onsubmit=async event=>{
-  event.preventDefault();const textarea=$("#message"),message=textarea.value,pending=currentPendingAttachments();let requestOutputs=readOutputIntent();
+  event.preventDefault();const textarea=$("#message"),message=textarea.value,pending=currentPendingAttachments(),requestOutputs=readOutputIntent();
   if((!message.trim()&&!pending.length)||activeRun||isAttachmentSubmissionActive())return;
   if(message.trimStart().startsWith("/")){showError(new Error(pending.length?t("attachment.commandForbidden"):t("error.commandLegacy")));return}
-  let sourceSession=activeSession,sourceRevision=activeRevision,sourceAgent=activeAgent,submissionScope=composerScope(sourceSession,sourceAgent),submissionKey=composerState.scopeKey(submissionScope);
-  const initialReceipt=composerState.startSubmission(submissionScope,message);if(!initialReceipt)return;
-  let submissionReceipt=initialReceipt;
-  const finishSubmission=()=>{composerState.finishSubmission(submissionReceipt);updateComposer()};
-  updateComposer();
-  if(!sourceSession){
-    if(!sourceAgent||viewingArchived){finishSubmission();return}
-    const previousScope=submissionScope;
-    try{
-      let created=composerState.createdSession(previousScope);
-      if(!created){
-        const title=message.trim().slice(0,60)||pending[0]?.file.name.slice(0,60)||t("attachment.sessionTitle"),response=await api("/sessions",{method:"POST",body:JSON.stringify({agentId:sourceAgent,title})});
-        created={agentId:sourceAgent,sessionId:String(response.recordId),revision:String(response.revision||"")};
-        if(!composerState.rememberCreatedSession(previousScope,created))throw new Error(t("error.requestFailed"));
-      }
-      const createdScope=composerScope(created.sessionId,created.agentId),promoted=composerState.promoteSubmission(submissionReceipt,previousScope,createdScope);
-      if(!promoted)throw new Error(t("error.requestFailed"));
-      submissionReceipt=promoted;sourceSession=created.sessionId;sourceRevision=created.revision;submissionScope=createdScope;submissionKey=composerState.scopeKey(createdScope);requestOutputs=composerState.readOutputIntent(createdScope);renderPendingAttachments();
-      if(!activeSession&&activeAgent===sourceAgent){await load();await openSession(sourceSession);if(activeSession===sourceSession)sourceRevision=activeRevision}
-    }catch(error){
-      finishSubmission();
-      if(attachmentDraftKey()===submissionKey)showError(error,()=>$("#composer").requestSubmit());
-      return;
-    }
-  }
-  let attachmentIds;
-  try{
-    const uploaded=await uploadPendingAttachments(sourceSession,submissionReceipt);attachmentIds=uploaded.map(item=>String(item.attachmentId||item.id||"")).filter(Boolean);
-    if(attachmentIds.length!==uploaded.length)throw new Error(t("attachment.invalidResponse"));
-  }catch(error){finishSubmission();if(attachmentDraftKey()===submissionKey)showError(localizedAttachmentError(error),()=>$("#composer").requestSubmit());return}
-  const idempotencyKey=crypto.randomUUID();
-  if(!composerState.commitSubmission(submissionReceipt,idempotencyKey,attachmentIds)){finishSubmission();if(attachmentDraftKey()===submissionKey)showError(new Error(t("error.requestFailed")),()=>$("#composer").requestSubmit());return}
-  const provisional=rememberRun({runId:idempotencyKey,recordId:sourceSession,agentId:sourceAgent,status:"accepted",createPhase:"provisional",submittedDraft:message,submittedRevision:sourceRevision||undefined,submittedAttachmentIds:attachmentIds,submittedRequestOutputs:requestOutputs});
-  try{
-    const accepted=rememberServerRun(await api(`/sessions/${encodeURIComponent(sourceSession)}/runs`,{method:"POST",headers:{"idempotency-key":idempotencyKey},body:JSON.stringify({message,revision:sourceRevision||undefined,attachmentIds,requestOutputs})}),provisional);
-    clearAcceptedOutputIntent(accepted);if(!await settleRun(accepted))void watchRun(accepted);
-  }catch(error){if(uncertainCreateError(error))void reconcileCreatedRun(provisional);else{discardRun(provisional);if(activeSession===sourceSession)showError(error,()=>$("#composer").requestSubmit())}}
+  if(!activeSession&&(!activeAgent||viewingArchived))return;
+  const scope=composerScope(),title=message.trim().slice(0,60)||pending[0]?.file.name.slice(0,60)||t("attachment.sessionTitle"),result=await generationSubmission.submit({scope,message,revision:activeRevision,requestOutputs,sessionTitle:title});
+  if(result.kind==="failed"&&composerState.scopeKey(result.scope)===attachmentDraftKey())showError(localizedSubmissionError(result),()=>$("#composer").requestSubmit());
 };
 /** @param {SessionSummaryDto|RevisionDto|null|undefined} left @param {SessionSummaryDto|RevisionDto|null|undefined} right */
 function sameSessionIdentity(left,right){return String(left?.recordId||"")===String(right?.recordId||"")&&String(left?.agentId||"")===String(right?.agentId||"")&&String(left?.sourceKind||"")===String(right?.sourceKind||"")&&String(left?.sourceKey||"")===String(right?.sourceKey||"")}

@@ -125,8 +125,10 @@ SSE 断开不表示 run 完成，预览丢失也不能决定终态。只有完�
 已确认 run 的查询、SSE 重试与同 runId watcher 去重由 DOM-free 的 run observer factory
 协调；provisional creation 的查询后重试、同 runId 去重与 accepted handoff 由独立的
 run creation reconciler factory 协调；存储扫描和会话 active-run 接管由 DOM-free 的 run
-bootstrap factory 编排。三者的持久化、传输、终态处理、composer 所有权与界面反馈仍通过
-`app.js` 显式回调注入。
+bootstrap factory 编排。新会话 scope 提升、附件上传、submission receipt 提交、provisional
+run、服务端接管与不确定创建恢复由 DOM-free 的 generation submission coordinator 按固定
+顺序编排。各模块的持久化、传输、终态处理、composer 所有权与界面反馈均由 `app.js`
+通过显式 capability port 注入；模块不读取 DOM、locale、全局 fetch 或隐式浏览器状态。
 
 ## 5. Gateway 适配与权限
 
@@ -209,9 +211,10 @@ opaque submission receipt 将 draft、产出意图、附件顺序和锁一起提
 created record，显式重试复用该 record 而不再创建 session。storage 补偿仅属 best effort，
 残留值至多是已知的 draft/产出意图副本，永不被自动发送，不宣称跨 localStorage key 原子。
 
-generation recovery policy 不导入 composer。`app.js` 只在服务端确认接管 run 后协调消费
-该轮产出意图，并只在明确 completed 时请求 composer 清理；草稿已被继续编辑时不清理
-任何状态，仍属于该 run 的已上传附件才会移除并精确释放本地 Blob URL。failed/aborted
+generation recovery policy 不导入 composer。generation submission coordinator 只在服务端
+确认接管 run 后消费该轮产出意图。系统只在明确 completed 时请求 composer 清理；草稿
+已被继续编辑时不清理任何状态，仍属于该 run 的已上传附件才会移除并精确释放本地
+Blob URL。failed/aborted
 不触发 composer terminal 清理。v1 localStorage key 保持原字节合同；普通草稿保存仍可
 fail-soft，但 new-agent 到 session 的 ownership 提升对 storage 失败关闭，保留可见的源
 composer 状态等待用户重试。
