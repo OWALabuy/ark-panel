@@ -6,7 +6,8 @@ import {createScopedActivity} from "./scoped-activity.js";
 import {createRunRegistry} from "./run-registry.js";
 import {createRunObserver} from "./run-observer.js";
 import {createRunCreationReconciler} from "./run-creation-reconciler.js";
-import {acknowledgedStorageAction,inspectStoredRuns,uncertainCreateError} from "./run-recovery-policy.js";
+import {createRunBootstrap} from "./run-bootstrap.js";
+import {acknowledgedStorageAction,uncertainCreateError} from "./run-recovery-policy.js";
 import {consumeRunEventStream} from "./run-event-stream.js";
 
 // Mirrors the normalized response DTOs constructed by src/server/app.ts. Keep
@@ -261,7 +262,6 @@ function readDraft(sessionId=activeSession,agentId=activeAgent){return composerS
 function saveDraft(value,sessionId=activeSession,agentId=activeAgent){composerState.saveDraft(composerScope(sessionId,agentId),value)}
 function readOutputIntent(sessionId=activeSession,agentId=activeAgent){return composerState.readOutputIntent(composerScope(sessionId,agentId))}
 function saveOutputIntent(value,sessionId=activeSession,agentId=activeAgent){composerState.saveOutputIntent(composerScope(sessionId,agentId),value)}
-function runKey(sessionId){return runRegistry.key(sessionId)}
 function terminalRun(status){return status==="completed"||status==="failed"||status==="aborted"}
 /** @param {RunInputDto|null|undefined} value @param {RunInputDto} [fallback] @returns {ClientRunDto} */
 function normalizeRun(value,fallback={}){return /** @type {ClientRunDto} */(runRegistry.normalize(value,fallback))}
@@ -405,8 +405,18 @@ const runObserver=createRunObserver({
 });
 /** @param {RunInputDto} value */
 function watchRun(value){return runObserver.watch(normalizeRun(value))}
-async function reconcileSessionRun(recordId){const local=/** @type {ClientRunDto|undefined} */(runRegistry.get(recordId));if(local){void reconcileCreatedRun(local);return}try{const snapshot=await api(`/sessions/${encodeURIComponent(recordId)}/runs/active`);if(snapshot){const run=rememberServerRun(snapshot,undefined);if(!await settleRun(run))void watchRun(run)}}catch{}}
-function recoverStoredRuns(){try{const inspected=inspectStoredRuns(runRegistry.readStoredEntries(),runKey);for(const key of inspected.remove)localStorage.removeItem(key);for(const value of inspected.runs){const run=rememberRun(normalizeRun(value));void reconcileCreatedRun(run)}}catch{}}
+const runBootstrap=createRunBootstrap({
+  registry:runRegistry,
+  removeStoredKey:key=>localStorage.removeItem(key),
+  rememberLocal:value=>rememberRun(/** @type {RunInputDto} */(value)),
+  reconcileCreation:run=>reconcileCreatedRun(/** @type {ClientRunDto} */(run)),
+  getActive:recordId=>api(`/sessions/${encodeURIComponent(recordId)}/runs/active`),
+  rememberAccepted:snapshot=>rememberServerRun(/** @type {RunInputDto} */(snapshot),undefined),
+  settle:run=>settleRun(/** @type {ClientRunDto} */(run)),
+  watch:run=>watchRun(/** @type {ClientRunDto} */(run))
+});
+async function reconcileSessionRun(recordId){return runBootstrap.reconcileSession(recordId)}
+function recoverStoredRuns(){runBootstrap.recoverStored()}
 $("#search").addEventListener("input",()=>{clearTimeout(searchTimer);searchTimer=setTimeout(search,250)});$("#new-session").onclick=createSession;$("#archive-view").onclick=toggleArchiveView;$("#rename-session").onclick=renameActiveSession;$("#archive-session").onclick=toggleActiveArchive;$("#retry").onclick=()=>retryAction?.();$("#dismiss-error").onclick=hideError;$("#back-agents").onclick=()=>backShellView("");$("#back-sessions").onclick=()=>backShellView("show-sessions");$("#logout").onclick=async()=>{try{await api("/auth/logout",{method:"POST",body:"{}"});location.reload()}catch(error){showError(error)}};
 $("#messages").addEventListener("scroll",()=>{if(nearMessagesBottom()){const button=$("#jump-latest");if(button)button.hidden=true}},{passive:true});
 $("#message").addEventListener("input",event=>{saveDraft(event.target.value);resizeComposer();updateComposer();void showCommands()});$("#message").addEventListener("keydown",event=>{const menu=$("#command-menu");if(!menu.hidden&&(event.key==="ArrowDown"||event.key==="ArrowUp")){event.preventDefault();moveCommandSelection(event.key==="ArrowDown"?1:-1);return}if(!menu.hidden&&event.key==="Escape"){event.preventDefault();hideCommands();return}if(!menu.hidden&&event.key==="Tab"){const selected=menu.querySelector('[aria-selected="true"]')||menu.querySelector("button:not(:disabled)");if(selected){event.preventDefault();selected.click();return}}if(event.key==="Enter"&&!event.shiftKey&&!event.isComposing&&!coarsePointer.matches){event.preventDefault();$("#composer").requestSubmit()}});$("#message").addEventListener("blur",()=>setTimeout(hideCommands,0));

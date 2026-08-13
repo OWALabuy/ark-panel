@@ -3,14 +3,17 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 test("frontend renders untrusted metadata with DOM text nodes", async () => {
-  const source=await readFile("src/frontend/app.js","utf8"),runRegistry=await readFile("src/frontend/run-registry.js","utf8"),runObserver=await readFile("src/frontend/run-observer.js","utf8"),runCreationReconciler=await readFile("src/frontend/run-creation-reconciler.js","utf8"),runEventStream=await readFile("src/frontend/run-event-stream.js","utf8"),composerState=await readFile("src/frontend/composer-state.js","utf8"),markdown=await readFile("src/frontend/markdown.js","utf8"),i18n=await readFile("src/frontend/i18n/index.js","utf8"),zh=await readFile("src/frontend/i18n/zh-CN.js","utf8");
+  const source=await readFile("src/frontend/app.js","utf8"),runRegistry=await readFile("src/frontend/run-registry.js","utf8"),runObserver=await readFile("src/frontend/run-observer.js","utf8"),runCreationReconciler=await readFile("src/frontend/run-creation-reconciler.js","utf8"),runBootstrap=await readFile("src/frontend/run-bootstrap.js","utf8"),runEventStream=await readFile("src/frontend/run-event-stream.js","utf8"),composerState=await readFile("src/frontend/composer-state.js","utf8"),markdown=await readFile("src/frontend/markdown.js","utf8"),i18n=await readFile("src/frontend/i18n/index.js","utf8"),zh=await readFile("src/frontend/i18n/zh-CN.js","utf8");
   assert.doesNotMatch(source,/\.innerHTML\s*=/);
   assert.doesNotMatch(runRegistry,/\b(?:window|document|localStorage|globalThis|composerState)\b/);
   assert.doesNotMatch(runObserver,/\b(?:window|document|localStorage|globalThis|composerState|fetch)\b|\bt\(/);
   assert.doesNotMatch(runCreationReconciler,/\b(?:window|document|localStorage|sessionStorage|globalThis|composerState|fetch)\b|(?:from|import\()["'][^"']*(?:i18n|composer)/);
+  assert.doesNotMatch(runBootstrap,/\b(?:window|document|localStorage|sessionStorage|globalThis|composerState|fetch)\b|(?:from|import\()["'][^"']*(?:i18n|composer)/);
   assert.match(runCreationReconciler,/import \{recoverPersistedRun\} from "\.\/run-recovery-policy\.js"/);
+  assert.match(runBootstrap,/import \{inspectStoredRuns\} from "\.\/run-recovery-policy\.js"/);
   assert.match(source,/import \{createRunObserver\} from "\.\/run-observer\.js"/);
   assert.match(source,/import \{createRunCreationReconciler\} from "\.\/run-creation-reconciler\.js"/);
+  assert.match(source,/import \{createRunBootstrap\} from "\.\/run-bootstrap\.js"/);
   assert.doesNotMatch(composerState,/\.innerHTML\s*=/);
   assert.doesNotMatch(markdown,/\.innerHTML\s*=/);
   assert.match(source,/textContent=/);
