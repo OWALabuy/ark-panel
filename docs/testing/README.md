@@ -11,10 +11,10 @@
   随仓库自动化持续执行；其它状态必须按对应证据的日期和作用域理解。
 
 本矩阵更新于 2026-08-14。既有行仍以各自行内 commit 为实现或证据快照；#41 的
-fixture 生命周期重复验收以 ark-panel `9663899` 为实现快照，#19/#20 浏览器验收以
-`3db3d00` 为隔离 worktree 基线（修复、测试与证据随同一后续 commit 提交）。表中的 commit 是产生
-证据或引入当前自动检查的代码 commit，不是本文档自己的 commit。#41 与 #47 都没有
-运行真实 OpenClaw、Gateway、模型或真实活会话验收。
+fixture 生命周期重复验收以 ark-panel `9663899` 为实现快照，#13、#27 与 #19/#20
+浏览器范围的 canonical commits 分别为 `c880390`、`3db3d00` 与 `1f97c0c`。表中的
+commit 是产生证据或引入当前自动检查的代码 commit，不是本文档自己的 commit。
+#41 与 #47 都没有运行真实 OpenClaw、Gateway、模型或真实活会话验收。
 
 ## Status vocabulary
 
@@ -37,7 +37,7 @@ fixture 生命周期重复验收以 ark-panel `9663899` 为实现快照，#19/#2
 | Core compiled `node:test` suite | `current automated` | deterministic unit/integration fixtures；CI baseline | `npm test` | 2026-08-13 | `cfe53d9` | 不适用 | 构建后的 server、storage、gateway adapter、domain 和静态 frontend 合同；不连接真实 Gateway | [CI](../../.github/workflows/ci.yml) |
 | Stream/CLI/generation/bridge fixture lifecycle | `current automated` | deterministic repeated `node:test` runner；日期化 20×2 pass | `npm run build && node scripts/test-fixture-lifecycle.mjs --runs 20` | 2026-08-13 | `9663899` | 不适用 | 四个精确编译测试；每轮隔离 TMPDIR、root 删除确认与 owned-process 检查；不连接真实 Gateway | [2026-08-13 evidence](fixture-lifecycle-acceptance-2026-08-13.md) |
 | Server-side coverage baseline | `current automated` | Node 22 built-in coverage；独立 CI job | `npm run test:coverage` | 2026-08-12 | `44b8c27` | 不适用 | 动态 core inventory、单 test context 与固定阈值；不含浏览器 JavaScript 动态覆盖 | [coverage contract](../coverage.md) |
-| Firefox desktop/coarse-pointer automation | `current automated` | real Firefox/WebDriver against fictional local fixture；CI baseline | `npm run test:browser` | 2026-08-14 | `3db3d00`（修复/测试同一后续 commit） | 不适用 | Firefox DOM、网络、SSE、桌面与 500px coarse-pointer emulation；含会话状态 geometry、响应式优先级、usage DTO 和账户设置恢复，不等同实机触屏或 live runtime | [current browser automation](browser-acceptance.md) |
+| Firefox desktop/coarse-pointer automation | `current automated` | real Firefox/WebDriver against fictional local fixture；CI baseline | `npm run test:browser` | 2026-08-14 | `1f97c0c` | 不适用 | 当前 Firefox DOM、网络、SSE、桌面与 500px coarse-pointer fixture；含 #13 菜单、#27 synthetic ordered text/tool args、#19/#20 会话状态与设置恢复，不等同实机触屏或 live runtime | [current browser automation](browser-acceptance.md) |
 | External Markdown image consent and network boundary | `current automated` | frontend unit contracts + Firefox loopback request probe | `npm test && npm run test:browser` | 2026-08-13 | `cfe53d9` | 不适用 | 未同意时不加载外部图片；仅显式跨主机链接可脱敏导航；同主机异端口仍拒绝 | [browser evidence](browser-acceptance.md) |
 | Durable run journal, idempotent recovery, and complete transcript commit | `current automated` | filesystem and lifecycle fixtures | `npm test` | 2026-08-13 | `cfe53d9` | 不适用 | 当前 `PanelRunStore`/generation 路径；不证明真实 Gateway 故障后的跨进程追单 | [generation tests](../../test/generation-api.test.ts) |
 | Deployment lifecycle fixture | `current automated` | spawned local panel process with fictional data；独立 CI job | `npm run test:deployment` | 2026-08-13 | `cfe53d9` | 不适用 | health、login、write、SIGTERM、restart；不启动 OpenClaw | [operations runbook](../operations/deployment-and-backup.md) |
@@ -56,7 +56,11 @@ fixture 生命周期重复验收以 ark-panel `9663899` 为实现快照，#19/#2
 | Historical Firefox desktop/mobile fixture | `historical pass` | manual Firefox 152/WebDriver with fictional in-memory fixture | `npm run build`，再运行 fixture 并手工驾驶 WebDriver | 2026-07-11 | `cf67b56` | 不适用 | 当时的登录、导航、会话、SSE 和安全渲染；不含后来 slash command、自动化或外部图片能力 | [2026-07-11 evidence](browser-acceptance-2026-07-11.md) |
 | Initial automated Firefox suite | `historical pass` | real Firefox 153.0.1 + geckodriver 0.37.0，三轮 2/2 | `npm run test:browser` | 2026-08-12 | `3a29ee4` | 不适用 | 当时自动化矩阵；三轮结束无 fixture-owned residual | [browser evidence](browser-acceptance.md) |
 | #43 external-image Firefox repetitions | `partial` | real Firefox 153.0.1 + geckodriver 0.37.0，local network probes | `npm run test:browser` | 2026-08-13 | `cfe53d9` | 不适用 | 三轮功能断言均完成且网络边界符合预期；仅一轮 2/2 clean，另外两轮命中 `DRIVER_QUIT_FAILED` | [browser evidence](browser-acceptance.md) |
-| #19/#20 conversation-status Firefox repetitions | `historical pass` | real Firefox 153.0.1 + geckodriver 0.37.0 against fictional fixture，三轮 2/2 | `npm run test:browser` | 2026-08-14 | `3db3d00`（修复/测试同一后续 commit） | 不适用 | 长 model geometry、1120/761/760 响应式、fresh/unknown/stale usage、`showStatus` 刷新恢复；synthetic compaction 仅 UI characterization，不替代 #21 live | [browser evidence](browser-acceptance.md) |
+| #13 session quick-menu Firefox repetitions | `historical pass` | real Firefox 153.0.1 + geckodriver 0.37.0 against fictional fixture | `npm run test:browser` | 2026-08-13 | `c880390` | 不适用 | viewport placement、唯一打开、外部 pointer、菜单 action 内 Escape/focus、sidebar/history/rerender stale-state；不涉及 live runtime | [browser evidence](browser-acceptance.md) |
+| #27 ordered stream-preview Firefox repetitions | `historical pass` | real Firefox 153.0.1 + geckodriver 0.37.0 against synthetic Gateway events，三轮 2/2 | `npm run test:browser` | 2026-08-14 | `3db3d00` | 不适用 | 只证明 synthetic ordered text/tool args 与终态替换，不证明 live upstream schema；#27 仍 open | [browser evidence](browser-acceptance.md) |
+| #19/#20 conversation-status Firefox repetitions | `historical pass` | real Firefox 153.0.1 + geckodriver 0.37.0 against fictional fixture，三轮 2/2 | `npm run test:browser` | 2026-08-14 | `1f97c0c` | 不适用 | 长 model geometry、1120/761/760 响应式、fresh/unknown/stale usage、`showStatus` 刷新恢复；synthetic compaction 仅 UI characterization，不替代 #21 live | [browser evidence](browser-acceptance.md) |
+| Live upstream stream sequence and tool-result event schema | `unknown` | current synthetic fixture only；no live result | 需按显式授权的 #48 隔离 runtime 验收 | 未执行 | `3db3d00` | 目标 `2026.6.11` | 真实跨事件 sequence 以及 upstream result 字段的 shape/语义均未知 | [browser boundary](browser-acceptance.md#验证边界) |
+| Current panel tool result/stdout live rendering | `unsupported` | not implemented pending an accepted upstream schema | 未提供 | 未执行 | `3db3d00` | 不适用 | 当前 panel 不显示 result/stdout 正文；#27 仍 open，不能记为待验证的现有呈现 | [browser boundary](browser-acceptance.md#验证边界) |
 | Chromium/WebKit rendering and interaction | `unknown` | no dated evidence | 未提供 | 未执行 | `cfe53d9` | 不适用 | 当前没有 Chromium/WebKit 自动化或人工结果 | [browser boundary](browser-acceptance.md#验证边界) |
 | Physical touchscreen, software keyboard, zoom, and safe-area behavior | `unknown` | no device evidence | 未提供 | 未执行 | `cfe53d9` | 不适用 | 500px coarse-pointer emulation 不能替代真实触屏硬件 | [browser boundary](browser-acceptance.md#验证边界) |
 | Production reverse proxy with nginx and real TLS | `unknown` | deployment runbook only | 按部署 runbook 手工验收；本工作项未执行 | 未执行 | `67093c8` | 不适用 | 真实 proxy header、证书终止、SSE 与 Secure cookie | [deployment runbook](../operations/deployment-and-backup.md) |
@@ -81,7 +85,7 @@ Runbooks:
 - [`runtime-acceptance.md`](runtime-acceptance.md) — 当前专用 runtime 兼容性流程，
   **不是结果**。
 - [`browser-acceptance.md`](browser-acceptance.md) — 当前 Firefox 自动化运行说明，
-  同时包含 2026-08-12 与 2026-08-13 的日期化结果。
+  同时包含 2026-08-12、2026-08-13 与 2026-08-14 的日期化结果。
 
 Dated evidence:
 

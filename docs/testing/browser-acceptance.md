@@ -4,19 +4,16 @@
 >
 > - Date: `2026-08-12`（初始自动化）、`2026-08-13`（#13 会话列表菜单、
 >   #43 网络边界复验、#49 composer 状态迁移 characterization、browser run 刷新恢复回归）、
->   `2026-08-14`（#19/#20 会话状态布局、上下文用量与设置持久化）
+>   `2026-08-14`（#27 有序流式预览、#19/#20 会话状态布局、上下文用量与设置持久化）
 > - ark-panel commit: `3a29ee4`（初始自动化）、`cfe53d9`（外部图片边界）、
->   `61cc824`（#49 characterization 的基线）、`2e86ed8`（刷新恢复修复的
->   集成基线；修复、测试与本文件随同一后续 commit 提交）、`f669327`（#13 的
->   隔离 worktree 基线；修复、测试与本文件随同一后续 commit 提交）、
->   `3db3d00`（#19/#20 的隔离 worktree 基线；修复、测试与本文件随同一后续
->   commit 提交）
+>   `2e86ed8`（#49 characterization）、`8e1e197`（刷新恢复修复）、`c880390`（#13）、
+>   `3db3d00`（#27）、`1f97c0c`（#19/#20）
 > - OpenClaw version: 不适用（虚构本地 browser fixture）
 > - Status: runbook `current automated`；2026-08-12 result `historical pass`；
 >   2026-08-13 #43 result `partial`；2026-08-13 #49 result `historical pass`；
 >   browser run 刷新恢复 scope `current automated`；2026-08-13 #13 result
->   `historical pass`，对应 scope `current automated`；2026-08-14 #19/#20 result
->   `historical pass`，对应 scope `current automated`
+>   `historical pass`，对应 scope `current automated`；2026-08-14 #27 与 #19/#20
+>   results `historical pass`，对应 scopes `current automated`
 > - Superseded/current applicability: 本文件仍是 Firefox 自动化 runbook；其中每次
 >   运行结果只适用于自己的日期与 commit。2026-08-13 的 #43 三轮结果因两次
 >   `DRIVER_QUIT_FAILED` 记为 `partial`，详见
@@ -58,7 +55,7 @@ geckodriver 0.37.0，有界执行三轮完整 suite。三轮的桌面与移动�
 CI 结果。
 
 2026-08-13 的 #49 composer 状态迁移 characterization 使用 Node.js 22.22.0、
-Firefox 153.0.1 与 geckodriver 0.37.0，在 `61cc824` 基线上有界执行三轮完整
+Firefox 153.0.1 与 geckodriver 0.37.0，以 canonical commit `2e86ed8` 为证据快照有界执行三轮完整
 suite，三轮均为 2/2 通过，未命中 stock teardown 抖动。桌面场景通过一次性事件
 gate 确认：从 `new:<agent>` 自动创建会话时仅发起一次 session create，draft、
 output intent、待发送附件与 submission scope 迁移到 `session:<record>`；run 被
@@ -95,7 +92,7 @@ idempotency key 补发一次 create。`acknowledged`、running、terminal、不�
 歧义；该窗口仍依赖服务端对同 idempotency key 的持久幂等语义。测试只证明浏览器
 按上述查询顺序恢复，不把客户端状态冒充服务端 durability。
 
-刷新恢复修复集成在 `2e86ed8` 基线上，使用 Node.js 22.22.0、Firefox 153.0.1 与
+刷新恢复修复以 canonical commit `8e1e197` 为证据快照，使用 Node.js 22.22.0、Firefox 153.0.1 与
 geckodriver 0.37.0 有界执行三轮完整 suite，三轮均为 2/2 clean。每轮桌面场景都
 确认：可观察 durable run 刷新后增加 GET 而 create 计数不变，随后 terminal 正常
 替换预览；active-other 只 watch 服务端 run 且不继承旧 payload；仅确认缺失的
@@ -121,7 +118,7 @@ desktop/mobile 场景全部通过；其中两次 desktop 的 WebDriver HTTP `qui
 fixture-owned listener 复核均无 owned residual。主机上另有不属于测试 session 的
 既有 Firefox 实例，本证据不声称系统全局 Firefox 进程计数不变。
 
-2026-08-13 的 #13 会话列表菜单修复在 `f669327` 基线的隔离 worktree 中，使用
+2026-08-13 的 #13 会话列表菜单修复以 canonical commit `c880390` 为证据快照，使用
 Node.js 22.22.0、Firefox 153.0.1 与 geckodriver 0.37.0 有界执行三轮完整 suite；
 两轮为 2/2 clean。两轮的 desktop 与 coarse-pointer mobile 场景都确认列表首端和
 末端菜单保持在 visual viewport 内，同一时刻只有一个菜单打开，外部 pointer 关闭时
@@ -139,18 +136,21 @@ Firefox suite 为 2/2 clean；此前一次完整复验的 desktop 已通过，mo
 watchdog 处丢失 WebDriver session，单独复跑 mobile 通过，故该次不计 clean。新增步骤
 后的 mobile watchdog 调整为 25 秒，场景仍受 50 秒测试硬上限与既有有界 cleanup 约束。
 
-2026-08-14 的 #27 有序流式预览虚构 fixture 把一次运行明确建模为
+2026-08-14 的 #27 有序流式预览以 canonical commit `3db3d00` 为证据快照；虚构
+fixture 把一次运行明确建模为
 `text(sequence 1) → tool(sequence 2，sequence 3 原地完成) → text(sequence 4)`。
 Firefox desktop 场景逐个读取 `.stream-preview .message-body` 的直接子节点并断言精确
-DOM 顺序为第一段文本、同一 tool 卡片、第二段文本；终态仍由完整虚构 transcript 替换
+DOM 顺序为第一段文本、同一 tool 卡片、第二段文本，并显示固定虚构 tool args；终态仍由完整虚构 transcript 替换
 临时预览。完整 browser suite 有界运行三轮，每轮 desktop 与 coarse-mobile 均 2/2 clean
 通过（合计 6/6，无 teardown 失败）。server focused regressions 另覆盖连续文本合并、乱序与重连重放收敛、精确
 重复不增加 revision、相同 sequence 冲突失败关闭、晚订阅前缀，以及 `replace`/非前缀
-快照的单文本降级。该证据只证明 synthetic Gateway 事件到 DOM 的投影，不证明真实
-OpenClaw 的跨事件 sequence、delta/replace 或 tool result 字段；这些仍需 #48 的显式
-隔离 runtime 验收，当前实现不显示 result/stdout 正文。
+快照的单文本降级。该证据只证明 synthetic Gateway 事件中的 ordered text/tool args
+到 DOM 的投影。真实 OpenClaw 的跨事件 sequence、delta/replace，以及 upstream
+result 字段的 shape/语义均为 `unknown`，仍需 #48 的显式隔离 runtime 验收。当前
+panel 对 tool result/stdout 的 live rendering 是 `unsupported`：尚未实现，也不会显示
+其正文，需等待 upstream schema 被接受后再实现；因此 #27 仍 open。
 
-2026-08-14 的 #19/#20 会话状态验收在 `3db3d00` 基线的隔离 worktree 中，使用
+2026-08-14 的 #19/#20 会话状态验收以 canonical commit `1f97c0c` 为证据快照，使用
 Node.js 22.22.0、Firefox 153.0.1 与 geckodriver 0.37.0 有界执行三轮完整 suite，
 每轮 desktop 与 coarse-mobile 均 2/2 clean（合计 6/6，无 teardown 失败）。首轮
 RED 在 1120px 复现 activity 已隐藏但 context 仍越出 status 容器；最小 CSS 修复让
@@ -174,9 +174,9 @@ fixture 还把 synthetic compaction 后的 fresh usage characterization 为 2.1k
 | --- | --- | --- |
 | 桌面 | fine pointer、hover、键盘 | 登录/退出、Origin 与 CSRF 拒绝、会话选择、新建、发送、fork、编辑重发、只读来源、会话级运行锁、停止；会话状态的长 model 单行省略、垂直居中、1120/761 响应式优先级、fresh/unknown/stale 上下文用量和 `showStatus` 刷新恢复；列表行三点菜单首端/下缘/滚动/resize 边界、唯一打开、外部 pointer、菜单 action 内 Escape/焦点、键盘折叠 sidebar 与 rerender stale-state；自动建会话的 composer scope 迁移，accepted/failed/aborted 状态消费与保留边界，附件重试复用；运行中刷新只查询/恢复 durable run，不重复 create，active-other 不继承旧 payload，确认缺失的 provisional 只补建一次，损坏持久值不发请求；外部图片渲染前后零请求，只有跨主机显式链接可脱敏新标签导航，同主机异端口不可导航 |
 | 移动 | 500px 以内、coarse pointer、无 hover | Agent → 会话 → 对话导航、真实点击、44px “本轮需要文件”开关、Enter 换行不发送；会话状态完整隐藏；列表行三点菜单首端/末端 viewport 边界、唯一打开、外部 pointer、菜单 action 内 Escape/焦点、history back/popstate/forward stale-state；会话 header 菜单边界；点击发送 |
-| 两者共享 | 真实 Firefox DOM、网络与 SSE | 安全 Markdown 不执行 HTML/`javascript:`，附件图片只走已认证同源预览，SSE 文本/tool 卡片按 sequence 交错、tool 完成原地更新、终态替换、终态前断线后的查询恢复 |
+| 两者共享 | 真实 Firefox DOM、网络与 SSE | 安全 Markdown 不执行 HTML/`javascript:`，附件图片只走已认证同源预览，synthetic SSE 文本/tool args 按 sequence 交错、tool 卡片原地更新、终态替换、终态前断线后的查询恢复 |
 
-fixture 的会话、消息、路径、附件和工具结果均为固定虚构值；桌面外部图片网络断言使用
+fixture 的会话、消息、路径、附件和工具参数均为固定虚构值；桌面外部图片网络断言使用
 另一条仅监听 loopback 临时端口的计数 server，只保存精确测试路径的请求次数和
 Referer/panel Cookie 是否出现的布尔值，不保存原始请求头。服务端通过监听事件
 报告 readiness，测试不依赖固定端口或 readiness sleep。每个场景都会关闭
@@ -215,5 +215,8 @@ Linux supervisor 每次发送 `SIGTERM`/`SIGKILL` 前都按 PID 与 `/proc` star
 
 自动化覆盖 Firefox 的桌面和 coarse-pointer 移动布局，但不声称等同于真实触屏
 硬件，也不证明 Chromium/WebKit 的渲染一致性。依赖真实软件键盘、缩放、刘海
-安全区或跨浏览器排版的变化仍需相应设备/浏览器验收。实机 OpenClaw 集成继续
-使用独立、显式授权的 runtime acceptance 流程，不能由此 fixture 替代。
+安全区或跨浏览器排版的变化仍需相应设备/浏览器验收。#27 的真实跨事件 sequence 与
+upstream result 字段 shape/语义仍为 `unknown`；当前 panel 的 tool result/stdout live
+rendering 未实现并标为 `unsupported`，#27 仍 open。#19/#20 的 synthetic compaction
+也不替代 #21 live compaction。实机 OpenClaw 集成继续使用独立、显式授权的 runtime
+acceptance 流程，不能由此 fixture 替代。
