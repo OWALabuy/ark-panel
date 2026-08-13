@@ -5,16 +5,18 @@
 > - Date: `2026-08-12`（初始自动化）、`2026-08-13`（#13 会话列表菜单、
 >   #43 网络边界复验、#49 composer 状态迁移 characterization、browser run 刷新恢复回归）、
 >   `2026-08-14`（#27 有序流式预览、#19/#20 会话状态布局、上下文用量与设置持久化、
->   #43 当前网络边界复验）
+>   #43 当前网络边界复验、#50 semantic CSS layers 成功截图）
 > - ark-panel commit: `3a29ee4`（初始自动化）、`cfe53d9`（外部图片边界）、
 >   `2e86ed8`（#49 characterization）、`8e1e197`（刷新恢复修复）、`c880390`（#13）、
->   `3db3d00`（#27）、`1f97c0c`（#19/#20）、`6574548`（#43 当前复验）
+>   `3db3d00`（#27）、`1f97c0c`（#19/#20）、`6574548`（#43 当前复验）、
+>   `ada1548`（#50 成功截图合同）
 > - OpenClaw version: 不适用（虚构本地 browser fixture）
 > - Status: runbook `current automated`；2026-08-12 result `historical pass`；
 >   2026-08-13 #43 result `partial`；2026-08-13 #49 result `historical pass`；
 >   browser run 刷新恢复 scope `current automated`；2026-08-13 #13 result
 >   `historical pass`，对应 scope `current automated`；2026-08-14 #27 与 #19/#20
 >   results `historical pass`，对应 scopes `current automated`；2026-08-14 #43 result
+>   `historical pass`，对应 scope `current automated`；2026-08-14 #50 result
 >   `historical pass`，对应 scope `current automated`
 > - Superseded/current applicability: 本文件仍是 Firefox 自动化 runbook；其中每次
 >   运行结果只适用于自己的日期与 commit。2026-08-13 的 #43 三轮结果因两次
@@ -176,12 +178,27 @@ fixture 还把 synthetic compaction 后的 fresh usage characterization 为 2.1k
 这一步没有启动或接触真实 OpenClaw、Gateway、模型或活会话，只证明给定 fixture DTO
 的 UI 投影，不能替代或关闭 #21 所要求的 live runtime compaction 验收。
 
+2026-08-14 的 #50 semantic CSS layer 验收以 canonical commit `ada1548` 为证据
+快照。完整 Firefox suite 在 canonical main 上为 desktop/coarse-mobile 2/2 clean；
+等价 topic diff 另得到三轮 2/2 clean。每个场景都在成功状态等待字体 ready 与两次
+animation frame 后截取内存 PNG，校验 light/default appearance、错误区隐藏、应用可见、
+实际 viewport 与 PNG 尺寸精确一致，并用颜色数与 Shannon entropy 拒绝空白或单色结果。
+desktop 实际内容 viewport 为 1440×约 814，mobile 为 Firefox coarse 模式下约
+500×758；合同允许受浏览器 chrome 影响的有界高度，而不把 outer-window 尺寸误当
+content viewport。
+
+topic 有界执行中的另一轮在 desktop/mobile 功能与截图断言完成后命中一次
+`OWNED_PROCESS_PROBE_FAILED`，因此不计 clean；该轮结束后无 fixture-owned listener、
+geckodriver、launcher、profile 或截图残留。成功截图始终只在内存中解析，不写入仓库、
+临时目录或 CI artifact；本证据证明 Firefox 能加载拆分后的样式并渲染非空成功页面，
+不等同人工审美签字、像素基准或 Chromium/WebKit 兼容性证明。
+
 ## 自动化矩阵
 
 | 视口 | 输入能力 | 覆盖 |
 | --- | --- | --- |
-| 桌面 | fine pointer、hover、键盘 | 登录/退出、Origin 与 CSRF 拒绝、会话选择、新建、发送、fork、编辑重发、只读来源、会话级运行锁、停止；会话状态的长 model 单行省略、垂直居中、1120/761 响应式优先级、fresh/unknown/stale 上下文用量和 `showStatus` 刷新恢复；列表行三点菜单首端/下缘/滚动/resize 边界、唯一打开、外部 pointer、菜单 action 内 Escape/焦点、键盘折叠 sidebar 与 rerender stale-state；自动建会话的 composer scope 迁移，accepted/failed/aborted 状态消费与保留边界，附件重试复用；运行中刷新只查询/恢复 durable run，不重复 create，active-other 不继承旧 payload，确认缺失的 provisional 只补建一次，损坏持久值不发请求；外部图片渲染前后零请求，只有跨主机显式链接可脱敏新标签导航，同主机异端口不可导航 |
-| 移动 | 500px 以内、coarse pointer、无 hover | Agent → 会话 → 对话导航、真实点击、44px “本轮需要文件”开关、Enter 换行不发送；会话状态完整隐藏；列表行三点菜单首端/末端 viewport 边界、唯一打开、外部 pointer、菜单 action 内 Escape/焦点、history back/popstate/forward stale-state；会话 header 菜单边界；点击发送 |
+| 桌面 | fine pointer、hover、键盘 | 登录/退出、Origin 与 CSRF 拒绝、会话选择、新建、发送、fork、编辑重发、只读来源、会话级运行锁、停止；会话状态的长 model 单行省略、垂直居中、1120/761 响应式优先级、fresh/unknown/stale 上下文用量和 `showStatus` 刷新恢复；列表行三点菜单首端/下缘/滚动/resize 边界、唯一打开、外部 pointer、菜单 action 内 Escape/焦点、键盘折叠 sidebar 与 rerender stale-state；自动建会话的 composer scope 迁移，accepted/failed/aborted 状态消费与保留边界，附件重试复用；运行中刷新只查询/恢复 durable run，不重复 create，active-other 不继承旧 payload，确认缺失的 provisional 只补建一次，损坏持久值不发请求；外部图片渲染前后零请求，只有跨主机显式链接可脱敏新标签导航，同主机异端口不可导航；1440px content viewport 成功状态的内存 PNG 尺寸与非空渲染检查 |
+| 移动 | 500px 以内、coarse pointer、无 hover | Agent → 会话 → 对话导航、真实点击、44px “本轮需要文件”开关、Enter 换行不发送；会话状态完整隐藏；列表行三点菜单首端/末端 viewport 边界、唯一打开、外部 pointer、菜单 action 内 Escape/焦点、history back/popstate/forward stale-state；会话 header 菜单边界；点击发送；coarse viewport 成功状态的内存 PNG 尺寸与非空渲染检查 |
 | 两者共享 | 真实 Firefox DOM、网络与 SSE | 安全 Markdown 不执行 HTML/`javascript:`，附件图片只走已认证同源预览，synthetic SSE 文本/tool args 按 sequence 交错、tool 卡片原地更新、终态替换、终态前断线后的查询恢复 |
 
 fixture 的会话、消息、路径、附件和工具参数均为固定虚构值；桌面外部图片网络断言使用
