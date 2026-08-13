@@ -4,6 +4,7 @@ import { chmod, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { GatewayControlError, loadGatewayStreamAuth, normalizeGatewayStreamEvent, OpenClawStreamObserver,
   resolveGatewayControlTransport, type GatewayControlMethod, type GatewayStreamEvent } from "../src/gateway/stream-client.js";
+import { createToolSchemaCollector } from "../src/gateway/stream-schema-observation.js";
 import { deferred, tempFixture, withTimeout } from "./test-helpers.js";
 
 test("stream parser accepts full text snapshots and tool lifecycle while rejecting malformed or oversized payloads", () => {
@@ -530,6 +531,65 @@ test("observer ignores business events until the exact hello and subscriptions c
     seq: 1, state: "delta", message: { content: "accepted" }, deltaText: "accepted" } });
   assert.equal(events.some(event => event.type === "assistant_text" && event.text === "accepted"), true);
   assert.equal(events.some(event => event.type === "assistant_text" && event.text === "must-not-deliver"), false);
+  unobserve(); observer.stop();
+});
+
+test("authenticated observer exposes only scoped tool-result shape while ordinary listeners stay normalized", async t => {
+  const sockets: FakeSocket[] = [], events: GatewayStreamEvent[] = [];
+  const collector = createToolSchemaCollector("agent:a:schema", "schema-run");
+  const observer = new OpenClawStreamObserver({ url: "ws://fixture.local", token: "fixture", requestTimeoutMs: 300,
+    toolSchemaCollector: collector, webSocketFactory: () => {
+      const socket = new FakeSocket((current, frame) => queueMicrotask(() => current.message({ type: "res", id: frame.id, ok: true,
+        payload: frame.method === "connect" ? { type: "hello-ok", server: { version: "2026.6.11" },
+          auth: { role: "operator", scopes: ["operator.read", "operator.write", "operator.admin"] } } : { subscribed: true } })));
+      sockets.push(socket); return socket;
+    } });
+  t.after(() => observer.stop());
+  const observing = observer.observe("agent:a:schema", event => events.push(event));
+  const privateResult = { content: [{ text: "must never reach listener or report" }], details: { stdout: "private stdout" } };
+  sockets[0]!.message({ type: "event", event: "agent", payload: { runId: "schema-run", sessionKey: "agent:a:schema", seq: 1,
+    stream: "tool", data: { phase: "result", toolCallId: "private-call", name: "exec", result: privateResult } } });
+  assert.equal(collector.report().eventCount, 0, "pre-hello frames must not enter schema observation");
+  sockets[0]!.challenge(); const unobserve = await withTimeout(observing, "schema observer subscription");
+  sockets[0]!.message({ type: "event", event: "agent", payload: { runId: "wrong-run", sessionKey: "agent:a:schema", seq: 1,
+    stream: "tool", data: { phase: "start", toolCallId: "wrong", name: "exec" } } });
+  sockets[0]!.message({ type: "event", event: "session.tool", payload: { runId: "schema-run", sessionKey: "agent:a:schema", seq: 2,
+    stream: "tool", data: { phase: "start", toolCallId: "private-call", name: "exec", args: { command: "private command" } } } });
+  sockets[0]!.message({ type: "event", event: "agent", payload: { runId: "schema-run", sessionKey: "agent:a:schema", seq: 3,
+    stream: "tool", data: { phase: "update", toolCallId: "private-call", partialResult: { text: "private partial" } } } });
+  sockets[0]!.message({ type: "event", event: "agent", payload: { runId: "schema-run", sessionKey: "agent:a:schema", seq: 4,
+    stream: "tool", data: { phase: "result", toolCallId: "private-call", name: "exec", result: privateResult, isError: false } } });
+  assert.deepEqual(events.filter(event => event.type === "tool" && event.runId === "schema-run")
+    .map(event => event.type === "tool" && event.phase), ["started", "completed"]);
+  const report = collector.report(); assert.equal(report.eventCount, 3); assert.equal(report.lifecycle.attributedTerminals, 1);
+  const reportJson = JSON.stringify(report);
+  for (const secret of ["private-call", "private command", "private partial", "private stdout", "must never reach listener or report"])
+    assert.equal(reportJson.includes(secret), false, `schema report leaked ${secret}`);
+  const normalizedJson = JSON.stringify(events.filter(event => event.type !== "tool" || event.runId === "schema-run"));
+  assert.equal(normalizedJson.includes("private-call"), true, "ordinary normalized events preserve call identity");
+  assert.equal(normalizedJson.includes("private command"), true, "ordinary normalized start events preserve bounded args");
+  for (const secret of ["private partial", "private stdout", "must never reach listener or report"])
+    assert.equal(normalizedJson.includes(secret), false, `ordinary listener leaked raw result value ${secret}`);
+  unobserve(); observer.stop();
+});
+
+test("a closed schema collector cannot block ordinary authenticated events or leak its failure", async t => {
+  const sockets: FakeSocket[] = [], events: GatewayStreamEvent[] = [], diagnostics: string[] = [];
+  const collector = createToolSchemaCollector("agent:a:closed-schema", "schema-run"); collector.finish();
+  const observer = new OpenClawStreamObserver({ url: "ws://fixture.local", token: "fixture", requestTimeoutMs: 300,
+    toolSchemaCollector: collector, onDiagnostic: value => diagnostics.push(value), webSocketFactory: () => {
+      const socket = new FakeSocket((current, frame) => queueMicrotask(() => current.message({ type: "res", id: frame.id, ok: true,
+        payload: frame.method === "connect" ? { type: "hello-ok", server: { version: "2026.6.11" },
+          auth: { role: "operator", scopes: ["operator.read", "operator.write", "operator.admin"] } } : { subscribed: true } })));
+      sockets.push(socket); queueMicrotask(() => socket.challenge()); return socket;
+    } });
+  t.after(() => observer.stop());
+  const unobserve = await observer.observe("agent:a:closed-schema", event => events.push(event));
+  sockets[0]!.message({ type: "event", event: "session.tool", payload: { runId: "schema-run", sessionKey: "agent:a:closed-schema", seq: 1,
+    stream: "tool", data: { phase: "start", toolCallId: "private-call", name: "exec", args: { value: "private-value" } } } });
+  assert.equal(events.some(event => event.type === "tool" && event.phase === "started"), true);
+  assert.equal(diagnostics.includes("tool schema observation failed"), true);
+  assert.equal(JSON.stringify(diagnostics).includes("private"), false);
   unobserve(); observer.stop();
 });
 

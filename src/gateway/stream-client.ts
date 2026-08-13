@@ -4,6 +4,7 @@ import { BlockList, isIP } from "node:net";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { SUPPORTED_OPENCLAW_VERSION, type GatewayAttachment } from "./adapter.js";
+import { observeToolSchemaFrame, type ToolSchemaCollector } from "./stream-schema-observation.js";
 
 const MAX_TEXT_BYTES = 2 * 1024 * 1024;
 const MAX_FRAME_BYTES = 4 * 1024 * 1024;
@@ -107,6 +108,7 @@ interface ObserverOptions {
   reconnectMaxMs?: number;
   webSocketFactory?: (url: string) => WebSocketLike;
   onDiagnostic?: (message: string) => void;
+  toolSchemaCollector?: ToolSchemaCollector;
 }
 
 interface PendingRequest {
@@ -322,6 +324,8 @@ export class OpenClawStreamObserver implements GatewayControlTransport {
       if (eventName === "connect.challenge") { const nonce = nonEmpty(object(frame.payload)?.nonce); if (nonce) this.handleChallenge(source, generation, nonce); return; }
       if (!eventName) return;
       if (!this.isCurrentConnection(source, generation)) return;
+      if (this.options.toolSchemaCollector) try { observeToolSchemaFrame(this.options.toolSchemaCollector, eventName, frame.payload); }
+      catch { this.diagnostic("tool schema observation failed"); }
       const normalized = normalizeGatewayStreamEvent(eventName, frame.payload); if (!normalized) return;
       for (const listener of this.listeners.get(normalized.sessionKey) ?? []) listener(normalized);
       return;
