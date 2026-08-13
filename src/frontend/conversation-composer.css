@@ -69,7 +69,8 @@
 .conversation-status-item{flex:none;min-width:0;max-width:100%;white-space:nowrap}
 .conversation-status-item+.conversation-status-item::before{content:"·";margin-right:8px;color:var(--line)}
 .conversation-status-model{flex:0 1 auto;max-width:220px;overflow:hidden;text-overflow:ellipsis}
-.conversation-status-context{flex:none}
+.conversation-status-setting{flex:0 1 auto;overflow:hidden;text-overflow:ellipsis}
+.conversation-status-context{flex:0 1 auto;overflow:hidden;text-overflow:ellipsis}
 .conversation-status-activity{flex:0 1 auto;overflow:hidden;text-overflow:ellipsis}
 .conversation-status-item.context-warning{color:var(--palette-yellow)}
 .conversation-status-item.context-danger{color:var(--danger)}

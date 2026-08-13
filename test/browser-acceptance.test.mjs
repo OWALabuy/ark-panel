@@ -182,6 +182,35 @@ async function activeRecordId(driver) {
   return driver.executeScript("return document.querySelector('.session-row.active')?.dataset.recordId || ''");
 }
 
+async function setViewportWidth(driver, width, height = 844) {
+  await driver.manage().window().setRect({ width, height, x: 0, y: 0 });
+  await driver.wait(async () => await driver.executeScript("return innerWidth===arguments[0]", width), WAIT_MS,
+    `Timed out waiting for viewport width ${width}`);
+}
+
+async function conversationStatusLayout(driver) {
+  return driver.executeScript(`
+    const box=node=>{const rect=node.getBoundingClientRect();return{left:rect.left,right:rect.right,top:rect.top,bottom:rect.bottom,
+      width:rect.width,height:rect.height,centerY:rect.top+rect.height/2}};
+    const metadata=document.querySelector('.conversation-meta'),subtitle=document.querySelector('#subtitle'),
+      status=document.querySelector('#conversation-status'),model=status.querySelector('.conversation-status-model'),
+      context=status.querySelector('.conversation-status-context'),activity=status.querySelector('.conversation-status-activity');
+    const statusStyle=getComputedStyle(status),modelStyle=getComputedStyle(model),contextStyle=getComputedStyle(context);
+    return{metadata:box(metadata),subtitle:box(subtitle),status:{...box(status),display:statusStyle.display,whiteSpace:statusStyle.whiteSpace},
+      model:{...box(model),overflowX:modelStyle.overflowX,textOverflow:modelStyle.textOverflow,whiteSpace:modelStyle.whiteSpace,
+        clientWidth:model.clientWidth,scrollWidth:model.scrollWidth},context:{...box(context),display:contextStyle.display,
+        overflowX:contextStyle.overflowX,textOverflow:contextStyle.textOverflow,clientWidth:context.clientWidth,scrollWidth:context.scrollWidth,
+        text:context.textContent,title:context.title},
+      activity:{display:getComputedStyle(activity).display,text:activity.textContent}};
+  `);
+}
+
+async function reloadAuthenticated(driver) {
+  await driver.navigate().refresh();
+  await visible(driver, "#app");
+  await waitScript(driver, "return Boolean(document.querySelector('.session-row[data-record-id=\"fixture-1\"]'))");
+}
+
 async function hoverMessage(driver, selector) {
   const message = await visible(driver, selector);
   await driver.executeScript("arguments[0].scrollIntoView({ block: 'center', inline: 'nearest' })", message);
@@ -464,6 +493,82 @@ test("desktop browser acceptance covers security and session lifecycle", {
     await waitText(driver, "#title", "脱敏浏览器验收");
     await waitText(driver, "#conversation-status", "12k");
     await waitText(driver, "#conversation-status", "200k");
+    fixture.setConversationStatus("fixture-1", {
+      modelOverride: "provider/fictional-model-with-an-intentionally-long-name-for-ellipsis-verification"
+    });
+    await openSession(driver, "fixture-1");
+    let layout = await conversationStatusLayout(driver);
+    assert.equal(layout.status.whiteSpace, "nowrap");
+    assert.equal(layout.model.whiteSpace, "nowrap");
+    assert.equal(layout.model.overflowX, "hidden");
+    assert.equal(layout.model.textOverflow, "ellipsis");
+    assert.ok(layout.model.scrollWidth > layout.model.clientWidth, JSON.stringify(layout.model));
+    assert.ok(Math.abs(layout.subtitle.centerY - layout.status.centerY) <= 0.5, JSON.stringify(layout));
+    assert.ok(layout.context.left >= layout.status.left && layout.context.right <= layout.status.right + 0.5, JSON.stringify(layout));
+
+    await setViewportWidth(driver, 1121);
+    layout = await conversationStatusLayout(driver);
+    assert.notEqual(layout.activity.display, "none");
+    await setViewportWidth(driver, 1120);
+    layout = await conversationStatusLayout(driver);
+    assert.equal(layout.activity.display, "none");
+    assert.notEqual(layout.context.display, "none");
+    assert.ok(layout.context.width > 0, JSON.stringify(layout.context));
+    assert.match(layout.context.title, /12,345 \/ 200,000 tokens/);
+    assert.ok(layout.context.left >= layout.status.left && layout.context.right <= layout.status.right + 0.5, JSON.stringify(layout));
+    await setViewportWidth(driver, 761);
+    layout = await conversationStatusLayout(driver);
+    assert.equal(layout.activity.display, "none");
+    assert.notEqual(layout.context.display, "none");
+    assert.ok(layout.context.width > 0, JSON.stringify(layout.context));
+    assert.equal(layout.context.textOverflow, "ellipsis");
+    assert.match(layout.context.title, /12,345 \/ 200,000 tokens/);
+    assert.ok(layout.context.left >= layout.status.left && layout.context.right <= layout.status.right + 0.5, JSON.stringify(layout));
+    await setViewportWidth(driver, 760);
+    assert.equal((await conversationStatusLayout(driver)).status.display, "none");
+    await setViewportWidth(driver, 1440, 900);
+
+    fixture.setConversationStatus("fixture-1", { contextUsage: {
+      source: "openclaw-session", totalTokens: 9500, contextTokens: 128000, totalTokensFresh: true, percentage: 7
+    } });
+    await openSession(driver, "fixture-1");
+    await waitText(driver, "#conversation-status", "9.5k");
+    await waitText(driver, "#conversation-status", "128k");
+    fixture.setConversationStatus("fixture-1", { contextUsage: null });
+    await openSession(driver, "fixture-1");
+    await waitText(driver, "#conversation-status", "上下文未知");
+    fixture.setConversationStatus("fixture-1", { contextUsage: {
+      source: "openclaw-session", totalTokens: 6400, contextTokens: 64000, totalTokensFresh: false, percentage: 10
+    } });
+    await openSession(driver, "fixture-1");
+    await waitText(driver, "#conversation-status", "上下文未知 / 64k");
+    fixture.characterizeCompactionUsage("fixture-1", {
+      source: "openclaw-session", totalTokens: 2100, contextTokens: 128000, totalTokensFresh: true, percentage: 2
+    });
+    await openSession(driver, "fixture-1");
+    await waitText(driver, "#conversation-status", "2.1k");
+    await waitText(driver, "#conversation-status", "128k");
+
+    await (await visible(driver, "#open-settings")).click();
+    const showStatus = await visible(driver, "#show-conversation-status");
+    assert.equal(await showStatus.isSelected(), true);
+    await showStatus.click();
+    await waitText(driver, "#conversation-setting-status", "已保存");
+    assert.equal(await driver.executeScript("return document.querySelector('#conversation-status').hidden"), true);
+    await (await visible(driver, "#close-settings")).click();
+    await reloadAuthenticated(driver);
+    await openSession(driver, "fixture-1");
+    assert.equal(await driver.executeScript("return document.querySelector('#conversation-status').hidden"), true);
+    await (await visible(driver, "#open-settings")).click();
+    const restoredStatus = await visible(driver, "#show-conversation-status");
+    assert.equal(await restoredStatus.isSelected(), false);
+    await restoredStatus.click();
+    await waitText(driver, "#conversation-setting-status", "已保存");
+    assert.equal(await driver.executeScript("return document.querySelector('#conversation-status').hidden"), false);
+    await (await visible(driver, "#close-settings")).click();
+    await reloadAuthenticated(driver);
+    await openSession(driver, "fixture-1");
+    assert.equal(await driver.executeScript("return document.querySelector('#conversation-status').hidden"), false);
     assert.equal(await driver.executeScript("return globalThis.__fixtureXss"), null);
     assert.equal(await driver.executeScript("return document.querySelectorAll('#messages script').length"), 0);
     assert.equal(await driver.executeScript("return [...document.querySelectorAll('#messages a')].some(link => link.href.startsWith('javascript:'))"), false);
@@ -959,6 +1064,9 @@ test("coarse mobile browser acceptance uses touch-safe controls", {
     assert.equal(await driver.executeScript("return document.querySelectorAll('#sessions .session-quick-menu[open]').length"), 0);
     await openSession(driver, "fixture-1");
     await waitScript(driver, "return document.querySelector('#app').classList.contains('show-conversation')");
+    assert.deepEqual(await driver.executeScript(`
+      const status=document.querySelector('#conversation-status');return{hidden:status.hidden,display:getComputedStyle(status).display}
+    `), { hidden: false, display: "none" });
 
     const outputToggle = await visible(driver, "#request-outputs");
     const toggleRect = await outputToggle.getRect();

@@ -374,7 +374,9 @@ test("conversation status is server-controlled and uses fresh OpenClaw context u
   assert.match(styles,/\.conversation-status\{display:flex;flex:1;min-width:0;align-items:center;overflow:hidden;gap:0 8px;white-space:nowrap\}/);
   assert.match(styles,/@media\(max-width:760px\)\{[\s\S]*\.conversation>header \.conversation-meta #subtitle\{max-width:100%\}[\s\S]*\.conversation-status\{display:none!important\}/);
   assert.match(styles,/\.conversation-status-model\{flex:0 1 auto;max-width:220px;overflow:hidden;text-overflow:ellipsis\}/);
-  assert.match(styles,/\.conversation-status-context\{flex:none\}/);
+  assert.match(styles,/\.conversation-status-setting\{flex:0 1 auto;overflow:hidden;text-overflow:ellipsis\}/);
+  assert.match(styles,/\.conversation-status-context\{flex:0 1 auto;overflow:hidden;text-overflow:ellipsis\}/);
+  assert.match(styles,/@media\(max-width:980px\)\{[\s\S]*\.conversation-status-model,\.conversation-status-setting\{display:none\}/);
   assert.match(styles,/@media\(max-width:1120px\) and \(min-width:761px\)\{\.conversation-status-activity\{display:none\}\}/);
   assert.match(styles,/\.conversation-status-item\.context-warning/);
   assert.match(styles,/\.conversation-status-item\.context-danger/);

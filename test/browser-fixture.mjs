@@ -136,6 +136,25 @@ export async function startBrowserFixture({ port = 0 } = {}) {
   const state = createFixtureState(externalImages);
   const gates = { createPanel: oneShotGate(), generationCreate: oneShotGate() };
   const stamp = () => new Date(FIXED_NOW + state.nextTick++ * 1000).toISOString();
+  const setConversationStatus = (recordId, patch) => {
+    const value = state.conversations.get(recordId);
+    if (!value) throw new Error("PANEL_SESSION_NOT_FOUND");
+    value.status = { ...value.status, ...structuredClone(patch) };
+    return snapshotConversation(value);
+  };
+  const characterizeCompactionUsage = (recordId, contextUsage) => {
+    const value = state.conversations.get(recordId);
+    if (!value) throw new Error("PANEL_SESSION_NOT_FOUND");
+    const parentId = value.document.entries.at(-1)?.id;
+    if (typeof parentId !== "string") throw new Error("FIXTURE_COMPACTION_PARENT_MISSING");
+    const id = `fixture-compaction-${state.nextEntry++}`;
+    value.document.entries.push({ type: "compaction", id, parentId, timestamp: stamp(), summary: "虚构压缩摘要",
+      firstKeptEntryId: parentId, tokensBefore: Number(value.status.contextUsage?.totalTokens) || 0 });
+    value.messageCount = value.document.entries.length;
+    value.revision = String(Number(value.revision) + 1);
+    value.updatedAt = stamp();
+    return setConversationStatus(recordId, { contextUsage });
+  };
   const sessionRef = value => ({ recordId: value.recordId, agentId: value.agentId, sourceKind: "panel", revision: value.revision });
   const createPanel = (agentId, title) => {
     if (agentId !== "fixture") throw new Error("AGENT_NOT_ALLOWED");
@@ -394,6 +413,8 @@ export async function startBrowserFixture({ port = 0 } = {}) {
     advanceRun,
     completeRun,
     failRun,
+    setConversationStatus,
+    characterizeCompactionUsage,
     gates,
     makeUploadFile(name, content = "fictional browser attachment\n") {
       if (!uploadRoot) uploadRoot = mkdtempSync(join(FIXTURE_ROOT, ".browser-fixture-"));

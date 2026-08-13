@@ -3,15 +3,19 @@
 > **当前自动化与日期化证据元数据**
 >
 > - Date: `2026-08-12`（初始自动化）、`2026-08-13`（#13 会话列表菜单、
->   #43 网络边界复验、#49 composer 状态迁移 characterization、browser run 刷新恢复回归）
+>   #43 网络边界复验、#49 composer 状态迁移 characterization、browser run 刷新恢复回归）、
+>   `2026-08-14`（#19/#20 会话状态布局、上下文用量与设置持久化）
 > - ark-panel commit: `3a29ee4`（初始自动化）、`cfe53d9`（外部图片边界）、
 >   `61cc824`（#49 characterization 的基线）、`2e86ed8`（刷新恢复修复的
 >   集成基线；修复、测试与本文件随同一后续 commit 提交）、`f669327`（#13 的
->   隔离 worktree 基线；修复、测试与本文件随同一后续 commit 提交）
+>   隔离 worktree 基线；修复、测试与本文件随同一后续 commit 提交）、
+>   `3db3d00`（#19/#20 的隔离 worktree 基线；修复、测试与本文件随同一后续
+>   commit 提交）
 > - OpenClaw version: 不适用（虚构本地 browser fixture）
 > - Status: runbook `current automated`；2026-08-12 result `historical pass`；
 >   2026-08-13 #43 result `partial`；2026-08-13 #49 result `historical pass`；
 >   browser run 刷新恢复 scope `current automated`；2026-08-13 #13 result
+>   `historical pass`，对应 scope `current automated`；2026-08-14 #19/#20 result
 >   `historical pass`，对应 scope `current automated`
 > - Superseded/current applicability: 本文件仍是 Firefox 自动化 runbook；其中每次
 >   运行结果只适用于自己的日期与 commit。2026-08-13 的 #43 三轮结果因两次
@@ -146,12 +150,30 @@ DOM 顺序为第一段文本、同一 tool 卡片、第二段文本；终态仍�
 OpenClaw 的跨事件 sequence、delta/replace 或 tool result 字段；这些仍需 #48 的显式
 隔离 runtime 验收，当前实现不显示 result/stdout 正文。
 
+2026-08-14 的 #19/#20 会话状态验收在 `3db3d00` 基线的隔离 worktree 中，使用
+Node.js 22.22.0、Firefox 153.0.1 与 geckodriver 0.37.0 有界执行三轮完整 suite，
+每轮 desktop 与 coarse-mobile 均 2/2 clean（合计 6/6，无 teardown 失败）。首轮
+RED 在 1120px 复现 activity 已隐藏但 context 仍越出 status 容器；最小 CSS 修复让
+可收缩字段正确收缩，并在窄桌面优先隐藏 model 与 setting，没有改变字号、字段顺序、
+1120/760 breakpoints、移动端隐藏或完整 `title`。
+
+修复后的真实 Firefox 断言覆盖：长 model 单行、省略号和 subtitle/status 垂直中心；
+1121px activity 可见，1120px activity 先隐藏且 context 完整保留，761px context 仍有
+可见几何、以省略号收缩并通过 `title` 保留完整值，760px 与 coarse-mobile 隐藏完整
+status。上下文数据覆盖初始 12k/200k、不同窗口 9.5k/128k、缺失 usage 的“未知”和
+stale usage 的“未知 / 64k”。账户级 `showStatus` false/true 都经保存、刷新和会话重开
+确认恢复。
+
+fixture 还把 synthetic compaction 后的 fresh usage characterization 为 2.1k/128k；
+这一步没有启动或接触真实 OpenClaw、Gateway、模型或活会话，只证明给定 fixture DTO
+的 UI 投影，不能替代或关闭 #21 所要求的 live runtime compaction 验收。
+
 ## 自动化矩阵
 
 | 视口 | 输入能力 | 覆盖 |
 | --- | --- | --- |
-| 桌面 | fine pointer、hover、键盘 | 登录/退出、Origin 与 CSRF 拒绝、会话选择、新建、发送、fork、编辑重发、只读来源、会话级运行锁、停止、上下文 `k` 展示；列表行三点菜单首端/下缘/滚动/resize 边界、唯一打开、外部 pointer、菜单 action 内 Escape/焦点、键盘折叠 sidebar 与 rerender stale-state；自动建会话的 composer scope 迁移，accepted/failed/aborted 状态消费与保留边界，附件重试复用；运行中刷新只查询/恢复 durable run，不重复 create，active-other 不继承旧 payload，确认缺失的 provisional 只补建一次，损坏持久值不发请求；外部图片渲染前后零请求，只有跨主机显式链接可脱敏新标签导航，同主机异端口不可导航 |
-| 移动 | 500px 以内、coarse pointer、无 hover | Agent → 会话 → 对话导航、真实点击、44px “本轮需要文件”开关、Enter 换行不发送；列表行三点菜单首端/末端 viewport 边界、唯一打开、外部 pointer、菜单 action 内 Escape/焦点、history back/popstate/forward stale-state；会话 header 菜单边界；点击发送 |
+| 桌面 | fine pointer、hover、键盘 | 登录/退出、Origin 与 CSRF 拒绝、会话选择、新建、发送、fork、编辑重发、只读来源、会话级运行锁、停止；会话状态的长 model 单行省略、垂直居中、1120/761 响应式优先级、fresh/unknown/stale 上下文用量和 `showStatus` 刷新恢复；列表行三点菜单首端/下缘/滚动/resize 边界、唯一打开、外部 pointer、菜单 action 内 Escape/焦点、键盘折叠 sidebar 与 rerender stale-state；自动建会话的 composer scope 迁移，accepted/failed/aborted 状态消费与保留边界，附件重试复用；运行中刷新只查询/恢复 durable run，不重复 create，active-other 不继承旧 payload，确认缺失的 provisional 只补建一次，损坏持久值不发请求；外部图片渲染前后零请求，只有跨主机显式链接可脱敏新标签导航，同主机异端口不可导航 |
+| 移动 | 500px 以内、coarse pointer、无 hover | Agent → 会话 → 对话导航、真实点击、44px “本轮需要文件”开关、Enter 换行不发送；会话状态完整隐藏；列表行三点菜单首端/末端 viewport 边界、唯一打开、外部 pointer、菜单 action 内 Escape/焦点、history back/popstate/forward stale-state；会话 header 菜单边界；点击发送 |
 | 两者共享 | 真实 Firefox DOM、网络与 SSE | 安全 Markdown 不执行 HTML/`javascript:`，附件图片只走已认证同源预览，SSE 文本/tool 卡片按 sequence 交错、tool 完成原地更新、终态替换、终态前断线后的查询恢复 |
 
 fixture 的会话、消息、路径、附件和工具结果均为固定虚构值；桌面外部图片网络断言使用
