@@ -5,7 +5,8 @@ import {applyStaticTranslations,formatDate,formatNumber,getLocale,normalizeLocal
 import {createScopedActivity} from "./scoped-activity.js";
 import {createRunRegistry} from "./run-registry.js";
 import {createRunObserver} from "./run-observer.js";
-import {acknowledgedStorageAction,inspectStoredRuns,recoverPersistedRun,uncertainCreateError} from "./run-recovery-policy.js";
+import {createRunCreationReconciler} from "./run-creation-reconciler.js";
+import {acknowledgedStorageAction,inspectStoredRuns,uncertainCreateError} from "./run-recovery-policy.js";
 import {consumeRunEventStream} from "./run-event-stream.js";
 
 // Mirrors the normalized response DTOs constructed by src/server/app.ts. Keep
@@ -106,7 +107,6 @@ let memoryCandidateDialogRecordId="";
 const composerState=createComposerState({storage:localStorage,createObjectURL:file=>URL.createObjectURL(file),revokeObjectURL:url=>URL.revokeObjectURL(url)});
 const UNREAD_KEY="ark-panel:unread-runs:v1";
 const runRegistry=createRunRegistry({storage:localStorage});
-/** @type {Map<string,Promise<void>>} */ const creationReconcilers=new Map();
 const compactions=createScopedActivity(),memoryCandidateGenerations=createScopedActivity();
 const sourceName=source=>t({active:"session.active",reset:"session.resetArchive",panel:"session.panel"}[source]||"nav.sessions");
 /** @type {Array<{name:string, usage?:string, usageKey?:string, description?:string, descriptionKey?:string, supported:boolean}>} */
@@ -374,8 +374,24 @@ $("#export-session").onclick=exportActiveSession;
 function runEventStreamError(input){return new Error(input.message||t(input.kind==="streamExpected"?"error.streamExpected":input.kind==="streamEnded"?"error.streamEnded":"error.requestFailed"))}
 function delay(ms){return new Promise(resolve=>setTimeout(resolve,ms))}
 function clearAcceptedOutputIntent(run){composerState.acceptOutputIntent(composerScope(run.recordId,run.agentId||activeAgent),run.submittedRequestOutputs===true)}
+const runCreationReconciler=createRunCreationReconciler({
+  current:recordId=>runRegistry.get(recordId),
+  merge:(current,run)=>normalizeRun(/** @type {RunInputDto} */(current),/** @type {ClientRunDto} */(run)),
+  getRun:runId=>api(`/runs/${encodeURIComponent(runId)}`),
+  getActive:recordId=>api(`/sessions/${encodeURIComponent(recordId)}/runs/active`),
+  create:run=>api(`/sessions/${encodeURIComponent(String(run.recordId))}/runs`,{method:"POST",headers:{"idempotency-key":String(run.runId)},body:JSON.stringify({message:run.submittedDraft,revision:run.submittedRevision||undefined,attachmentIds:run.submittedAttachmentIds,requestOutputs:run.submittedRequestOutputs})}),
+  rememberAccepted:(snapshot,run)=>rememberServerRun(/** @type {RunInputDto} */(snapshot),/** @type {ClientRunDto} */(run)),
+  consumeAccepted:run=>clearAcceptedOutputIntent(/** @type {ClientRunDto} */(run)),
+  settle:run=>settleRun(/** @type {ClientRunDto} */(run)),
+  watch:run=>watchRun(/** @type {ClientRunDto} */(run)),
+  discard:run=>discardRun(/** @type {ClientRunDto} */(run)),
+  onMissing:run=>{if(activeSession===run.recordId)showError(new Error(t("error.runMissing")))},
+  onFailed:(run,error,retry)=>{if(activeSession===run.recordId)showError(error,retry)},
+  onRetrying:(stage,run)=>{if(activeSession===run.recordId){$("#subtitle").textContent=t(stage==="create"?"error.submitUnknown":"error.connectionLost");syncActiveRun();updateComposer()}},
+  delay
+});
 /** @param {ClientRunDto} value */
-function reconcileCreatedRun(value){let run=normalizeRun(value);if(creationReconcilers.has(run.runId))return creationReconcilers.get(run.runId);const task=(async()=>{for(;;){const current=/** @type {ClientRunDto|undefined} */(runRegistry.get(run.recordId));if(current?.runId===run.runId)run=normalizeRun(current,run);const result=await recoverPersistedRun(run,{getRun:runId=>api(`/runs/${encodeURIComponent(runId)}`),getActive:recordId=>api(`/sessions/${encodeURIComponent(recordId)}/runs/active`),create:()=>api(`/sessions/${encodeURIComponent(run.recordId)}/runs`,{method:"POST",headers:{"idempotency-key":run.runId},body:JSON.stringify({message:run.submittedDraft,revision:run.submittedRevision||undefined,attachmentIds:run.submittedAttachmentIds,requestOutputs:run.submittedRequestOutputs})})});if(result.action==="watch"||result.action==="created"){const observed=rememberServerRun(result.snapshot,run);clearAcceptedOutputIntent(observed);if(!await settleRun(observed))void watchRun(observed);return}if(result.action==="discard"){discardRun(run);if(activeSession===run.recordId)showError(new Error(t("error.runMissing")));return}if(result.action==="failed"){discardRun(run);if(activeSession===run.recordId)showError(result.error,()=>void reconcileCreatedRun(run));return}if(activeSession===run.recordId){$("#subtitle").textContent=t(result.stage==="create"?"error.submitUnknown":"error.connectionLost");syncActiveRun();updateComposer()}await delay(1500)}})().finally(()=>creationReconcilers.delete(run.runId));creationReconcilers.set(run.runId,task);return task}
+function reconcileCreatedRun(value){return runCreationReconciler.reconcile(normalizeRun(value))}
 const runObserver=createRunObserver({
   query:run=>queryRun(/** @type {ClientRunDto} */(run)),
   openEvents:run=>fetch(`/api/v1/runs/${encodeURIComponent(run.runId)}/events`,{headers:{accept:"text/event-stream","x-csrf-token":csrf}}),

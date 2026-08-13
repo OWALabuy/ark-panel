@@ -114,7 +114,9 @@ SSE 断开不表示 run 完成，预览丢失也不能决定终态。只有完�
 
 浏览器内的 run registry 只拥有按会话索引的内存快照和 v1 `localStorage` 持久化；
 已确认 run 的查询、SSE 重试与同 runId watcher 去重由 DOM-free 的 run observer factory
-协调，持久化、终态处理、composer 所有权与界面反馈仍通过 `app.js` 显式回调注入。
+协调；provisional creation 的查询后重试、同 runId 去重与 accepted handoff 由独立的
+run creation reconciler factory 协调。两者的持久化、终态处理、composer 所有权与界面
+反馈仍通过 `app.js` 显式回调注入。
 
 ## 5. Gateway 适配与权限
 

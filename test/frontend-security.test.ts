@@ -3,11 +3,14 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 test("frontend renders untrusted metadata with DOM text nodes", async () => {
-  const source=await readFile("src/frontend/app.js","utf8"),runRegistry=await readFile("src/frontend/run-registry.js","utf8"),runObserver=await readFile("src/frontend/run-observer.js","utf8"),runEventStream=await readFile("src/frontend/run-event-stream.js","utf8"),composerState=await readFile("src/frontend/composer-state.js","utf8"),markdown=await readFile("src/frontend/markdown.js","utf8"),i18n=await readFile("src/frontend/i18n/index.js","utf8"),zh=await readFile("src/frontend/i18n/zh-CN.js","utf8");
+  const source=await readFile("src/frontend/app.js","utf8"),runRegistry=await readFile("src/frontend/run-registry.js","utf8"),runObserver=await readFile("src/frontend/run-observer.js","utf8"),runCreationReconciler=await readFile("src/frontend/run-creation-reconciler.js","utf8"),runEventStream=await readFile("src/frontend/run-event-stream.js","utf8"),composerState=await readFile("src/frontend/composer-state.js","utf8"),markdown=await readFile("src/frontend/markdown.js","utf8"),i18n=await readFile("src/frontend/i18n/index.js","utf8"),zh=await readFile("src/frontend/i18n/zh-CN.js","utf8");
   assert.doesNotMatch(source,/\.innerHTML\s*=/);
   assert.doesNotMatch(runRegistry,/\b(?:window|document|localStorage|globalThis|composerState)\b/);
   assert.doesNotMatch(runObserver,/\b(?:window|document|localStorage|globalThis|composerState|fetch)\b|\bt\(/);
+  assert.doesNotMatch(runCreationReconciler,/\b(?:window|document|localStorage|sessionStorage|globalThis|composerState|fetch)\b|(?:from|import\()["'][^"']*(?:i18n|composer)/);
+  assert.match(runCreationReconciler,/import \{recoverPersistedRun\} from "\.\/run-recovery-policy\.js"/);
   assert.match(source,/import \{createRunObserver\} from "\.\/run-observer\.js"/);
+  assert.match(source,/import \{createRunCreationReconciler\} from "\.\/run-creation-reconciler\.js"/);
   assert.doesNotMatch(composerState,/\.innerHTML\s*=/);
   assert.doesNotMatch(markdown,/\.innerHTML\s*=/);
   assert.match(source,/textContent=/);
@@ -102,7 +105,7 @@ test("frontend renders untrusted metadata with DOM text nodes", async () => {
   assert.match(source,/function recoverStoredRuns/);
   assert.match(source,/function reconcileCreatedRun/);
   assert.match(source,/function rememberServerRun\(value,local\)\{[\s\S]*?if\(local&&!same\)discardRun\(local\);[\s\S]*?runRegistry\.rememberServer/);
-  assert.match(source,/"idempotency-key":run\.runId/);
+  assert.match(source,/"idempotency-key":String\(run\.runId\)/);
   assert.match(source,/submittedDraft:message/);
   assert.match(source,/if\(run\.status==="completed"\)\{const agentId=run\.agentId\|\|activeAgent,scope=composerScope\(run\.recordId,agentId\),currentDraft=/);
   assert.match(source,/composerState\.complete\(scope,run,currentDraft\)/);
@@ -487,7 +490,7 @@ test("per-turn output intent is accessible, draft-scoped, and preserved until ru
   assert.match(source,/function clearAcceptedOutputIntent\(run\)\{composerState\.acceptOutputIntent\(composerScope\(run\.recordId,run\.agentId\|\|activeAgent\),run\.submittedRequestOutputs===true\)\}/);
   assert.match(runRegistry,/status:run\.status,createPhase:run\.createPhase/);
   assert.match(source,/createPhase:"provisional",submittedDraft:message/);
-  assert.match(source,/recoverPersistedRun\(run,\{getRun:/);
+  assert.match(source,/const runCreationReconciler=createRunCreationReconciler\(\{/);
   assert.match(source,/if\(acknowledgedStorageAction\(run\)==="remove"\)runRegistry\.forget\(run\.recordId\)/);
   assert.match(source,/\$\("#request-outputs"\)\.disabled=busy\|\|!writable\|\|command/);
   assert.match(source,/textContent=enabled\?"✓":"▧"/);
