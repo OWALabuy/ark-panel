@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import { readApplicationStyles } from "./frontend-styles.js";
 
 test("frontend renders untrusted metadata with DOM text nodes", async () => {
   const source=await readFile("src/frontend/app.js","utf8"),runRegistry=await readFile("src/frontend/run-registry.js","utf8"),runObserver=await readFile("src/frontend/run-observer.js","utf8"),runCreationReconciler=await readFile("src/frontend/run-creation-reconciler.js","utf8"),runBootstrap=await readFile("src/frontend/run-bootstrap.js","utf8"),runEventStream=await readFile("src/frontend/run-event-stream.js","utf8"),composerState=await readFile("src/frontend/composer-state.js","utf8"),markdown=await readFile("src/frontend/markdown.js","utf8"),i18n=await readFile("src/frontend/i18n/index.js","utf8"),zh=await readFile("src/frontend/i18n/zh-CN.js","utf8");
@@ -242,7 +243,7 @@ test("appearance preferences are constrained, cached early, and locally scale re
   const source=await readFile("src/frontend/app.js","utf8");
   const html=await readFile("src/frontend/index.html","utf8");
   const bootstrap=await readFile("src/frontend/theme-bootstrap.js","utf8");
-  const styles=await readFile("src/frontend/styles.css","utf8");
+  const styles=await readApplicationStyles();
 
   assert.match(html,/src="\/theme-bootstrap\.js"/);
   assert.match(bootstrap,/ark-panel:appearance:v1/);

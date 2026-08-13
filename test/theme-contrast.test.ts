@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import test from "node:test";
+import { readApplicationStyles } from "./frontend-styles.js";
 
 const THEMES=["system","light","dark","gruvbox-dark-hard","gruvbox-dark-medium","gruvbox-dark-soft","gruvbox-light-hard","gruvbox-light-medium","gruvbox-light-soft"] as const;
 const ACCENTS=["default","blue","green","red","yellow","magenta","cyan"] as const;
@@ -19,7 +19,7 @@ function contrast(left: string,right: string): number {
 }
 
 test("all shipped theme accent foreground pairs meet WCAG AA normal-text contrast",async()=>{
-  const styles=await readFile("src/frontend/styles.css","utf8");
+  const styles=await readApplicationStyles();
   assert.match(styles,/:root:not\(\[data-accent\]\)\{--accent:var\(--palette-default\);--on-accent:var\(--palette-default-on\)\}/,"first visit must use the accessible default pair");
   const rules=[...styles.matchAll(/([^{}]+)\{([^{}]+)\}/g)].map(match=>({selector:match[1]!,body:match[2]!}));
 

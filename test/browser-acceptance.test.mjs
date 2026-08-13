@@ -323,6 +323,34 @@ test("desktop browser acceptance covers security and session lifecycle", {
     await login(driver, fixture.origin);
     assert.equal((await driver.manage().getCookies()).some(cookie => cookie.name === "panel_session"), true);
     assert.equal(await driver.executeScript("return matchMedia('(hover:none), (pointer:coarse)').matches"), false);
+    const appearanceMatrix = await driver.executeScript(`
+      const root=document.documentElement,originalTheme=root.dataset.theme,originalAccent=root.dataset.accent;
+      const themes=["system","light","dark","gruvbox-dark-hard","gruvbox-dark-medium","gruvbox-dark-soft","gruvbox-light-hard","gruvbox-light-medium","gruvbox-light-soft"];
+      const accents=["default","blue","green","red","yellow","magenta","cyan"],results=[];
+      for(const theme of themes)for(const accent of accents){
+        root.dataset.theme=theme;root.dataset.accent=accent;
+        const style=getComputedStyle(root);
+        results.push({theme,accent,colorScheme:style.colorScheme,surface:style.getPropertyValue("--surface-page").trim(),
+          accentColor:style.getPropertyValue("--accent").trim(),onAccent:style.getPropertyValue("--on-accent").trim()});
+      }
+      root.dataset.theme=originalTheme;root.dataset.accent=originalAccent;
+      return results;
+    `);
+    assert.equal(appearanceMatrix.length, 9 * 7);
+    assert.equal(appearanceMatrix.every(entry => entry.colorScheme && entry.surface && entry.accentColor && entry.onAccent), true);
+    for (const theme of new Set(appearanceMatrix.map(entry => entry.theme))) {
+      assert.equal(new Set(appearanceMatrix.filter(entry => entry.theme === theme).map(entry => entry.accentColor)).size, 7);
+    }
+    assert.equal(new Set(appearanceMatrix.map(entry => entry.surface)).size, 8);
+    assert.equal(await driver.executeScript(`
+      return crypto.subtle.digest("SHA-256",new TextEncoder().encode(JSON.stringify(arguments[0])))
+        .then(bytes=>[...new Uint8Array(bytes)].map(value=>value.toString(16).padStart(2,"0")).join(""))
+    `, appearanceMatrix), "fa06bed07f7526d5736cff3b3e0b29a885cbde2829caab57c0922b01825078b1");
+    await driver.manage().window().setRect({ width: 760, height: 844, x: 0, y: 0 });
+    assert.equal(await driver.executeScript("return getComputedStyle(document.querySelector('.agents')).position"), "absolute");
+    await driver.manage().window().setRect({ width: 761, height: 844, x: 0, y: 0 });
+    assert.equal(await driver.executeScript("return getComputedStyle(document.querySelector('.agents')).position"), "static");
+    await driver.manage().window().setRect({ width: 1440, height: 900, x: 0, y: 0 });
     const rejectedCsrf = await authenticatedFetch(driver, "/api/v1/sessions", {
       method: "POST",
       headers: { "content-type": "application/json", "x-csrf-token": "invalid-fixture-token" },
