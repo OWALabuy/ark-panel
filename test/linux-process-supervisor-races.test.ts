@@ -10,6 +10,7 @@ const linuxOnly = process.platform === "linux" ? false : "Linux /proc supervisio
 test("stop rediscovers a same-session descendant that escapes the last refresh snapshot", { skip: linuxOnly }, async () => {
   const root: LinuxProcessIdentity = {
     pid: 42_001,
+    state: "S",
     startTimeTicks: "101",
     parentPid: process.pid,
     processGroupId: 42_001,
@@ -17,6 +18,7 @@ test("stop rediscovers a same-session descendant that escapes the last refresh s
   };
   const escaped: LinuxProcessIdentity = {
     pid: 42_002,
+    state: "S",
     startTimeTicks: "102",
     parentPid: 1,
     processGroupId: 42_001,
@@ -68,6 +70,7 @@ test("stop rediscovers a same-session descendant that escapes the last refresh s
 test("a full-list probe failure remains fatal even after stable empty listings", { skip: linuxOnly }, async () => {
   const root: LinuxProcessIdentity = {
     pid: 42_101,
+    state: "S",
     startTimeTicks: "201",
     parentPid: process.pid,
     processGroupId: 42_101,
@@ -92,6 +95,7 @@ test("a full-list probe failure remains fatal even after stable empty listings",
 test("initial full-list failure retains the captured root for exact cleanup", { skip: linuxOnly }, async () => {
   const root: LinuxProcessIdentity = {
     pid: 42_151,
+    state: "S",
     startTimeTicks: "251",
     parentPid: process.pid,
     processGroupId: 42_151,
@@ -124,6 +128,7 @@ test("initial full-list failure retains the captured root for exact cleanup", { 
 test("a reused PID discovered during stable-empty confirmation is never signalled", { skip: linuxOnly }, async () => {
   const root: LinuxProcessIdentity = {
     pid: 42_201,
+    state: "S",
     startTimeTicks: "301",
     parentPid: process.pid,
     processGroupId: 42_201,
@@ -151,4 +156,79 @@ test("a reused PID discovered during stable-empty confirmation is never signalle
   assert.ok(result.diagnostics.includes("OWNED_PROCESS_PROBE_FAILED"));
   assert.ok(result.phases.includes("OWNED_PROCESS_IDENTITY_CHANGED"));
   assert.ok(listCalls >= 3);
+});
+
+test("a signalled zombie or dead process is treated as exited without waiting for PID reaping", { skip: linuxOnly }, async () => {
+  const running: LinuxProcessIdentity = {
+    pid: 42_301,
+    state: "S",
+    startTimeTicks: "401",
+    parentPid: process.pid,
+    processGroupId: 42_301,
+    sessionId: 42_301
+  };
+  let current: LinuxProcessIdentity = running;
+  const signals: Array<[number, NodeJS.Signals]> = [];
+  const supervisor = new LinuxProcessSupervisor(running, {
+    list: async () => [current],
+    read: async pid => pid === current.pid ? current : undefined,
+    signal: (pid, signal) => {
+      signals.push([pid, signal]);
+      current = { ...running, state: "Z" };
+    }
+  });
+
+  const result = await supervisor.stop({ termTimeoutMs: 20, killTimeoutMs: 20, pollIntervalMs: 1 });
+
+  assert.deepEqual(result.diagnostics, []);
+  assert.deepEqual(result.phases, ["OWNED_PROCESS_TERM_SENT", "OWNED_PROCESS_TERM_EXITED"]);
+  assert.deepEqual(signals, [[running.pid, "SIGTERM"]]);
+
+  for (const state of ["X", "x"]) {
+    const dead = { ...running, pid: running.pid + state.charCodeAt(0), state };
+    const deadSignals: NodeJS.Signals[] = [];
+    const deadSupervisor = new LinuxProcessSupervisor(dead, {
+      list: async () => [dead],
+      read: async () => dead,
+      signal: (_pid, signal) => { deadSignals.push(signal); }
+    });
+    assert.equal(await deadSupervisor.owns(dead.pid), false);
+    assert.deepEqual(await deadSupervisor.ownedIdentities(), []);
+    const deadResult = await deadSupervisor.stop({ termTimeoutMs: 20, killTimeoutMs: 20, pollIntervalMs: 1 });
+    assert.deepEqual(deadResult.diagnostics, []);
+    assert.deepEqual(deadSignals, []);
+  }
+});
+
+test("stable-empty confirmation completes when a full process scan exceeds the phase timeout", { skip: linuxOnly }, async () => {
+  const root: LinuxProcessIdentity = {
+    pid: 42_501,
+    state: "S",
+    startTimeTicks: "501",
+    parentPid: process.pid,
+    processGroupId: 42_501,
+    sessionId: 42_501
+  };
+  let alive = true;
+  let listCalls = 0;
+  const signals: NodeJS.Signals[] = [];
+  const supervisor = new LinuxProcessSupervisor(root, {
+    list: async () => {
+      listCalls += 1;
+      await new Promise(resolve => setTimeout(resolve, 5));
+      return alive ? [root] : [];
+    },
+    read: async () => alive ? root : undefined,
+    signal: (_pid, signal) => {
+      signals.push(signal);
+      alive = false;
+    }
+  });
+
+  const result = await supervisor.stop({ termTimeoutMs: 1, killTimeoutMs: 1, pollIntervalMs: 1 });
+
+  assert.deepEqual(result.diagnostics, []);
+  assert.deepEqual(result.phases, ["OWNED_PROCESS_TERM_SENT", "OWNED_PROCESS_TERM_EXITED"]);
+  assert.deepEqual(signals, ["SIGTERM"]);
+  assert.ok(listCalls >= 3, "the second stable-empty process listing was skipped");
 });

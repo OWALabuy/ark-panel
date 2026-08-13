@@ -82,6 +82,7 @@ test("identity mismatch never signals a reused PID", { skip: linuxOnly }, async 
 test("supervisor reports an owned identity that survives TERM and KILL", { skip: linuxOnly }, async () => {
   const root: LinuxProcessIdentity = {
     pid: 41_001,
+    state: "S",
     startTimeTicks: "101",
     parentPid: process.pid,
     processGroupId: 41_001,
@@ -159,6 +160,7 @@ test("stop rediscovers and removes a reparented shell descendant after its root 
   if (!child) throw new Error("shell descendant exited before supervision");
   const root: LinuxProcessIdentity = rootIdentity ?? {
     pid: rootPid,
+    state: "S",
     startTimeTicks: "1",
     parentPid: process.pid,
     processGroupId: child.processGroupId,

@@ -2,6 +2,7 @@ import { readFile, readdir } from "node:fs/promises";
 
 export interface LinuxProcessIdentity {
   pid: number;
+  state: string;
   startTimeTicks: string;
   parentPid: number;
   processGroupId: number;
@@ -56,17 +57,19 @@ function parseLinuxProcessStat(stat: string): LinuxProcessIdentity {
   }
   const pid = Number(stat.slice(0, firstSpace));
   const fields = stat.slice(close + 2).trim().split(/\s+/);
+  const state = fields[0];
   const parentPid = Number(fields[1]);
   const processGroupId = Number(fields[2]);
   const sessionId = Number(fields[3]);
   const startTimeTicks = fields[19];
-  if (!validPid(pid) || !Number.isSafeInteger(parentPid) || parentPid < 0
+  if (!validPid(pid) || !state || !/^[A-Za-z]$/.test(state)
+      || !Number.isSafeInteger(parentPid) || parentPid < 0
       || !Number.isSafeInteger(processGroupId) || processGroupId < 0
       || !Number.isSafeInteger(sessionId) || sessionId < 0
       || !startTimeTicks || !/^\d+$/.test(startTimeTicks)) {
     throw new Error("OWNED_PROCESS_STAT_INVALID");
   }
-  return { pid, startTimeTicks, parentPid, processGroupId, sessionId };
+  return { pid, state, startTimeTicks, parentPid, processGroupId, sessionId };
 }
 
 export async function readLinuxProcessIdentity(pid: number): Promise<LinuxProcessIdentity | undefined> {
@@ -104,6 +107,10 @@ function identityKey(identity: LinuxProcessIdentity): string {
 
 function sameIdentity(left: LinuxProcessIdentity, right: LinuxProcessIdentity): boolean {
   return left.pid === right.pid && left.startTimeTicks === right.startTimeTicks;
+}
+
+function exitedProcess(identity: LinuxProcessIdentity): boolean {
+  return identity.state === "Z" || identity.state === "X" || identity.state === "x";
 }
 
 function wait(delayMs: number): Promise<void> {
@@ -165,7 +172,7 @@ export class LinuxProcessSupervisor {
   async owns(pid: number): Promise<boolean> {
     await this.refresh();
     const current = await this.#dependencies.read(pid);
-    return Boolean(current && this.#tracked.has(identityKey(current)));
+    return Boolean(current && !exitedProcess(current) && this.#tracked.has(identityKey(current)));
   }
 
   async ownedIdentities(): Promise<LinuxProcessIdentity[]> {
@@ -269,6 +276,7 @@ export class LinuxProcessSupervisor {
         this.#markIdentityChanged();
         continue;
       }
+      if (exitedProcess(current)) continue;
       alive.push(identity);
     }
     return alive;
@@ -289,6 +297,7 @@ export class LinuxProcessSupervisor {
         this.#markIdentityChanged();
         continue;
       }
+      if (exitedProcess(current)) continue;
       try {
         this.#dependencies.signal(identity.pid, signal);
         signalled.add(key);
@@ -326,7 +335,12 @@ export class LinuxProcessSupervisor {
         await this.#signal(signal, signalled);
       }
       const remaining = deadline - Date.now();
-      if (remaining <= 0) return false;
+      // A full /proc scan can itself outlast the phase timeout under load. Once
+      // one scan proves the owned set empty, always permit the one additional
+      // immediate scan required by the escaped-descendant barrier. If that
+      // scan rediscovers a process, the expired phase still fails closed.
+      if (remaining <= 0 && stableEmptyListings === 0) return false;
+      if (remaining <= 0) continue;
       await wait(Math.min(pollIntervalMs, remaining));
     }
   }
