@@ -105,6 +105,8 @@ test("frontend renders untrusted metadata with DOM text nodes", async () => {
   assert.match(source,/\/sessions\/\$\{encodeURIComponent\(recordId\)\}\/runs\/active/);
   assert.match(runEventStream,/streamDropped/);
   assert.match(source,/function renderStreamPreview\(run\)/);
+  assert.match(source,/for\(const item of streamItems\(stream\)\)/);
+  assert.match(source,/item\.type==="text"\?renderMarkdown\(String\(item\.text\)\):renderStreamTool\(item\)/);
   assert.match(source,/className="message assistant streaming stream-preview"/);
   assert.match(source,/terminalRun\(run\.status\)\|\|!stream/);
   assert.match(runRegistry,/own\(raw,"stream"\)\?raw\.stream:undefined/);
@@ -459,7 +461,7 @@ test("all Markdown surfaces share the external-image privacy renderer", async ()
   const markdown=await readFile("src/frontend/markdown.js","utf8");
 
   assert.match(source,/openMemoryFile[\s\S]*content\.append\(renderMarkdown\(String\(file\.content\|\|""\)\)\)/);
-  assert.match(source,/renderStreamPreview[\s\S]*if\(stream\.text\)body\.append\(renderMarkdown\(String\(stream\.text\)\)\)/);
+  assert.match(source,/renderStreamPreview[\s\S]*item\.type==="text"\?renderMarkdown\(String\(item\.text\)\):renderStreamTool\(item\)/);
   assert.match(source,/showPendingMemoryCandidate[\s\S]*content\.append\(renderMarkdown\(String\(candidate\.content\|\|""\)\)\)/);
   assert.match(source,/renderMessagesWithoutTimes[\s\S]*article\.append\(renderMarkdown\(text\)\)/);
   assert.match(markdown,/className="markdown-external-image"/);

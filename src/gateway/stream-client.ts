@@ -165,11 +165,11 @@ function safeArgs(value: unknown): unknown {
 
 export function normalizeGatewayStreamEvent(eventName: string, rawPayload: unknown): GatewayDataStreamEvent | undefined {
   const payload = object(rawPayload), runId = nonEmpty(payload?.runId), sessionKey = nonEmpty(payload?.sessionKey);
-  const upstreamSeq = typeof payload?.seq === "number" && Number.isInteger(payload.seq) && payload.seq >= 0 ? payload.seq : 0;
-  if (!payload || !runId || !sessionKey) return undefined;
+  const upstreamSeq = payload?.seq;
+  if (!payload || !runId || !sessionKey || typeof upstreamSeq !== "number" || !Number.isSafeInteger(upstreamSeq) || upstreamSeq < 0) return undefined;
   if (eventName === "chat" && payload.state === "delta") {
     const text = contentText(payload.message), deltaText = typeof payload.deltaText === "string" ? payload.deltaText : "";
-    if (text === undefined || Buffer.byteLength(text, "utf8") > MAX_TEXT_BYTES) return undefined;
+    if (text === undefined || Buffer.byteLength(text, "utf8") > MAX_TEXT_BYTES || Buffer.byteLength(deltaText, "utf8") > MAX_TEXT_BYTES) return undefined;
     return { type: "assistant_text", runId, sessionKey, upstreamSeq, text, deltaText, replace: payload.replace === true };
   }
   if ((eventName === "agent" || eventName === "session.tool") && payload.stream === "tool") {

@@ -14,7 +14,12 @@ test("stream parser accepts full text snapshots and tool lifecycle while rejecti
     data: { phase: "start", toolCallId: "call", name: "exec", args: { command: "true" } } }),
     { type: "tool", runId: "run", sessionKey: "agent:a:s", upstreamSeq: 3, callId: "call", name: "exec", phase: "started", args: { command: "true" } });
   assert.equal(normalizeGatewayStreamEvent("chat", { runId: "run", sessionKey: "agent:a:s", state: "delta", message: {} }), undefined);
-  assert.equal(normalizeGatewayStreamEvent("chat", { runId: "run", sessionKey: "agent:a:s", state: "delta", message: { content: "x".repeat(2 * 1024 * 1024 + 1) } }), undefined);
+  for (const seq of [undefined, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) assert.equal(normalizeGatewayStreamEvent("chat", {
+    runId: "run", sessionKey: "agent:a:s", ...(seq === undefined ? {} : { seq }), state: "delta", message: { content: "safe" }, deltaText: "safe"
+  }), undefined);
+  assert.equal(normalizeGatewayStreamEvent("chat", { runId: "run", sessionKey: "agent:a:s", seq: 4, state: "delta", message: { content: "x".repeat(2 * 1024 * 1024 + 1) } }), undefined);
+  assert.equal(normalizeGatewayStreamEvent("chat", { runId: "run", sessionKey: "agent:a:s", seq: 4, state: "delta",
+    message: { content: "safe" }, deltaText: "x".repeat(2 * 1024 * 1024 + 1) }), undefined);
 });
 
 test("disabling preview does not disable the server control credential", async t => {
@@ -522,7 +527,7 @@ test("observer ignores business events until the exact hello and subscriptions c
   sockets[0]!.challenge();
   const unobserve = await withTimeout(observed, "exact hello after ignored pre-hello events");
   sockets[0]!.message({ type: "event", event: "chat", payload: { runId: "accepted-run", sessionKey: "agent:a:pre-hello",
-    state: "delta", message: { content: "accepted" } } });
+    seq: 1, state: "delta", message: { content: "accepted" }, deltaText: "accepted" } });
   assert.equal(events.some(event => event.type === "assistant_text" && event.text === "accepted"), true);
   assert.equal(events.some(event => event.type === "assistant_text" && event.text === "must-not-deliver"), false);
   unobserve(); observer.stop();
@@ -562,7 +567,7 @@ test("stale socket callbacks, challenge, hello, and data cannot mutate a replace
   assert.equal(sockets.length, 2); assert.equal(sockets[1]!.readyState, 1);
   assert.equal(events.some(event => event.type === "assistant_text" || event.type === "tool"), false);
   sockets[1]!.message({ type: "event", event: "chat", payload: { runId: "fresh-run", sessionKey: "agent:a:generation",
-    state: "delta", message: { content: "fresh" } } });
+    seq: 1, state: "delta", message: { content: "fresh" }, deltaText: "fresh" } });
   assert.equal(events.some(event => event.type === "assistant_text" && event.text === "fresh"), true);
   assert.deepEqual(await observer.request("status", {}), { ok: true });
   unobserve(); observer.stop();

@@ -36,7 +36,16 @@ export interface PanelRunRecord {
 }
 
 export interface PublicRunTool { callId: string; name: string; phase: "started" | "completed" | "failed"; args?: unknown }
-export interface PublicRunStream { revision: number; state: "connecting" | "streaming" | "degraded"; text: string; tools: PublicRunTool[] }
+export interface PublicRunTextItem { type: "text"; sequence: number; text: string }
+export interface PublicRunToolItem extends PublicRunTool { type: "tool"; sequence: number; updatedSequence: number }
+export type PublicRunStreamItem = PublicRunTextItem | PublicRunToolItem;
+export interface PublicRunStream {
+  revision: number;
+  state: "connecting" | "streaming" | "degraded";
+  text: string;
+  tools: PublicRunTool[];
+  items: PublicRunStreamItem[];
+}
 export interface PublicPanelRun { runId: string; recordId: string; status: PanelRunStatus; sequence: number; createdAt: string; updatedAt: string; startedAt?: string; finishedAt?: string; revision?: string; error?: { code: string; message: string }; canAbort: boolean; stream?: PublicRunStream }
 
 interface PanelRunStoreTestHooks {

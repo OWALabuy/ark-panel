@@ -117,7 +117,12 @@ committing、aborting 和终态转换只向前推进。服务重启从权威 run
 必须同时设计更长期 tombstone、迁移和回滚，不能直接 GC。
 
 Gateway 的 `chat` 与 `agent` / `session.tool` 事件只形成进程内临时预览，通过面板 SSE 转发。
-文本是上游汇聚后的快照，不承诺逐 token；工具 stdout 和 reasoning 不流式转发。
+服务端把合法的上游 sequence 投影为单一 text/tool timeline：连续文本合并，tool start 固定
+排序锚点，完成/失败原地更新同一 `callId` 卡片；重复和乱序重放得到同一 timeline，同一
+sequence 的冲突 payload 从投影中失败关闭。累计文本只用于晚订阅前缀或 `replace` 的明确
+单文本降级，不为长任务保存每一份累计快照。浏览器只按该 timeline 渲染，不自行猜顺序。
+文本仍是上游汇聚后的更新，不承诺逐 token；未经隔离 runtime 验证、限制和脱敏的 tool
+result/stdout 以及 reasoning 不流式转发。
 SSE 断开不表示 run 完成，预览丢失也不能决定终态。只有完成后重新读取、校验并原子
 提交的完整 transcript 才是权威版本；失败或中止不持久化部分预览。
 

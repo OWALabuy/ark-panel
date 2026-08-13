@@ -221,6 +221,9 @@ durable failed，不写 transcript；accepted 表示服务端已接管任务，�
    不能提前出现在文件中。
 3. 应用当前 model/thinking/reasoning override，并调用 `sessions.send`。
 4. trajectory watcher 与控制事件分别观察终态和临时预览；预览故障不能决定 completion。
+   临时预览按合法 upstream sequence 形成有序 text/tool timeline。连续文本合并，同一 tool
+   的完成/失败更新原始卡片且不移动；精确重复不增加 stream revision，乱序/重连重放收敛
+   到同一结果，相同 sequence 的冲突事件失败关闭。无效或缺失 sequence 不得静默归零。
 5. 完成后从 runtime transcript 读取新增 entry，核验新增 user entry 与请求一致并跳过，
    再验证完整 assistant/tool/custom 组。
 6. 新 entries 先写入可恢复 run record；随后以临时文件、`fsync`、rename 原子提交完整
@@ -230,6 +233,12 @@ durable failed，不写 transcript；accepted 表示服务端已接管任务，�
 一次 run 的提交单位是完整 entry 组，不是最后一条 assistant 文本。streaming 期间不向
 权威 transcript append。失败/abort 清除临时预览，不写部分 run；重试从未改变的权威
 tip 重新开始。
+
+timeline 是兼容字段 `text` / `tools` 之上的公开有序投影。正常 delta 只保留线性增量；晚
+订阅时保留首个累计快照缺失的前缀。非前缀累计快照与 `replace=true` 不能伪造交错边界，
+而是降级为一个明确的文本项，同时保留已观察到的工具锚点。前端文本继续走统一安全
+Markdown renderer，tool 参数只用文本节点。固定 runtime 的真实 result 字段、重复语义、
+大小上限和脱敏规则在 #48 隔离验收前均为 unknown，因此当前不得透传 tool result/stdout。
 
 ### 6.3 重启与 active-run 索引
 

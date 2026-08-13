@@ -226,13 +226,13 @@ export async function startBrowserFixture({ port = 0 } = {}) {
     if (terminal(run.status)) return;
     run.status = "running";
     run.startedAt = stamp();
-    run.stream = { revision: 1, state: "streaming", text: "第一段虚构实时预览", tools: [{ callId: "fixture-tool-1", name: "fixture_lookup", phase: "started", args: { query: "fictional-only" } }] };
+    run.stream = { revision: 1, state: "streaming", text: "第一段虚构实时预览", tools: [{ callId: "fixture-tool-1", name: "fixture_lookup", phase: "started", args: { query: "fictional-only" } }], items: [{ type: "text", sequence: 1, text: "第一段虚构实时预览" }, { type: "tool", sequence: 2, updatedSequence: 2, callId: "fixture-tool-1", name: "fixture_lookup", phase: "started", args: { query: "fictional-only" } }] };
     publish(run);
   }
   function advanceRun(recordId) {
     const run = activeRun(recordId);
     if (!run) throw new Error(`No active fixture run for ${recordId}`);
-    run.stream = { revision: 2, state: "streaming", text: "第一段虚构实时预览\n\n第二段仍为脱敏内容", tools: [{ callId: "fixture-tool-1", name: "fixture_lookup", phase: "completed", args: { query: "fictional-only" } }] };
+    run.stream = { revision: 2, state: "streaming", text: "第一段虚构实时预览\n\n第二段仍为脱敏内容", tools: [{ callId: "fixture-tool-1", name: "fixture_lookup", phase: "completed", args: { query: "fictional-only" } }], items: [{ type: "text", sequence: 1, text: "第一段虚构实时预览" }, { type: "tool", sequence: 2, updatedSequence: 3, callId: "fixture-tool-1", name: "fixture_lookup", phase: "completed", args: { query: "fictional-only" } }, { type: "text", sequence: 4, text: "第二段仍为脱敏内容" }] };
     publish(run);
     return publicRun(run);
   }

@@ -9,7 +9,8 @@ import { ConservativeContextBudget, type ContextBudgetEstimator } from "../domai
 import { ContextBudgetExceededError } from "../domain/context-budget.js";
 import { headerWithContextUsage } from "../domain/context-usage.js";
 import { SessionOperationCoordinator } from "./session-operation.js";
-import { PanelRunStore, publicRun, terminalRunStatuses, type PanelRunRecord, type PublicPanelRun, type PublicRunStream, type PublicRunTool } from "./run-store.js";
+import { PanelRunStore, publicRun, terminalRunStatuses, type PanelRunRecord, type PublicPanelRun } from "./run-store.js";
+import { RunStreamProjector } from "./run-stream-projector.js";
 import { GatewayRunError } from "../gateway/cli-client.js";
 import { GatewayControlError } from "../gateway/stream-client.js";
 import { assignSessionAttachments, garbageCollectAttachments, getSessionAttachment, pruneSessionAttachments,
@@ -20,7 +21,6 @@ import { generationRequestFingerprint, generationRequestFingerprintMatches } fro
 interface BridgeRunner { generate(request: BridgeRequest): Promise<BridgeResult>; cleanupOrphanedSession?(request: BridgeOrphanCleanupRequest): Promise<string[]> }
 export interface GenerationConfig { dataRoot: string; runtimeByAgent: ReadonlyMap<string, string>; workspaceByAgent?: ReadonlyMap<string, string>; completedCacheLimit?: number; contextBudget?: ContextBudgetEstimator; operations?: SessionOperationCoordinator }
 interface PanelGenerationApiTestHooks { createRunStore?(dataRoot: string): PanelRunStore }
-interface InternalRunStream { public: PublicRunStream; lastAssistantSeq: number; toolSeq: Map<string, number> }
 const MAX_GATEWAY_ATTACHMENT_BYTES = 15 * 1024 * 1024;
 
 function latestEntryId(document: TranscriptDocument): string | null {
@@ -81,7 +81,7 @@ export class PanelGenerationApi implements GenerationApi {
   private readonly abortRequested = new Set<string>();
   private readonly transitionTails = new Map<string, Promise<void>>();
   private readonly listeners = new Map<string, Set<(run: PublicPanelRun) => void>>();
-  private readonly streams = new Map<string, InternalRunStream>();
+  private readonly streams = new Map<string, RunStreamProjector>();
   private readonly streamTails = new Map<string, Promise<void>>();
   private initialization?: Promise<void>;
   constructor(bridge: BridgeRunner, config: GenerationConfig);
@@ -299,8 +299,8 @@ export class PanelGenerationApi implements GenerationApi {
   }
 
   private visible(record: PanelRunRecord): PublicPanelRun {
-    const visible = publicRun(record), stream = this.streams.get(record.runId)?.public;
-    return stream && !terminalRunStatuses.has(record.status) ? { ...visible, stream: { ...stream, tools: stream.tools.map(tool => ({ ...tool })) } } : visible;
+    const visible = publicRun(record), stream = this.streams.get(record.runId)?.snapshot();
+    return stream && !terminalRunStatuses.has(record.status) ? { ...visible, stream } : visible;
   }
   private emit(record: PanelRunRecord): void { const visible = this.visible(record); for (const listener of this.listeners.get(record.runId) ?? []) listener(visible); }
 
@@ -309,26 +309,11 @@ export class PanelGenerationApi implements GenerationApi {
     const task = previous.then(async () => {
       const record = await this.runStore.get(runId);
       if (!record || terminalRunStatuses.has(record.status) || record.status === "aborting" || this.abortRequested.has(runId)) return;
-      const current = this.streams.get(runId) ?? { public: { revision: 0, state: "connecting", text: "", tools: [] }, lastAssistantSeq: -1, toolSeq: new Map<string, number>() };
-      let changed = false;
-      if (event.type === "connection") {
-        const state = event.state === "connected" ? (current.public.text || current.public.tools.length ? "streaming" : "connecting") : "degraded";
-        if (current.public.state !== state) { current.public.state = state; changed = true; }
-      } else if (event.type === "assistant_text" && event.upstreamSeq >= current.lastAssistantSeq) {
-        if (event.upstreamSeq > current.lastAssistantSeq || event.text !== current.public.text) {
-          current.lastAssistantSeq = event.upstreamSeq; current.public.text = event.text; current.public.state = "streaming"; changed = true;
-        }
-      } else if (event.type === "tool" && event.upstreamSeq > (current.toolSeq.get(event.callId) ?? -1)) {
-        const index = current.public.tools.findIndex(tool => tool.callId === event.callId);
-        const previousTool = index >= 0 ? current.public.tools[index] : undefined;
-        const args = event.args ?? previousTool?.args;
-        const tool: PublicRunTool = { callId: event.callId, name: event.name, phase: event.phase, ...(args !== undefined ? { args } : {}) };
-        current.toolSeq.set(event.callId, event.upstreamSeq);
-        if (index >= 0) current.public.tools[index] = tool; else current.public.tools.push(tool);
-        current.public.state = "streaming"; changed = true;
-      }
-      if (!changed) return;
-      current.public.revision++; this.streams.set(runId, current); this.emit(record);
+      const current = this.streams.get(runId) ?? new RunStreamProjector();
+      const change = current.apply(event);
+      if (change.conflict) process.stderr.write(`[ark-panel] stream sequence conflict runId=${runId}${event.type === "connection" ? "" : ` sequence=${event.upstreamSeq}`}\n`);
+      if (!change.changed) return;
+      this.streams.set(runId, current); this.emit(record);
     }).catch(error => { process.stderr.write(`[ark-panel] stream projection failed runId=${runId}: ${error instanceof Error ? error.message : String(error)}\n`); });
     this.streamTails.set(runId, task);
     void task.finally(() => { if (this.streamTails.get(runId) === task) { this.streamTails.delete(runId); } });

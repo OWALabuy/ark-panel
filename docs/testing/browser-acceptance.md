@@ -135,13 +135,24 @@ Firefox suite 为 2/2 clean；此前一次完整复验的 desktop 已通过，mo
 watchdog 处丢失 WebDriver session，单独复跑 mobile 通过，故该次不计 clean。新增步骤
 后的 mobile watchdog 调整为 25 秒，场景仍受 50 秒测试硬上限与既有有界 cleanup 约束。
 
+2026-08-14 的 #27 有序流式预览虚构 fixture 把一次运行明确建模为
+`text(sequence 1) → tool(sequence 2，sequence 3 原地完成) → text(sequence 4)`。
+Firefox desktop 场景逐个读取 `.stream-preview .message-body` 的直接子节点并断言精确
+DOM 顺序为第一段文本、同一 tool 卡片、第二段文本；终态仍由完整虚构 transcript 替换
+临时预览。完整 browser suite 有界运行三轮，每轮 desktop 与 coarse-mobile 均 2/2 clean
+通过（合计 6/6，无 teardown 失败）。server focused regressions 另覆盖连续文本合并、乱序与重连重放收敛、精确
+重复不增加 revision、相同 sequence 冲突失败关闭、晚订阅前缀，以及 `replace`/非前缀
+快照的单文本降级。该证据只证明 synthetic Gateway 事件到 DOM 的投影，不证明真实
+OpenClaw 的跨事件 sequence、delta/replace 或 tool result 字段；这些仍需 #48 的显式
+隔离 runtime 验收，当前实现不显示 result/stdout 正文。
+
 ## 自动化矩阵
 
 | 视口 | 输入能力 | 覆盖 |
 | --- | --- | --- |
 | 桌面 | fine pointer、hover、键盘 | 登录/退出、Origin 与 CSRF 拒绝、会话选择、新建、发送、fork、编辑重发、只读来源、会话级运行锁、停止、上下文 `k` 展示；列表行三点菜单首端/下缘/滚动/resize 边界、唯一打开、外部 pointer、菜单 action 内 Escape/焦点、键盘折叠 sidebar 与 rerender stale-state；自动建会话的 composer scope 迁移，accepted/failed/aborted 状态消费与保留边界，附件重试复用；运行中刷新只查询/恢复 durable run，不重复 create，active-other 不继承旧 payload，确认缺失的 provisional 只补建一次，损坏持久值不发请求；外部图片渲染前后零请求，只有跨主机显式链接可脱敏新标签导航，同主机异端口不可导航 |
 | 移动 | 500px 以内、coarse pointer、无 hover | Agent → 会话 → 对话导航、真实点击、44px “本轮需要文件”开关、Enter 换行不发送；列表行三点菜单首端/末端 viewport 边界、唯一打开、外部 pointer、菜单 action 内 Escape/焦点、history back/popstate/forward stale-state；会话 header 菜单边界；点击发送 |
-| 两者共享 | 真实 Firefox DOM、网络与 SSE | 安全 Markdown 不执行 HTML/`javascript:`，附件图片只走已认证同源预览，SSE 文本与工具阶段、终态替换、终态前断线后的查询恢复 |
+| 两者共享 | 真实 Firefox DOM、网络与 SSE | 安全 Markdown 不执行 HTML/`javascript:`，附件图片只走已认证同源预览，SSE 文本/tool 卡片按 sequence 交错、tool 完成原地更新、终态替换、终态前断线后的查询恢复 |
 
 fixture 的会话、消息、路径、附件和工具结果均为固定虚构值；桌面外部图片网络断言使用
 另一条仅监听 loopback 临时端口的计数 server，只保存精确测试路径的请求次数和

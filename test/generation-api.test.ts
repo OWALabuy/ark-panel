@@ -396,11 +396,12 @@ test("流式文本与工具状态只存在于运行快照，终态由 transcript
   const runId="45454545-4545-4545-8545-454545454545";await api.create(metadata.recordId,"hello",runId);
   await withTimeout(requestReady.promise,"stream bridge request");assert.ok(bridgeRequest?.stream);
   const toolCompleted=deferred();const seen:import("../src/server/run-store.js").PublicPanelRun[]=[];const unsubscribe=await api.subscribe(runId,run=>{seen.push(run);if(run.stream?.tools[0]?.phase==="completed")toolCompleted.resolve()});
-  bridgeRequest!.stream!({type:"assistant_text",upstreamSeq:1,text:"临时",deltaText:"临",replace:false});
+  bridgeRequest!.stream!({type:"assistant_text",upstreamSeq:1,text:"临时",deltaText:"临时",replace:false});
   bridgeRequest!.stream!({type:"tool",upstreamSeq:2,callId:"call",name:"exec",phase:"started",args:{command:"true"}});
   bridgeRequest!.stream!({type:"tool",upstreamSeq:3,callId:"call",name:"exec",phase:"completed"});
   await withTimeout(toolCompleted.promise,"tool completion projection");
   const live=[...seen].reverse().find(run=>run.stream?.tools.length);assert.equal(live?.stream?.text,"临时");assert.equal(live?.stream?.tools[0]?.phase,"completed");assert.deepEqual(live?.stream?.tools[0]?.args,{command:"true"});
+  assert.deepEqual(live?.stream?.items,[{type:"text",sequence:1,text:"临时"},{type:"tool",sequence:2,updatedSequence:3,callId:"call",name:"exec",phase:"completed",args:{command:"true"}}]);
   gate.resolve();await waitFor(async()=>(await api.get(runId))?.status==="completed","stream run completion");
   const terminal=await api.get(runId);assert.equal(terminal?.status,"completed");assert.equal(terminal?.stream,undefined);unsubscribe?.();
   const persisted=JSON.parse(await readFile(join(root,"runs",`${runId}.json`),"utf8"));assert.equal("stream" in persisted,false);
