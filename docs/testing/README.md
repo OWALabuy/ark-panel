@@ -87,6 +87,7 @@ commit 是产生证据或引入当前自动检查的代码 commit，不是本文
 
 Runbooks:
 
+- [`compaction-acceptance.md`](compaction-acceptance.md) — #21 默认关闭的真实压缩验收；
 - [`runtime-acceptance.md`](runtime-acceptance.md) — 当前专用 runtime 兼容性流程，
   **不是结果**。
 - [`browser-acceptance.md`](browser-acceptance.md) — 当前 Firefox 自动化运行说明，

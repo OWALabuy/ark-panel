@@ -1,10 +1,9 @@
-import { constants } from "node:fs";
-import { createHash } from "node:crypto";
-import { open, realpath } from "node:fs/promises";
-import { isAbsolute, resolve, sep } from "node:path";
 import { SUPPORTED_OPENCLAW_VERSION, type CreatedSession, type EffectiveToolsInventory, type GatewayClient } from "./adapter.js";
+import { isAbsolute } from "node:path";
 import type { GatewayStreamEvent } from "./stream-client.js";
 import { createToolSchemaCollector, type ToolSchemaCollector, type ToolSchemaReport } from "./stream-schema-observation.js";
+import { inspectLiveProbeConfig, inspectLiveProbeCreatedSession, inspectLiveProbeRoot, liveProbeCreatedIdentityValid,
+  type LiveProbeConfigIdentity, type LiveProbeRootIdentity } from "./live-probe-preflight.js";
 
 const SCENARIO = "exec-printf-v1";
 const CLEANUP_CONFIRMATION = "delete-created-session-v1";
@@ -25,8 +24,8 @@ export interface ToolResultSchemaProbeRequest {
   confirmation: string;
 }
 
-export interface ProbeRootIdentity { dev: bigint; ino: bigint }
-export interface ProbeConfigIdentity { dev: bigint; ino: bigint; size: bigint; mtimeNs: bigint; digest: string }
+export type ProbeRootIdentity = LiveProbeRootIdentity;
+export type ProbeConfigIdentity = LiveProbeConfigIdentity;
 
 interface ProbeClient extends Pick<GatewayClient, "version" | "createSession" | "abort" | "deleteSession"> {
   effectiveTools(agentId: string, sessionKey: string): Promise<EffectiveToolsInventory>;
@@ -113,61 +112,23 @@ function validateRequest(request: ToolResultSchemaProbeRequest): void {
   }
 }
 
-async function safeJsonFile(path: string): Promise<{ value: unknown; identity: ProbeConfigIdentity }> {
-  if (await realpath(path) !== resolve(path)) throw new ToolResultSchemaProbeError("PROBE_CONFIG_UNSAFE");
-  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
-  try {
-    const stat = await handle.stat({ bigint: true }); if (!stat.isFile()) throw new ToolResultSchemaProbeError("PROBE_CONFIG_UNSAFE");
-    try { const contents = await handle.readFile("utf8"); return { value: JSON.parse(contents) as unknown,
-      identity: { dev: stat.dev, ino: stat.ino, size: stat.size, mtimeNs: stat.mtimeNs,
-        digest: createHash("sha256").update(contents).digest("hex") } }; }
-    catch { throw new ToolResultSchemaProbeError("PROBE_CONFIG_INVALID"); }
-  } finally { await handle.close(); }
-}
-
 export async function inspectToolResultProbeConfig(configPath: string, _agentId: string,
   expected?: ProbeConfigIdentity): Promise<ProbeConfigIdentity> {
-  const { value: config, identity } = await safeJsonFile(configPath);
-  if (expected && (identity.dev !== expected.dev || identity.ino !== expected.ino || identity.size !== expected.size ||
-    identity.mtimeNs !== expected.mtimeNs || identity.digest !== expected.digest)) throw new ToolResultSchemaProbeError("PROBE_CONFIG_CHANGED");
-  if (!config || typeof config !== "object" || Array.isArray(config)) throw new ToolResultSchemaProbeError("PROBE_CONFIG_INVALID");
-  const gateway = (config as { gateway?: unknown }).gateway;
-  if (!gateway || typeof gateway !== "object" || Array.isArray(gateway) ||
-    ((gateway as { mode?: unknown }).mode !== undefined && (gateway as { mode?: unknown }).mode !== "local") ||
-    Object.prototype.hasOwnProperty.call(gateway, "remote")) throw new ToolResultSchemaProbeError("PROBE_GATEWAY_NOT_LOCAL");
-  const bindings = (config as { bindings?: unknown }).bindings;
-  if (bindings === undefined) return identity;
-  if (!Array.isArray(bindings) || bindings.some(binding => !binding || typeof binding !== "object" || Array.isArray(binding) ||
-    typeof (binding as { agentId?: unknown }).agentId !== "string")) throw new ToolResultSchemaProbeError("PROBE_BINDINGS_INVALID");
-  if (bindings.length > 0) throw new ToolResultSchemaProbeError("PROBE_BINDINGS_PRESENT");
-  return identity;
+  return await inspectLiveProbeConfig(configPath, _agentId, expected, code => new ToolResultSchemaProbeError(code));
 }
 
 export async function inspectToolResultProbeRoot(root: string, agentId: string, expected?: ProbeRootIdentity): Promise<ProbeRootIdentity> {
-  const normalized = resolve(root), suffix = `${sep}agents${sep}${agentId}${sep}sessions`;
-  if (!isAbsolute(root) || !normalized.endsWith(suffix) || await realpath(root) !== normalized) throw new ToolResultSchemaProbeError("PROBE_ROOT_UNSAFE");
-  const handle = await open(root, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
-  try {
-    const stat = await handle.stat({ bigint: true });
-    if (!stat.isDirectory()) throw new ToolResultSchemaProbeError("PROBE_ROOT_UNSAFE");
-    const identity = { dev: stat.dev, ino: stat.ino };
-    if (expected && (identity.dev !== expected.dev || identity.ino !== expected.ino)) throw new ToolResultSchemaProbeError("PROBE_ROOT_CHANGED");
-    return identity;
-  } finally { await handle.close(); }
+  return await inspectLiveProbeRoot(root, agentId, expected, code => new ToolResultSchemaProbeError(code));
 }
 
 export async function inspectToolResultProbeCreatedSession(created: CreatedSession, request: ToolResultSchemaProbeRequest,
   root: ProbeRootIdentity): Promise<void> {
-  await inspectToolResultProbeRoot(request.sessionsRoot, request.agentId, root);
-  const handle = await open(created.transcriptPath, constants.O_RDONLY | constants.O_NOFOLLOW);
-  try { if (!(await handle.stat()).isFile()) throw new ToolResultSchemaProbeError("PROBE_CREATED_SESSION_INVALID"); }
-  finally { await handle.close(); }
+  await inspectLiveProbeCreatedSession(created, request.sessionsRoot, request.agentId, root,
+    code => new ToolResultSchemaProbeError(code));
 }
 
 function createdIdentityValid(created: CreatedSession, request: ToolResultSchemaProbeRequest): boolean {
-  const parts = created.sessionKey.split(":");
-  return uuid(created.sessionId) && parts.length === 3 && parts[0] === "agent" && parts[1] === request.agentId && Boolean(parts[2]) &&
-    resolve(created.transcriptPath) === resolve(request.sessionsRoot, `${created.sessionId}.jsonl`);
+  return liveProbeCreatedIdentityValid(created, request.sessionsRoot, request.agentId);
 }
 
 function failureCode(error: unknown): string {

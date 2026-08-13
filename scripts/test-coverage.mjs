@@ -16,6 +16,7 @@ const exclusions = Object.freeze({
   "src/gateway/runtime-acceptance-cli.ts": "live runtime acceptance command entry point",
   "src/gateway/stream-probe.ts": "requires a real authenticated OpenClaw gateway",
   "src/gateway/tool-result-schema-probe-cli.ts": "explicitly authorized live tool-result schema probe entry point",
+  "src/gateway/compaction-live-probe-cli.ts": "explicitly authorized live compaction acceptance entry point",
   "src/ops/backup-cli.ts": "manual operations command entry point; backup logic remains included",
   "src/ops/deployment-smoke.ts": "deployment entry point covered by the isolated deployment fixture job",
   "src/server/main.ts": "production startup and dependency-composition entry point",

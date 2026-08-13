@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, rename, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { unregisterAndClean } from "../src/gateway/artifact-cleanup.js";
 import type { GatewayClient } from "../src/gateway/adapter.js";
@@ -41,4 +41,22 @@ test("未知同 sessionId 文件或符号链接会使清理失败", async t => {
   await symlink("/tmp", join(sessions, `${id}.unknown`));
   await assert.rejects(unregisterAndClean(client(), { runtimeAgentId: "runtime", sessionId: id, sessionKey: "key",
     runtimeSessionsRoot: sessions, allowedRuntimeRoots: new Map([["runtime", sessions]]) }), /未知/);
+});
+
+test("固定 runtime root 身份在官方注销前后都必须保持", async t => {
+  const root = await tempFixture(t, "panel-clean-"), sessions = join(root, "sessions"); await mkdir(sessions);
+  const stat = await lstat(sessions, { bigint: true }), expectedRuntimeRootIdentity = { dev: stat.dev, ino: stat.ino };
+  const id = "11111111-1111-4111-8111-111111111111", replacement = join(root, "replacement"); await mkdir(replacement);
+  const before = client();
+  await assert.rejects(unregisterAndClean(before, { runtimeAgentId: "runtime", sessionId: id, sessionKey: "key",
+    runtimeSessionsRoot: sessions, allowedRuntimeRoots: new Map([["runtime", sessions]]),
+    expectedRuntimeRootIdentity: { ...expectedRuntimeRootIdentity, ino: expectedRuntimeRootIdentity.ino + 1n } }), /不安全/u);
+  assert.equal(before.deleted.length, 0);
+
+  const after = client(); after.deleteSession = async key => {
+    after.deleted.push(key); await rename(sessions, join(root, "original")); await rename(replacement, sessions);
+  };
+  await assert.rejects(unregisterAndClean(after, { runtimeAgentId: "runtime", sessionId: id, sessionKey: "key",
+    runtimeSessionsRoot: sessions, allowedRuntimeRoots: new Map([["runtime", sessions]]), expectedRuntimeRootIdentity }), /不安全/u);
+  assert.equal(after.deleted.length, 1);
 });

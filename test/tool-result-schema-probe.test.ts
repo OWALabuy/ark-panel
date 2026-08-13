@@ -90,7 +90,8 @@ test("supported silent npm entry never echoes explicit path environment values",
 
 test("config and root preflight reject bindings, malformed data, path mismatch, and symlinks", async t => {
   const root = await tempFixture(t, "tool-result-schema-preflight-");
-  const config = join(root, "openclaw.json"), agentRoot = join(root, "agents", request.agentId, "sessions"); await mkdir(agentRoot, { recursive: true });
+  const config = join(root, "openclaw.json"), agentRoot = join(root, "agents", request.agentId, "sessions");
+  await mkdir(agentRoot, { recursive: true, mode: 0o700 });
   await writeFile(config, JSON.stringify({ gateway: { mode: "local" }, bindings: [] })); await inspectToolResultProbeConfig(config, request.agentId);
   await writeFile(config, JSON.stringify({ gateway: { mode: "remote", remote: {} }, bindings: [] }));
   await assert.rejects(inspectToolResultProbeConfig(config, request.agentId), /PROBE_GATEWAY_NOT_LOCAL/u);
@@ -100,10 +101,13 @@ test("config and root preflight reject bindings, malformed data, path mismatch, 
   await assert.rejects(inspectToolResultProbeConfig(config, request.agentId), /PROBE_BINDINGS_PRESENT/u);
   await writeFile(config, JSON.stringify({ gateway: { mode: "local" }, bindings: [{}] }));
   await assert.rejects(inspectToolResultProbeConfig(config, request.agentId), /PROBE_BINDINGS_INVALID/u);
+  await writeFile(config, JSON.stringify({ gateway: { mode: "local" } }));
+  await assert.rejects(inspectToolResultProbeConfig(config, request.agentId), /PROBE_BINDINGS_INVALID/u);
   const identity = await inspectToolResultProbeRoot(agentRoot, request.agentId); await inspectToolResultProbeRoot(agentRoot, request.agentId, identity);
   await assert.rejects(inspectToolResultProbeRoot(root, request.agentId), /PROBE_ROOT_UNSAFE/u);
   const realParent = join(root, "real"), linkedParent = join(root, "linked");
-  const nestedRoot = join(realParent, "agents", request.agentId, "sessions"); await mkdir(nestedRoot, { recursive: true }); await symlink(realParent, linkedParent);
+  const nestedRoot = join(realParent, "agents", request.agentId, "sessions"); await mkdir(nestedRoot, { recursive: true, mode: 0o700 });
+  await symlink(realParent, linkedParent);
   await assert.rejects(inspectToolResultProbeRoot(join(linkedParent, "agents", request.agentId, "sessions"), request.agentId), /PROBE_ROOT_UNSAFE/u);
 });
 

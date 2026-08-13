@@ -16,7 +16,13 @@ function submittedMessage(message: string, outputCapture?: PreparedOutputCapture
 export class BridgeService {
   constructor(private readonly client: GatewayClient, private readonly materializer: BridgeMaterializer,
     private readonly allowedRuntimeRoots: ReadonlyMap<string, string>, private readonly streamObserver?: StreamObserver,
-    private readonly attachmentSender?: AttachmentSender) {}
+    private readonly attachmentSender?: AttachmentSender,
+    private readonly runtimeRootIdentities: ReadonlyMap<string, { dev: bigint; ino: bigint }> = new Map()) {}
+
+  private cleanupIdentity(runtimeAgentId: string): { expectedRuntimeRootIdentity?: { dev: bigint; ino: bigint } } {
+    const identity = this.runtimeRootIdentities.get(runtimeAgentId);
+    return identity ? { expectedRuntimeRootIdentity: identity } : {};
+  }
 
   private async contextUsage(runtimeAgentId: string, sessionKey: string): Promise<OpenClawContextUsage | undefined> {
     if (!this.client.sessionContextUsage) return undefined;
@@ -37,7 +43,8 @@ export class BridgeService {
     finally {
       try {
         await unregisterAndClean(this.client, { runtimeAgentId, sessionId: created.sessionId, sessionKey: created.sessionKey,
-          runtimeSessionsRoot: this.allowedRuntimeRoots.get(runtimeAgentId) ?? "", allowedRuntimeRoots: this.allowedRuntimeRoots });
+          runtimeSessionsRoot: this.allowedRuntimeRoots.get(runtimeAgentId) ?? "", allowedRuntimeRoots: this.allowedRuntimeRoots,
+          ...this.cleanupIdentity(runtimeAgentId) });
       } catch (cleanupError) { if (!primaryError) throw cleanupError; }
     }
   }
@@ -46,7 +53,7 @@ export class BridgeService {
     await this.client.abort(request.sessionKey, request.gatewayRunId, request.sessionId);
     return await unregisterAndClean(this.client, { runtimeAgentId: request.runtimeAgentId, sessionId: request.sessionId,
       sessionKey: request.sessionKey, runtimeSessionsRoot: this.allowedRuntimeRoots.get(request.runtimeAgentId) ?? "",
-      allowedRuntimeRoots: this.allowedRuntimeRoots });
+      allowedRuntimeRoots: this.allowedRuntimeRoots, ...this.cleanupIdentity(request.runtimeAgentId) });
   }
 
   async compact(request: BridgeCompactionRequest): Promise<BridgeCompactionResult> {
@@ -85,7 +92,8 @@ export class BridgeService {
         try {
           await unregisterAndClean(this.client, { runtimeAgentId: request.runtimeAgentId, sessionId: created.sessionId,
             sessionKey: created.sessionKey, runtimeSessionsRoot: this.allowedRuntimeRoots.get(request.runtimeAgentId) ?? "",
-            allowedRuntimeRoots: this.allowedRuntimeRoots }, successorSessionId ? [successorSessionId] : []);
+            allowedRuntimeRoots: this.allowedRuntimeRoots, ...this.cleanupIdentity(request.runtimeAgentId) },
+          successorSessionId ? [successorSessionId] : []);
         } catch (cleanupError) {
           if (!primaryError && !entryStaged) throw cleanupError;
           process.stderr.write("[ark-panel] compact workspace cleanup failed after result staging\n");
@@ -187,7 +195,7 @@ export class BridgeService {
         try {
           await unregisterAndClean(this.client, { runtimeAgentId: request.runtimeAgentId, sessionId: created.sessionId,
             sessionKey: created.sessionKey, runtimeSessionsRoot: this.allowedRuntimeRoots.get(request.runtimeAgentId) ?? "",
-            allowedRuntimeRoots: this.allowedRuntimeRoots });
+            allowedRuntimeRoots: this.allowedRuntimeRoots, ...this.cleanupIdentity(request.runtimeAgentId) });
         } catch (cleanupError) {
           await request.cleanupFailed?.().catch(() => undefined);
           if (!primaryError && !entriesStaged) throw cleanupError;

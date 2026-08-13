@@ -19,6 +19,7 @@
     "test:paneltest": "npm run build && PANEL_ALLOW_PANELTEST_INTEGRATION=1 node dist/src/gateway/paneltest-smoke.js",
     "test:stream-probe": "npm run build && PANEL_ALLOW_STREAM_PROBE=1 node dist/src/gateway/stream-probe.js",
     "test:tool-result-schema-probe": "npm run build && node dist/src/gateway/tool-result-schema-probe-cli.js",
+    "test:compaction-live-probe": "npm run build && node dist/src/gateway/compaction-live-probe-cli.js",
     "test:runtime-acceptance": "npm run build && PANEL_ALLOW_RUNTIME_ACCEPTANCE=1 node dist/src/gateway/runtime-acceptance-cli.js",
     "test:app-paneltest": "npm run build && PANEL_ALLOW_PANELTEST_INTEGRATION=1 node dist/src/server/paneltest-app-smoke.js",
     "test:panel-claude-runtime": "npm run build && PANEL_ALLOW_CLAUDE_RUNTIME_ACCEPTANCE=1 node dist/src/server/panel-claude-runtime-smoke.js",

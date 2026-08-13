@@ -13,17 +13,21 @@ function isKnownArtifact(name: string, sessionId: string): boolean {
 export interface CleanupRequest {
   runtimeAgentId: string; sessionId: string; sessionKey: string; runtimeSessionsRoot: string;
   allowedRuntimeRoots: ReadonlyMap<string, string>;
+  expectedRuntimeRootIdentity?: { dev: bigint; ino: bigint };
 }
 
 async function assertCleanupScope(request: CleanupRequest, sessionIds: readonly string[]): Promise<void> {
   if (!sessionIds.length || sessionIds.some(id => !UUID.test(id))) throw new Error("拒绝未验证的 sessionId");
   const allowed = request.allowedRuntimeRoots.get(request.runtimeAgentId);
   if (!allowed || resolve(allowed) !== resolve(request.runtimeSessionsRoot)) throw new Error("runtime sessions 根目录不在 allowlist");
-  const rootStat = await lstat(request.runtimeSessionsRoot);
-  if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) throw new Error("runtime sessions 根目录不安全");
+  const rootStat = await lstat(request.runtimeSessionsRoot, { bigint: true });
+  if (!rootStat.isDirectory() || rootStat.isSymbolicLink() ||
+    request.expectedRuntimeRootIdentity && (rootStat.dev !== request.expectedRuntimeRootIdentity.dev ||
+      rootStat.ino !== request.expectedRuntimeRootIdentity.ino)) throw new Error("runtime sessions 根目录不安全");
 }
 
 async function cleanArtifacts(request: CleanupRequest, sessionIds: readonly string[], allowPrimaryTranscript: ReadonlySet<string>): Promise<string[]> {
+  await assertCleanupScope(request, sessionIds);
   const candidates: Array<{ name: string; path: string }> = [];
   for (const name of await readdir(request.runtimeSessionsRoot)) {
     const sessionId = sessionIds.find(id => name.startsWith(id)); if (!sessionId) continue;
@@ -36,7 +40,10 @@ async function cleanArtifacts(request: CleanupRequest, sessionIds: readonly stri
     candidates.push({ name, path });
   }
   const removed: string[] = [];
-  for (const candidate of candidates) { await rm(candidate.path); removed.push(candidate.name); }
+  for (const candidate of candidates) {
+    await assertCleanupScope(request, sessionIds); await rm(candidate.path); removed.push(candidate.name);
+  }
+  await assertCleanupScope(request, sessionIds);
   return removed.sort();
 }
 
@@ -46,5 +53,6 @@ export async function unregisterAndClean(client: GatewayClient, request: Cleanup
   const sessionIds = [...new Set([request.sessionId, ...additionalSessionIds])];
   await assertCleanupScope(request, sessionIds);
   await client.deleteSession(request.sessionKey);
+  await assertCleanupScope(request, sessionIds);
   return await cleanArtifacts(request, sessionIds, new Set(additionalSessionIds.length ? [request.sessionId] : []));
 }
