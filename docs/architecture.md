@@ -38,9 +38,10 @@ HTTPS 反向代理 origin 访问。反向代理只负责 TLS 和转发；它不�
 只定义基础 token、主题和强调色；`shell-navigation.css` 拥有桌面 shell、Agent、会话
 导航、分组、未读状态与折叠 rail；`conversation-composer.css` 拥有会话头、消息、
 流式预览、composer、命令、附件和图片预览的基础规则；`settings-memory.css`
-拥有设置抽屉、记忆中心、记忆恢复及设置内头像操作的基础规则。四层按上述顺序
-先于 `styles.css` 的共享内容、其余组件和响应式覆盖加载；后续语义样式层必须
-保持从 token 到使用方再到响应式覆盖的顺序，不能跨层重复定义同一组件的基础规则。
+拥有设置抽屉、记忆中心、记忆恢复及设置内头像操作的基础规则。四个语义层按上述
+顺序先于 `styles.css` 的共享内容和兼容覆盖加载；`responsive.css` 最后加载，集中
+管理断点、触控尺寸、安全区域和 visual viewport 覆盖。样式必须保持从 token 到
+使用方、共享覆盖再到响应式覆盖的顺序，不能跨层重复定义同一组件的基础规则。
 
 上游格式和 RPC 假设不能进入面板权威数据模型；浏览器 DTO 也不能暴露原始
 Gateway payload、凭据或主机路径。

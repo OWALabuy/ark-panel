@@ -9,7 +9,8 @@ const TOKENS_THEMES_ORDERED_FINGERPRINT = "d1f5e91d299d6fd70d23a569113ee22d0d20d
 const SHELL_NAVIGATION_ORDERED_FINGERPRINT = "5b855c56366188d9135d2c78ae57cc46083f39ae337894ddd6054a8799979ffb";
 const CONVERSATION_COMPOSER_ORDERED_FINGERPRINT = "b08cf93514aa210bc8022c85a8103f2d187e90965bac5d20a08e69d62eb7c575";
 const SETTINGS_MEMORY_ORDERED_FINGERPRINT = "7062bbac02b0f5175e38a6e9a69a8aa805550742993163fc3b063d5bc4c00d3c";
-const REMAINING_STYLES_ORDERED_FINGERPRINT = "7e8ee2eae5e949b9d0c9a4fce72ca33f81baa20ff7ba152351016631535d4b9b";
+const REMAINING_STYLES_ORDERED_FINGERPRINT = "88ba38e8e442ee23580d7ba56f44544b0b3de81049f590a68d9becc582975b08";
+const RESPONSIVE_ORDERED_FINGERPRINT = "7cbb1e3d54a0f4c938b4a6cb8e704b24a5d06be9c033b02856118ec77d5974a5";
 
 function stylesheetStatements(source: string): string[] {
   const withoutComments = source.replace(/\/\*[\s\S]*?\*\//g, "");
@@ -40,7 +41,7 @@ function fingerprint(statements: string[]): string {
 }
 
 test("application semantic stylesheets load in their explicit cascade order", async () => {
-  assert.deepEqual(await applicationStylesheetHrefs(), ["/tokens-themes.css", "/shell-navigation.css", "/conversation-composer.css", "/settings-memory.css", "/styles.css"]);
+  assert.deepEqual(await applicationStylesheetHrefs(), ["/tokens-themes.css", "/shell-navigation.css", "/conversation-composer.css", "/settings-memory.css", "/styles.css", "/responsive.css"]);
 });
 
 test("the application styles preserve the monolithic CSS rule inventory", async () => {
@@ -73,5 +74,13 @@ test("the token, shell, and remaining layers preserve their ordered responsibili
   assert.match(settingsMemory,/\.shell\.show-memory>\.sessions,\.shell\.show-memory>\.conversation\{display:none\}/);
   assert.match(settingsMemory,/\.memory-tree-group button\{position:relative;display:grid/);
   assert.doesNotMatch(settingsMemory,/@media|\.composer|\.login|\.sessions header|\.editor-dialog/);
-  assert.equal(fingerprint(stylesheetStatements(await readFile("src/frontend/styles.css","utf8"))),REMAINING_STYLES_ORDERED_FINGERPRINT);
+  const remaining=await readFile("src/frontend/styles.css","utf8");
+  assert.equal(fingerprint(stylesheetStatements(remaining)),REMAINING_STYLES_ORDERED_FINGERPRINT);
+  assert.doesNotMatch(remaining,/@media/);
+  const responsive=await readFile("src/frontend/responsive.css","utf8");
+  assert.equal(fingerprint(stylesheetStatements(responsive)),RESPONSIVE_ORDERED_FINGERPRINT);
+  assert.match(responsive,/@media\(max-width:760px\)\{\.shell\{display:block\}/);
+  assert.match(responsive,/:root\{--visual-viewport-height:100dvh;--visual-viewport-top:0px\}/);
+  assert.match(responsive,/\.memory-candidate-dialog\{width:min\(760px,calc\(100% - 28px\)\)\}/);
+  assert.match(responsive,/@media\(max-width:760px\),\(hover:none\)[\s\S]*\.session-quick-action\{min-height:44px;padding:8px 10px/);
 });

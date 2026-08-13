@@ -353,6 +353,11 @@ test("desktop browser acceptance covers security and session lifecycle", {
       return {minHeight:action.minHeight,paddingTop:action.paddingTop,paddingRight:action.paddingRight,
         paddingBottom:action.paddingBottom,paddingLeft:action.paddingLeft};
     `), { minHeight: "44px", paddingTop: "8px", paddingRight: "10px", paddingBottom: "8px", paddingLeft: "10px" });
+    assert.equal(await driver.executeScript(`
+      const dialog=document.querySelector('#memory-candidate-dialog'),maxWidth=dialog.style.maxWidth;
+      dialog.style.maxWidth='none';dialog.showModal();
+      try{return getComputedStyle(dialog).width}finally{dialog.close();dialog.style.maxWidth=maxWidth}
+    `), "732px");
     await driver.manage().window().setRect({ width: 761, height: 844, x: 0, y: 0 });
     assert.equal(await driver.executeScript("return getComputedStyle(document.querySelector('.agents')).position"), "static");
     await driver.manage().window().setRect({ width: 1440, height: 900, x: 0, y: 0 });
