@@ -222,6 +222,14 @@ test("mobile navigation uses scrollable agent lists and finger-sized action menu
   assert.match(source,/quickToggle\.setAttribute\("aria-label",t\("session\.quickActions"/);
   assert.match(source,/closest\("details"\)\?\.removeAttribute\("open"\)/);
   assert.match(source,/function positionQuickSessionMenu\(menu\)/);
+  assert.match(source,/function closeQuickSessionMenu\(\{restore=false\}=\{\}\)/);
+  assert.match(source,/activeQuickSessionMenu&&activeQuickSessionMenu!==menu\)closeQuickSessionMenu\(\)/);
+  assert.match(source,/function setSidebarCollapsed\([^)]*\)\{closeQuickSessionMenu\(\)/);
+  assert.match(source,/function setShellView\([^)]*\)\{closeQuickSessionMenu\(\)/);
+  assert.match(source,/globalThis\.addEventListener\("popstate",event=>\{closeQuickSessionMenu\(\)/);
+  assert.match(source,/if\(next&&activeQuickSessionMenu&&list\.contains\(activeQuickSessionMenu\)\)closeQuickSessionMenu\(\)/);
+  assert.match(source,/addEventListener\("scroll",positionOpenQuickSessionMenu,\{passive:true\}\)/);
+  assert.match(source,/event\.key==="Escape"&&activeQuickSessionMenu[\s\S]*closeQuickSessionMenu\(\{restore:true\}\)/);
   assert.match(source,/menu\.scrollIntoView\(\{block:"nearest"\}\)/);
   assert.match(source,/menu\.classList\.toggle\("opens-up"/);
   assert.match(styles,/\.session-quick-menu\.opens-up \.session-quick-actions\{top:auto;bottom:46px\}/);

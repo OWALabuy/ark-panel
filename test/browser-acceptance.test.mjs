@@ -25,8 +25,8 @@ const CLEANUP_MARGIN_MS = 5_000;
 const CLEANUP_HOOK_MS = CLEANUP_WORST_CASE_MS + CLEANUP_MARGIN_MS;
 const DESKTOP_TEST_TIMEOUT_MS = 90_000;
 const DESKTOP_WATCHDOG_MS = 65_000;
-const MOBILE_TEST_TIMEOUT_MS = 40_000;
-const MOBILE_WATCHDOG_MS = 18_000;
+const MOBILE_TEST_TIMEOUT_MS = 50_000;
+const MOBILE_WATCHDOG_MS = 25_000;
 const FAILURE_ROOT = fileURLToPath(new URL("../browser-artifacts/", import.meta.url));
 const FAILURE_SCREENSHOTS = Object.freeze({
   desktop: resolve(FAILURE_ROOT, "desktop.png"),
@@ -215,6 +215,46 @@ function assertInsideViewport(box) {
   assert.ok(box.top >= 0, `top edge escaped viewport: ${JSON.stringify(box)}`);
   assert.ok(box.right <= box.viewportRight + 0.5, `right edge escaped viewport: ${JSON.stringify(box)}`);
   assert.ok(box.bottom <= box.viewportBottom + 0.5, `bottom edge escaped viewport: ${JSON.stringify(box)}`);
+}
+
+async function settleQuickMenu(driver) {
+  await driver.executeAsyncScript("const done=arguments[arguments.length-1];requestAnimationFrame(()=>requestAnimationFrame(done))");
+}
+
+async function waitQuickMenuState(driver, selector, open) {
+  await driver.wait(async () => await driver.executeScript("return document.querySelector(arguments[0])?.open===arguments[1]", selector, open),
+    WAIT_MS, `Timed out waiting for ${selector} open=${open}`);
+}
+
+async function waitQuickMenuPlacement(driver, selector, opensUp) {
+  await driver.wait(async () => await driver.executeScript(
+    "return document.querySelector(arguments[0])?.classList.contains('opens-up')===arguments[1]", selector, opensUp),
+  WAIT_MS, `Timed out waiting for ${selector} opens-up=${opensUp}`);
+}
+
+async function quickMenuBox(driver, selector) {
+  return driver.executeScript(`
+    const actions=document.querySelector(arguments[0]+' .session-quick-actions'),viewport=visualViewport;
+    const box=actions.getBoundingClientRect();
+    return {left:box.left,top:box.top,right:box.right,bottom:box.bottom,
+      viewportRight:(viewport?.offsetLeft||0)+(viewport?.width||innerWidth),
+      viewportBottom:(viewport?.offsetTop||0)+(viewport?.height||innerHeight)};
+  `, selector);
+}
+
+async function openQuickMenu(driver, selector) {
+  const summary = await visible(driver, `${selector} summary`);
+  await summary.click();
+  await waitQuickMenuState(driver, selector, true);
+  await settleQuickMenu(driver);
+  assertInsideViewport(await quickMenuBox(driver, selector));
+  return summary;
+}
+
+async function focusQuickMenuAction(driver, selector) {
+  const action = await visible(driver, `${selector} .session-quick-action`);
+  await driver.executeScript("arguments[0].focus()", action);
+  assert.equal(await driver.executeScript("return document.activeElement===arguments[0]", action), true);
 }
 
 async function retainFailureScreenshot(driver, name, diagnostics) {
@@ -492,15 +532,89 @@ test("desktop browser acceptance covers security and session lifecycle", {
     }, WAIT_MS, "Timed out waiting for the external-image tab to close");
     assert.equal(fixture.externalImages.requests.sameHost.count, 0);
 
-    const quickToggle = await visible(driver, '.session-row[data-record-id="fixture-1"] .session-quick-menu summary');
-    await quickToggle.click();
-    await waitScript(driver, "return document.querySelector('.session-row[data-record-id=\"fixture-1\"] .session-quick-menu').open");
-    const quickMenuBox = await driver.executeScript(`
-      const box = document.querySelector('.session-row[data-record-id="fixture-1"] .session-quick-actions').getBoundingClientRect();
-      return { left: box.left, top: box.top, right: box.right, bottom: box.bottom, viewportRight: innerWidth, viewportBottom: innerHeight };
+    await driver.executeScript(`
+      const list=document.querySelector('#sessions .project-sessions'),template=list.querySelector('.session-row');
+      for(let index=0;index<14;index++){
+        const clone=template.cloneNode(true);clone.classList.remove('active');clone.dataset.recordId='menu-fixture-'+index;
+        list.append(clone);
+      }
     `);
-    assertInsideViewport(quickMenuBox);
-    await quickToggle.click();
+    const firstQuickMenu = "#sessions .session-row:first-of-type .session-quick-menu";
+    const secondQuickMenu = "#sessions .session-row:nth-of-type(6) .session-quick-menu";
+    const lastQuickMenu = "#sessions .session-row:nth-of-type(12) .session-quick-menu";
+    await driver.executeScript("document.querySelector(arguments[0]).scrollIntoView({block:'start'})", firstQuickMenu);
+    await openQuickMenu(driver, firstQuickMenu);
+    await driver.executeScript("document.querySelector(arguments[0]).scrollIntoView({block:'center'})", secondQuickMenu);
+    await openQuickMenu(driver, secondQuickMenu);
+    assert.equal(await driver.executeScript("return document.querySelectorAll('#sessions .session-quick-menu[open]').length"), 1);
+    assert.equal(await driver.executeScript("return document.querySelector(arguments[0]).open", firstQuickMenu), false);
+    const outsideClosedSummary = await visible(driver, `${secondQuickMenu} summary`);
+    await (await visible(driver, "#list-title")).click();
+    await waitQuickMenuState(driver, secondQuickMenu, false);
+    assert.equal(await driver.executeScript("return document.activeElement === arguments[0]", outsideClosedSummary), false);
+    const quickToggle = await openQuickMenu(driver, secondQuickMenu);
+    await focusQuickMenuAction(driver, secondQuickMenu);
+    await driver.actions({ async: true }).sendKeys(Key.ESCAPE).perform();
+    await waitQuickMenuState(driver, secondQuickMenu, false);
+    assert.equal(await driver.executeScript("return document.activeElement === arguments[0]", quickToggle), true);
+    await driver.executeScript("document.querySelector(arguments[0]).scrollIntoView({block:'end'})", lastQuickMenu);
+    await openQuickMenu(driver, lastQuickMenu);
+    assert.equal(await driver.executeScript("return document.querySelector(arguments[0]).classList.contains('opens-up')", lastQuickMenu), true);
+    await driver.executeScript("document.querySelector(arguments[0]).scrollIntoView({block:'start'})", lastQuickMenu);
+    await waitQuickMenuPlacement(driver, lastQuickMenu, false);
+    assertInsideViewport(await quickMenuBox(driver, lastQuickMenu));
+    await driver.executeScript(`
+      const menu=document.querySelector(arguments[0]),toggle=menu.querySelector('summary').getBoundingClientRect(),
+        height=menu.querySelector('.session-quick-actions').getBoundingClientRect().height;
+      menu.closest('.session-row').style.transform='translateY('+Math.max(0,innerHeight-7-height-toggle.bottom)+'px)';
+      dispatchEvent(new Event('resize'));
+    `, lastQuickMenu);
+    await waitQuickMenuPlacement(driver, lastQuickMenu, true);
+    assertInsideViewport(await quickMenuBox(driver, lastQuickMenu));
+    await driver.executeScript("const menu=document.querySelector(arguments[0]);menu.closest('.session-row').style.transform='';dispatchEvent(new Event('resize'))", lastQuickMenu);
+    await waitQuickMenuPlacement(driver, lastQuickMenu, false);
+    await focusQuickMenuAction(driver, lastQuickMenu);
+    await driver.actions({ async: true }).sendKeys(Key.ESCAPE).perform();
+    await waitQuickMenuState(driver, lastQuickMenu, false);
+
+    await openQuickMenu(driver, secondQuickMenu);
+    const hiddenBySidebarSummary = await visible(driver, `${secondQuickMenu} summary`);
+    const collapseSidebar = await visible(driver, "#collapse-sidebar");
+    await driver.executeScript("arguments[0].focus()", collapseSidebar);
+    await driver.actions({ async: true }).sendKeys(Key.ENTER).perform();
+    await waitScript(driver, "return document.querySelector('.shell').classList.contains('sidebar-collapsed')");
+    await waitQuickMenuState(driver, secondQuickMenu, false);
+    await driver.actions({ async: true }).sendKeys(Key.ESCAPE).perform();
+    assert.equal(await driver.executeScript("return document.activeElement===arguments[0]", hiddenBySidebarSummary), false);
+    const expandSidebar = await visible(driver, "#expand-sidebar");
+    await driver.executeScript("arguments[0].focus()", expandSidebar);
+    await driver.actions({ async: true }).sendKeys(Key.ENTER).perform();
+    await waitScript(driver, "return !document.querySelector('.shell').classList.contains('sidebar-collapsed')");
+    assert.equal(await driver.executeScript("return document.querySelectorAll('#sessions .session-quick-menu[open]').length"), 0);
+
+    await openQuickMenu(driver, firstQuickMenu);
+    await driver.executeScript(`
+      const root=document.querySelector('#sessions'),oldMenu=document.querySelector(arguments[0]);
+      const observer=new MutationObserver(()=>{
+        document.documentElement.dataset.quickMenuRerender=JSON.stringify({oldOpen:oldMenu.open,oldConnected:oldMenu.isConnected});
+        observer.disconnect();
+      });
+      observer.observe(root,{childList:true});
+      const search=document.querySelector('#search');search.value='虚构';search.dispatchEvent(new Event('input',{bubbles:true}));
+    `, firstQuickMenu);
+    await driver.wait(async () => await driver.executeScript("return !document.querySelector('[data-record-id^=menu-fixture-]')&&document.querySelectorAll('#sessions .session-row').length>0"),
+      WAIT_MS, "Timed out waiting for quick-menu rerender");
+    await waitScript(driver, "return document.documentElement.dataset.quickMenuRerender");
+    assert.deepEqual(await driver.executeScript("return {...JSON.parse(document.documentElement.dataset.quickMenuRerender),openCount:document.querySelectorAll('#sessions .session-quick-menu[open]').length}"),
+      { oldOpen: false, oldConnected: false, openCount: 0 });
+    const rerenderedQuickMenu = "#sessions .session-row:first-of-type .session-quick-menu";
+    const rerenderedSummary = await openQuickMenu(driver, rerenderedQuickMenu);
+    await focusQuickMenuAction(driver, rerenderedQuickMenu);
+    await driver.actions({ async: true }).sendKeys(Key.ESCAPE).perform();
+    await waitQuickMenuState(driver, rerenderedQuickMenu, false);
+    assert.equal(await driver.executeScript("return document.activeElement===arguments[0]", rerenderedSummary), true);
+    await driver.executeScript("const search=document.querySelector('#search');search.value='';search.dispatchEvent(new Event('input',{bubbles:true}));delete document.documentElement.dataset.quickMenuRerender");
+    await waitScript(driver, "return !document.querySelector('#sessions .hit')");
 
     await openSession(driver, "fixture-active");
     await waitEnabled(driver, "#message", false);
@@ -807,6 +921,41 @@ test("coarse mobile browser acceptance uses touch-safe controls", {
     assert.equal(await driver.executeScript("return matchMedia('(max-width:760px)').matches"), true);
     await (await visible(driver, '#agents .agent[data-id="fixture"]')).click();
     await waitScript(driver, "return document.querySelector('#app').classList.contains('show-sessions')");
+    await driver.executeScript(`
+      const list=document.querySelector('#sessions .project-sessions'),template=list.querySelector('.session-row');
+      for(let index=0;index<14;index++){
+        const clone=template.cloneNode(true);clone.classList.remove('active');clone.dataset.recordId='mobile-menu-fixture-'+index;
+        list.append(clone);
+      }
+    `);
+    const firstQuickMenu = "#sessions .session-row:first-of-type .session-quick-menu";
+    const lastQuickMenu = "#sessions .session-row:last-of-type .session-quick-menu";
+    await driver.executeScript("document.querySelector(arguments[0]).scrollIntoView({block:'start'})", firstQuickMenu);
+    const firstQuickToggle = await openQuickMenu(driver, firstQuickMenu);
+    await driver.executeScript("document.querySelector(arguments[0]).scrollIntoView({block:'end'})", lastQuickMenu);
+    await openQuickMenu(driver, lastQuickMenu);
+    assert.equal(await driver.executeScript("return document.querySelectorAll('#sessions .session-quick-menu[open]').length"), 1);
+    assert.equal(await driver.executeScript("return document.querySelector(arguments[0]).open", firstQuickMenu), false);
+    const outsideClosedSummary = await visible(driver, `${lastQuickMenu} summary`);
+    await (await visible(driver, "#list-title")).click();
+    await waitQuickMenuState(driver, lastQuickMenu, false);
+    assert.equal(await driver.executeScript("return document.activeElement === arguments[0]", outsideClosedSummary), false);
+    await driver.executeScript("document.querySelector(arguments[0]).scrollIntoView({block:'start'})", firstQuickMenu);
+    await openQuickMenu(driver, firstQuickMenu);
+    await focusQuickMenuAction(driver, firstQuickMenu);
+    await driver.actions({ async: true }).sendKeys(Key.ESCAPE).perform();
+    await waitQuickMenuState(driver, firstQuickMenu, false);
+    assert.equal(await driver.executeScript("return document.activeElement === arguments[0]", firstQuickToggle), true);
+    await openQuickMenu(driver, firstQuickMenu);
+    await focusQuickMenuAction(driver, firstQuickMenu);
+    await driver.executeScript("history.back()");
+    await waitScript(driver, "return !document.querySelector('#app').classList.contains('show-sessions')");
+    await waitQuickMenuState(driver, firstQuickMenu, false);
+    await driver.actions({ async: true }).sendKeys(Key.ESCAPE).perform();
+    assert.equal(await driver.executeScript("return document.activeElement===arguments[0]", firstQuickToggle), false);
+    await driver.executeScript("history.forward()");
+    await waitScript(driver, "return document.querySelector('#app').classList.contains('show-sessions')");
+    assert.equal(await driver.executeScript("return document.querySelectorAll('#sessions .session-quick-menu[open]').length"), 0);
     await openSession(driver, "fixture-1");
     await waitScript(driver, "return document.querySelector('#app').classList.contains('show-conversation')");
 

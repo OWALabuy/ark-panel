@@ -2,15 +2,17 @@
 
 > **当前自动化与日期化证据元数据**
 >
-> - Date: `2026-08-12`（初始自动化）、`2026-08-13`（#43 网络边界复验、
->   #49 composer 状态迁移 characterization、browser run 刷新恢复回归）
+> - Date: `2026-08-12`（初始自动化）、`2026-08-13`（#13 会话列表菜单、
+>   #43 网络边界复验、#49 composer 状态迁移 characterization、browser run 刷新恢复回归）
 > - ark-panel commit: `3a29ee4`（初始自动化）、`cfe53d9`（外部图片边界）、
 >   `61cc824`（#49 characterization 的基线）、`2e86ed8`（刷新恢复修复的
->   集成基线；修复、测试与本文件随同一后续 commit 提交）
+>   集成基线；修复、测试与本文件随同一后续 commit 提交）、`f669327`（#13 的
+>   隔离 worktree 基线；修复、测试与本文件随同一后续 commit 提交）
 > - OpenClaw version: 不适用（虚构本地 browser fixture）
 > - Status: runbook `current automated`；2026-08-12 result `historical pass`；
 >   2026-08-13 #43 result `partial`；2026-08-13 #49 result `historical pass`；
->   browser run 刷新恢复 scope `current automated`
+>   browser run 刷新恢复 scope `current automated`；2026-08-13 #13 result
+>   `historical pass`，对应 scope `current automated`
 > - Superseded/current applicability: 本文件仍是 Firefox 自动化 runbook；其中每次
 >   运行结果只适用于自己的日期与 commit。2026-08-13 的 #43 三轮结果因两次
 >   `DRIVER_QUIT_FAILED` 记为 `partial`，详见
@@ -115,12 +117,30 @@ desktop/mobile 场景全部通过；其中两次 desktop 的 WebDriver HTTP `qui
 fixture-owned listener 复核均无 owned residual。主机上另有不属于测试 session 的
 既有 Firefox 实例，本证据不声称系统全局 Firefox 进程计数不变。
 
+2026-08-13 的 #13 会话列表菜单修复在 `f669327` 基线的隔离 worktree 中，使用
+Node.js 22.22.0、Firefox 153.0.1 与 geckodriver 0.37.0 有界执行三轮完整 suite；
+两轮为 2/2 clean。两轮的 desktop 与 coarse-pointer mobile 场景都确认列表首端和
+末端菜单保持在 visual viewport 内，同一时刻只有一个菜单打开，外部 pointer 关闭时
+不把焦点拉回触发器，Escape 关闭并恢复对应 summary 焦点。desktop 另覆盖下缘向上
+放置，以及菜单打开时 sessions scroll 和 viewport resize 触发重新定位。另一轮的
+同一菜单矩阵和 mobile 场景完成后，desktop 在后续既有会话级运行锁步骤命中一次
+WebElement stale，故不计为 clean；该轮没有菜单断言失败。三轮清理均未报告 fixture、
+截图、listener、launcher 或 geckodriver residual。这是虚构 fixture 的日期化证据，
+不涉及真实 OpenClaw runtime。
+
+同日独立 review 后的复验进一步要求 Escape 从菜单 action 内起始，并覆盖 desktop
+键盘折叠/展开 sidebar、sessions rerender 清除旧 details/active 引用，以及 mobile
+history back/popstate/forward 后不复现旧菜单或把焦点送入隐藏 summary。修正后的完整
+Firefox suite 为 2/2 clean；此前一次完整复验的 desktop 已通过，mobile 则在场景
+watchdog 处丢失 WebDriver session，单独复跑 mobile 通过，故该次不计 clean。新增步骤
+后的 mobile watchdog 调整为 25 秒，场景仍受 50 秒测试硬上限与既有有界 cleanup 约束。
+
 ## 自动化矩阵
 
 | 视口 | 输入能力 | 覆盖 |
 | --- | --- | --- |
-| 桌面 | fine pointer、hover、键盘 | 登录/退出、Origin 与 CSRF 拒绝、会话选择、新建、发送、fork、编辑重发、只读来源、会话级运行锁、停止、上下文 `k` 展示、三点菜单边界；自动建会话的 composer scope 迁移，accepted/failed/aborted 状态消费与保留边界，附件重试复用；运行中刷新只查询/恢复 durable run，不重复 create，active-other 不继承旧 payload，确认缺失的 provisional 只补建一次，损坏持久值不发请求；外部图片渲染前后零请求，只有跨主机显式链接可脱敏新标签导航，同主机异端口不可导航 |
-| 移动 | 500px 以内、coarse pointer、无 hover | Agent → 会话 → 对话导航、真实点击、44px “本轮需要文件”开关、Enter 换行不发送、三点菜单边界、Escape 关闭并恢复焦点、点击发送 |
+| 桌面 | fine pointer、hover、键盘 | 登录/退出、Origin 与 CSRF 拒绝、会话选择、新建、发送、fork、编辑重发、只读来源、会话级运行锁、停止、上下文 `k` 展示；列表行三点菜单首端/下缘/滚动/resize 边界、唯一打开、外部 pointer、菜单 action 内 Escape/焦点、键盘折叠 sidebar 与 rerender stale-state；自动建会话的 composer scope 迁移，accepted/failed/aborted 状态消费与保留边界，附件重试复用；运行中刷新只查询/恢复 durable run，不重复 create，active-other 不继承旧 payload，确认缺失的 provisional 只补建一次，损坏持久值不发请求；外部图片渲染前后零请求，只有跨主机显式链接可脱敏新标签导航，同主机异端口不可导航 |
+| 移动 | 500px 以内、coarse pointer、无 hover | Agent → 会话 → 对话导航、真实点击、44px “本轮需要文件”开关、Enter 换行不发送；列表行三点菜单首端/末端 viewport 边界、唯一打开、外部 pointer、菜单 action 内 Escape/焦点、history back/popstate/forward stale-state；会话 header 菜单边界；点击发送 |
 | 两者共享 | 真实 Firefox DOM、网络与 SSE | 安全 Markdown 不执行 HTML/`javascript:`，附件图片只走已认证同源预览，SSE 文本与工具阶段、终态替换、终态前断线后的查询恢复 |
 
 fixture 的会话、消息、路径、附件和工具结果均为固定虚构值；桌面外部图片网络断言使用
