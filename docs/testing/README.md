@@ -10,9 +10,10 @@
 - **current matrix** 是下面这份当前状态快照。只有标为 `current automated` 的范围会
   随仓库自动化持续执行；其它状态必须按对应证据的日期和作用域理解。
 
-本矩阵更新于 2026-08-13，以 ark-panel `cfe53d9` 为实现快照。表中的 commit 是
-产生证据或引入当前自动检查的代码 commit，不是本文档自己的 commit。#47 没有运行
-真实 OpenClaw、Gateway、模型或真实活会话验收。
+本矩阵更新于 2026-08-13。既有行仍以各自行内 commit 为实现或证据快照；#41 的
+fixture 生命周期重复验收以 ark-panel `9663899` 为实现快照。表中的 commit 是产生
+证据或引入当前自动检查的代码 commit，不是本文档自己的 commit。#41 与 #47 都没有
+运行真实 OpenClaw、Gateway、模型或真实活会话验收。
 
 ## Status vocabulary
 
@@ -33,6 +34,7 @@
 | Strict server/storage/gateway/domain TypeScript | `current automated` | Node 22 static check；CI baseline | `npm run typecheck` | 2026-08-13 | `cfe53d9` | 不适用 | 严格 TypeScript；不执行运行时或浏览器路径 | [CI](../../.github/workflows/ci.yml) |
 | First-party frontend JavaScript types | `current automated` | `checkJs` static check；CI baseline | `npm run check:frontend` | 2026-08-13 | `cfe53d9` | 不适用 | `src/frontend/` 八个第一方脚本；不是浏览器动态覆盖率 | [CI](../../.github/workflows/ci.yml) |
 | Core compiled `node:test` suite | `current automated` | deterministic unit/integration fixtures；CI baseline | `npm test` | 2026-08-13 | `cfe53d9` | 不适用 | 构建后的 server、storage、gateway adapter、domain 和静态 frontend 合同；不连接真实 Gateway | [CI](../../.github/workflows/ci.yml) |
+| Stream/CLI/generation/bridge fixture lifecycle | `current automated` | deterministic repeated `node:test` runner；日期化 20×2 pass | `npm run build && node scripts/test-fixture-lifecycle.mjs --runs 20` | 2026-08-13 | `9663899` | 不适用 | 四个精确编译测试；每轮隔离 TMPDIR、root 删除确认与 owned-process 检查；不连接真实 Gateway | [2026-08-13 evidence](fixture-lifecycle-acceptance-2026-08-13.md) |
 | Server-side coverage baseline | `current automated` | Node 22 built-in coverage；独立 CI job | `npm run test:coverage` | 2026-08-12 | `44b8c27` | 不适用 | 动态 core inventory、单 test context 与固定阈值；不含浏览器 JavaScript 动态覆盖 | [coverage contract](../coverage.md) |
 | Firefox desktop/coarse-pointer automation | `current automated` | real Firefox/WebDriver against fictional local fixture；CI baseline | `npm run test:browser` | 2026-08-13 | `cfe53d9` | 不适用 | Firefox DOM、网络、SSE、桌面与 500px coarse-pointer emulation；不等同实机触屏 | [current browser automation](browser-acceptance.md) |
 | External Markdown image consent and network boundary | `current automated` | frontend unit contracts + Firefox loopback request probe | `npm test && npm run test:browser` | 2026-08-13 | `cfe53d9` | 不适用 | 未同意时不加载外部图片；仅显式跨主机链接可脱敏导航；同主机异端口仍拒绝 | [browser evidence](browser-acceptance.md) |
@@ -88,6 +90,7 @@ Dated evidence:
 - [`runtime-isolation-results.md`](runtime-isolation-results.md)
 - [`streaming-acceptance.md`](streaming-acceptance.md)
 - [`memory-runtime-acceptance-2026-07-22.md`](memory-runtime-acceptance-2026-07-22.md)
+- [`fixture-lifecycle-acceptance-2026-08-13.md`](fixture-lifecycle-acceptance-2026-08-13.md)
 
 执行任何 live 命令前都必须重新阅读对应 runbook 和仓库根部 `AGENTS.md`。普通文档
 维护、CI 或本矩阵更新不得自动触发 live/runtime/probe 命令。
