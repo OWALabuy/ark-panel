@@ -30,6 +30,11 @@ relevant procedure or dated evidence. It distinguishes continuously automated ch
 runbooks, dated historical passes, partial or failed results, unsupported operations, and unknown
 live boundaries.
 
+[`testing/technical-debt-status-2026-08-14.md`](testing/technical-debt-status-2026-08-14.md)
+is the dated local reconciliation of the 2026-08 technical-debt queue. It separates repository-side
+acceptance that is ready after publication from live/hosted acceptance and unresolved product or
+storage-policy decisions; it is not evidence that any remote issue was closed.
+
 Files named for a date or described as results preserve what was observed in that specific
 environment; they are evidence, not timeless product guarantees. A runbook explains how to perform
 a gated check but is not proof that it was run. Individual files under `testing/` do not establish
