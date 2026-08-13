@@ -183,6 +183,23 @@ owner 级 secret，只留在服务端。连接不可用时，本地只读浏览�
 同 hostname 异 origin 不可导航。只有精确同源、无 query/fragment 且匹配现有认证
 附件 preview 路由的图片可以内联。CSP 的 `img-src` 仅允许 `'self' blob:`。
 
+浏览器入口 `app.js` 负责 DOM、同源 API 与模块组装；composer 的草稿、单轮产出意图、
+待发送附件和 submission ownership 由 DOM-free 的 `composer-state.js` factory 持有。
+factory 只使用显式注入的 storage 与 Blob URL 能力，所有读写都要求显式 agent/session
+scope；它不读取 window/global、locale、DOM 或 generation 状态。new-agent 自动建会话时，
+opaque submission receipt 将 draft、产出意图、附件顺序和锁一起提升到新 session scope；
+旧 receipt 不能结束后继 submission，公开 snapshot 也不能修改内部状态。若创建 session
+后 storage scope 提升无法逐项写入并回读确认，composer 不会 POST run；内存 latch 保留唯一
+created record，显式重试复用该 record 而不再创建 session。storage 补偿仅属 best effort，
+残留值至多是已知的 draft/产出意图副本，永不被自动发送，不宣称跨 localStorage key 原子。
+
+generation recovery policy 不导入 composer。`app.js` 只在服务端确认接管 run 后协调消费
+该轮产出意图，并只在明确 completed 时请求 composer 清理；草稿已被继续编辑时不清理
+任何状态，仍属于该 run 的已上传附件才会移除并精确释放本地 Blob URL。failed/aborted
+不触发 composer terminal 清理。v1 localStorage key 保持原字节合同；普通草稿保存仍可
+fail-soft，但 new-agent 到 session 的 ownership 提升对 storage 失败关闭，保留可见的源
+composer 状态等待用户重试。
+
 服务端日志、错误、fixture 和文档不得包含凭据、消息正文、prompt、原始上游 payload
 或不必要的私有路径。文件读取、上传、预览、下载、备份和清理都拒绝 traversal、
 symlink、需要时的 hardlink、特殊文件和 allowlist 根外路径。
