@@ -4,16 +4,18 @@
 >
 > - Date: `2026-08-12`（初始自动化）、`2026-08-13`（#13 会话列表菜单、
 >   #43 网络边界复验、#49 composer 状态迁移 characterization、browser run 刷新恢复回归）、
->   `2026-08-14`（#27 有序流式预览、#19/#20 会话状态布局、上下文用量与设置持久化）
+>   `2026-08-14`（#27 有序流式预览、#19/#20 会话状态布局、上下文用量与设置持久化、
+>   #43 当前网络边界复验）
 > - ark-panel commit: `3a29ee4`（初始自动化）、`cfe53d9`（外部图片边界）、
 >   `2e86ed8`（#49 characterization）、`8e1e197`（刷新恢复修复）、`c880390`（#13）、
->   `3db3d00`（#27）、`1f97c0c`（#19/#20）
+>   `3db3d00`（#27）、`1f97c0c`（#19/#20）、`6574548`（#43 当前复验）
 > - OpenClaw version: 不适用（虚构本地 browser fixture）
 > - Status: runbook `current automated`；2026-08-12 result `historical pass`；
 >   2026-08-13 #43 result `partial`；2026-08-13 #49 result `historical pass`；
 >   browser run 刷新恢复 scope `current automated`；2026-08-13 #13 result
 >   `historical pass`，对应 scope `current automated`；2026-08-14 #27 与 #19/#20
->   results `historical pass`，对应 scopes `current automated`
+>   results `historical pass`，对应 scopes `current automated`；2026-08-14 #43 result
+>   `historical pass`，对应 scope `current automated`
 > - Superseded/current applicability: 本文件仍是 Firefox 自动化 runbook；其中每次
 >   运行结果只适用于自己的日期与 commit。2026-08-13 的 #43 三轮结果因两次
 >   `DRIVER_QUIT_FAILED` 记为 `partial`，详见
@@ -53,6 +55,12 @@ geckodriver 0.37.0，有界执行三轮完整 suite。三轮的桌面与移动�
 验收结束后未留下该 fixture 拥有的 listener、geckodriver 或截图产物。这是 #43
 的日期化证据，不把 stock teardown 抖动冒充功能成功或连续全绿，也不替代后续
 CI 结果。
+
+2026-08-14 在 canonical commit `6574548` 上重新串行执行三轮完整 suite，三轮均为
+2/2 clean、exit 0。desktop 分别为 41.9、41.9、42.8 秒，coarse mobile 分别为
+16.0、17.1、17.0 秒；每轮都重新经过上述外部图片零自动请求、唯一显式跨主机导航、
+no-referrer/no-cookie/no-opener 与同主机异端口拒绝断言。该结果不改写 2026-08-13
+的 partial 历史，也不证明 Chromium、WebKit、真实代理或 live runtime 行为。
 
 2026-08-13 的 #49 composer 状态迁移 characterization 使用 Node.js 22.22.0、
 Firefox 153.0.1 与 geckodriver 0.37.0，以 canonical commit `2e86ed8` 为证据快照有界执行三轮完整
