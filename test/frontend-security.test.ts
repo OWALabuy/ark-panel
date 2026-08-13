@@ -4,7 +4,7 @@ import test from "node:test";
 import { readApplicationStyles } from "./frontend-styles.js";
 
 test("frontend renders untrusted metadata with DOM text nodes", async () => {
-  const source=await readFile("src/frontend/app.js","utf8"),runRegistry=await readFile("src/frontend/run-registry.js","utf8"),runController=await readFile("src/frontend/run-controller.js","utf8"),runObserver=await readFile("src/frontend/run-observer.js","utf8"),runCreationReconciler=await readFile("src/frontend/run-creation-reconciler.js","utf8"),runBootstrap=await readFile("src/frontend/run-bootstrap.js","utf8"),generationSubmission=await readFile("src/frontend/generation-submission.js","utf8"),runEventStream=await readFile("src/frontend/run-event-stream.js","utf8"),composerState=await readFile("src/frontend/composer-state.js","utf8"),markdown=await readFile("src/frontend/markdown.js","utf8"),i18n=await readFile("src/frontend/i18n/index.js","utf8"),zh=await readFile("src/frontend/i18n/zh-CN.js","utf8");
+  const source=await readFile("src/frontend/app.js","utf8"),runRegistry=await readFile("src/frontend/run-registry.js","utf8"),runController=await readFile("src/frontend/run-controller.js","utf8"),runObserver=await readFile("src/frontend/run-observer.js","utf8"),runCreationReconciler=await readFile("src/frontend/run-creation-reconciler.js","utf8"),runBootstrap=await readFile("src/frontend/run-bootstrap.js","utf8"),generationSubmission=await readFile("src/frontend/generation-submission.js","utf8"),composerPolicy=await readFile("src/frontend/composer-policy.js","utf8"),runEventStream=await readFile("src/frontend/run-event-stream.js","utf8"),composerState=await readFile("src/frontend/composer-state.js","utf8"),markdown=await readFile("src/frontend/markdown.js","utf8"),i18n=await readFile("src/frontend/i18n/index.js","utf8"),zh=await readFile("src/frontend/i18n/zh-CN.js","utf8");
   assert.doesNotMatch(source,/\.innerHTML\s*=/);
   assert.doesNotMatch(runRegistry,/\b(?:window|document|localStorage|globalThis|composerState)\b/);
   assert.doesNotMatch(runController,/\b(?:window|document|localStorage|sessionStorage|globalThis|fetch)\b|\bt\(/);
@@ -12,6 +12,7 @@ test("frontend renders untrusted metadata with DOM text nodes", async () => {
   assert.doesNotMatch(runCreationReconciler,/\b(?:window|document|localStorage|sessionStorage|globalThis|composerState|fetch)\b|(?:from|import\()["'][^"']*(?:i18n|composer)/);
   assert.doesNotMatch(runBootstrap,/\b(?:window|document|localStorage|sessionStorage|globalThis|composerState|fetch)\b|(?:from|import\()["'][^"']*(?:i18n|composer)/);
   assert.doesNotMatch(generationSubmission,/\b(?:window|document|localStorage|sessionStorage|globalThis|fetch)\b|(?:from|import\()["'][^"']*(?:i18n|run-recovery)/);
+  assert.doesNotMatch(composerPolicy,/\b(?:window|document|localStorage|sessionStorage|globalThis|fetch|composerState)\b|\bt\(/);
   assert.match(runCreationReconciler,/import \{recoverPersistedRun\} from "\.\/run-recovery-policy\.js"/);
   assert.match(runBootstrap,/import \{inspectStoredRuns\} from "\.\/run-recovery-policy\.js"/);
   assert.match(source,/import \{createRunObserver\} from "\.\/run-observer\.js"/);
@@ -19,6 +20,7 @@ test("frontend renders untrusted metadata with DOM text nodes", async () => {
   assert.match(source,/import \{createRunBootstrap\} from "\.\/run-bootstrap\.js"/);
   assert.match(source,/import \{createGenerationSubmissionCoordinator\} from "\.\/generation-submission\.js"/);
   assert.match(source,/import \{createRunController\} from "\.\/run-controller\.js"/);
+  assert.match(source,/import \{deriveComposerUiState\} from "\.\/composer-policy\.js"/);
   assert.doesNotMatch(composerState,/\.innerHTML\s*=/);
   assert.doesNotMatch(markdown,/\.innerHTML\s*=/);
   assert.match(source,/textContent=/);
@@ -137,22 +139,26 @@ test("frontend renders untrusted metadata with DOM text nodes", async () => {
 });
 
 test("generation state only locks the composer for its own session", async () => {
-  const source=await readFile("src/frontend/app.js","utf8"),runRegistry=await readFile("src/frontend/run-registry.js","utf8");
+  const source=await readFile("src/frontend/app.js","utf8"),runRegistry=await readFile("src/frontend/run-registry.js","utf8"),composerPolicy=await readFile("src/frontend/composer-policy.js","utf8");
 
   assert.match(runRegistry,/runs=new Map\(\)/);
   assert.match(source,/function syncActiveRun\(\)\{activeRun=.*runRegistry\.get\(activeSession\).*\|\|null\}/);
   assert.match(source,/activeSession=id;[\s\S]*?syncActiveRun\(\);[\s\S]*?restoreDraft\(id\);[\s\S]*?updateComposer\(\)/);
-  assert.match(source,/const textarea=\$\("#message"\),running=Boolean\(activeRun\)/);
-  assert.match(source,/textarea\.disabled=busy\|\|!writable/);
+  assert.match(source,/runStatus:activeRun\?\.status/);
+  assert.match(source,/deriveComposerUiState\(\{runStatus:activeRun\?\.status,uploading:isAttachmentSubmissionActive\(\),compacting:isCompactionActive\(\),sessionId:activeSession,agentId:activeAgent,archived:viewingArchived,source:activeSource,trimmedInput:value\.trim\(\),pendingCount:currentPendingAttachments\(\)\.length,slashCommand:value\.trimStart\(\)\.startsWith\("\/"\),coarsePointer:coarsePointer\.matches\}\)/);
+  assert.match(source,/textarea\.disabled=state\.textareaDisabled/);
+  assert.match(composerPolicy,/const running=Boolean\(input\.runStatus\),stopping=input\.runStatus==="aborting"/);
+  assert.match(composerPolicy,/textareaDisabled:busy\|\|!writable/);
   assert.match(source,/if\(activeSession!==run\.recordId\)return;syncActiveRun\(\)/);
 });
 
 test("conversation operations only lock and surface results in their own session", async () => {
-  const source=await readFile("src/frontend/app.js","utf8"),generationSubmission=await readFile("src/frontend/generation-submission.js","utf8");
+  const source=await readFile("src/frontend/app.js","utf8"),generationSubmission=await readFile("src/frontend/generation-submission.js","utf8"),composerPolicy=await readFile("src/frontend/composer-policy.js","utf8");
 
   assert.match(source,/const composerState=createComposerState\(/);
   assert.match(source,/compactions=createScopedActivity\(\),memoryCandidateGenerations=createScopedActivity\(\)/);
-  assert.match(source,/uploading=isAttachmentSubmissionActive\(\),compacting=isCompactionActive\(\),busy=running\|\|uploading\|\|compacting/);
+  assert.match(source,/uploading:isAttachmentSubmissionActive\(\),compacting:isCompactionActive\(\)/);
+  assert.match(composerPolicy,/busy=running\|\|uploading\|\|compacting/);
   assert.match(generationSubmission,/composer\.promoteSubmission\(receipt,sourceScope,targetScope\)/);
   assert.match(generationSubmission,/composer\.createdSession\(sourceScope\)/);
   assert.match(generationSubmission,/composer\.rememberCreatedSession\(sourceScope,created\)/);
@@ -172,11 +178,13 @@ test("mobile conversation keeps a constrained touch-scroll viewport", async () =
 
 test("coarse-pointer keyboards insert new lines instead of submitting", async () => {
   const source=await readFile("src/frontend/app.js","utf8");
+  const composerPolicy=await readFile("src/frontend/composer-policy.js","utf8");
   const zh=await readFile("src/frontend/i18n/zh-CN.js","utf8");
 
   assert.match(source,/const coarsePointer=globalThis\.matchMedia\("\(hover:none\), \(pointer:coarse\)"\)/);
   assert.match(source,/event\.key==="Enter"&&!event\.shiftKey&&!event\.isComposing&&!coarsePointer\.matches/);
-  assert.match(source,/coarsePointer\.matches\?"composer\.mobileHint"/);
+  assert.match(source,/coarsePointer:coarsePointer\.matches/);
+  assert.match(composerPolicy,/input\.coarsePointer\?"composer\.mobileHint":"composer\.commandHint"/);
   assert.match(zh,/"composer\.mobileHint":"回车换行 · 点击 ↑ 发送/);
 });
 
@@ -487,6 +495,7 @@ test("per-turn output intent is accessible, draft-scoped, and preserved until ru
   const runRegistry=await readFile("src/frontend/run-registry.js","utf8");
   const runController=await readFile("src/frontend/run-controller.js","utf8");
   const generationSubmission=await readFile("src/frontend/generation-submission.js","utf8");
+  const composerPolicy=await readFile("src/frontend/composer-policy.js","utf8");
   const html=await readFile("src/frontend/index.html","utf8");
   const styles=await readApplicationStyles();
 
@@ -503,7 +512,8 @@ test("per-turn output intent is accessible, draft-scoped, and preserved until ru
   assert.match(generationSubmission,/createPhase:"provisional"/);
   assert.match(source,/const runCreationReconciler=createRunCreationReconciler\(\{/);
   assert.match(runController,/if\(acknowledgedStorageAction\(remembered\)==="remove"\)registry\.forget\(String\(remembered\.recordId\)\)/);
-  assert.match(source,/\$\("#request-outputs"\)\.disabled=busy\|\|!writable\|\|command/);
+  assert.match(source,/\$\("#request-outputs"\)\.disabled=state\.requestOutputsDisabled/);
+  assert.match(composerPolicy,/requestOutputsDisabled:busy\|\|!writable\|\|input\.slashCommand/);
   assert.match(source,/textContent=enabled\?"✓":"▧"/);
   assert.match(styles,/\.request-outputs\[aria-pressed="true"\]/);
   assert.match(styles,/@media\(max-width:760px\)\{\.composer-foot \.request-outputs\{width:44px;min-height:44px\}\}/);

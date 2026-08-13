@@ -222,6 +222,10 @@ Blob URL。failed/aborted
 fail-soft，但 new-agent 到 session 的 ownership 提升对 storage 失败关闭，保留可见的源
 composer 状态等待用户重试。
 
+composer 的可写来源、generation/upload/compaction 忙碌优先级、停止按钮、附件与产出意图
+禁用条件，以及桌面/粗指针提示 key 由 DOM-free 的 composer policy 纯函数统一派生；
+`app.js` 只采集当前会话投影并把结果应用到控件和本地化文案。
+
 服务端日志、错误、fixture 和文档不得包含凭据、消息正文、prompt、原始上游 payload
 或不必要的私有路径。文件读取、上传、预览、下载、备份和清理都拒绝 traversal、
 symlink、需要时的 hardlink、特殊文件和 allowlist 根外路径。
