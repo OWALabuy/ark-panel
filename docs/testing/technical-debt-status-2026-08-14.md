@@ -2,9 +2,10 @@
 
 This is a dated local governance snapshot, not a GitHub issue mutation or a release claim.
 
-- Audit baseline: ark-panel `9c0fb2b` on local `main`.
+- Audit baseline: ark-panel `ca95431` on local `main`.
 - Remote baseline observed during the audit: `origin/main` `190982f`; local `main` was 72
-  commits ahead and had not been pushed.
+  commits ahead at the earlier audit, and 75 commits ahead after integrating the #48 harness;
+  neither state had been pushed.
 - Live boundary: no OpenClaw runtime, Gateway probe, live session write, push, pull request,
   hosted Actions run, or issue close was performed for this snapshot.
 - Evidence rule: “ready to close” below means the issue's repository-side acceptance is backed
