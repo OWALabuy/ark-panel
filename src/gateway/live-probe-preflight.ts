@@ -32,7 +32,9 @@ async function safeJsonFile(path: string, fail: Failure): Promise<{ value: unkno
 
 export async function inspectLiveProbeConfig(configPath: string, agentId: string,
   expected?: LiveProbeConfigIdentity, fail: Failure = defaultFailure, workspaceRoot?: string): Promise<LiveProbeConfigIdentity> {
-  if (agentId !== "paneltest" && !/^panel-probe-[a-z0-9-]{1,48}$/u.test(agentId)) throw fail("PROBE_AGENT_INVALID");
+  if (agentId !== "paneltest" && !/^panel-(?:(?:probe-[a-z0-9-]{1,48})|(?:runtime-probe-[a-z0-9-]{1,48})|(?:[a-z0-9-]{1,48}-runtime))$/u.test(agentId)) {
+    throw fail("PROBE_AGENT_INVALID");
+  }
   const { value: config, identity } = await safeJsonFile(configPath, fail);
   if (expected && (identity.dev !== expected.dev || identity.ino !== expected.ino || identity.size !== expected.size ||
     identity.mtimeNs !== expected.mtimeNs || identity.digest !== expected.digest)) throw fail("PROBE_CONFIG_CHANGED");

@@ -137,6 +137,13 @@ function validateWorkflow(workflow: string): void {
   assert.doesNotMatch(workflow, /continue-on-error\s*:|\$\{\{\s*secrets\.|PANEL_ALLOW_(?:PANELTEST_INTEGRATION|STREAM_PROBE|TOOL_RESULT_SCHEMA_PROBE|COMPACTION_LIVE_PROBE|RUNTIME_ACCEPTANCE|CLAUDE_RUNTIME_ACCEPTANCE)|test:(?:paneltest|stream-probe|tool-result-schema-probe|compaction-live-probe|runtime-acceptance|app-paneltest|panel-claude-runtime)/u);
 }
 
+test("runtime acceptance remains a default-off live entry point outside CI", async () => {
+  const packageJson = JSON.parse(await readFile("package.json", "utf8")) as { scripts: Record<string, string> };
+  assert.equal(packageJson.scripts["test:runtime-acceptance"], "npm run build && node dist/src/gateway/runtime-acceptance-cli.js");
+  assert.doesNotMatch(packageJson.scripts["test:runtime-acceptance"] ?? "", /PANEL_ALLOW_RUNTIME_ACCEPTANCE=1/u);
+  assert.doesNotMatch(await readFile(".github/workflows/ci.yml", "utf8"), /test:runtime-acceptance|PANEL_ALLOW_RUNTIME_ACCEPTANCE/u);
+});
+
 test("CI workflow statically locks the deterministic Node 22 contract", async () => {
   validateWorkflow(await readFile(".github/workflows/ci.yml", "utf8"));
 });

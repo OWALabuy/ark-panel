@@ -1,29 +1,73 @@
-# 专用 runtime 兼容性验收
+# 专用 runtime bootstrap 与 memory continuity 验收
 
-> **当前 runbook 元数据（不是执行结果）**
+> **Runbook metadata，不是执行结果**
 >
-> - Date: `2026-08-13`（runbook review）
-> - ark-panel commit: `cfe53d9`（implementation snapshot）
+> - Date: `2026-08-14`（runbook review）
 > - OpenClaw version: target `2026.6.11`
-> - Status: `unknown`
-> - Superseded/current applicability: 本 runbook 当前可用，但只有实际执行后生成的
->   日期化记录才能改变某个 runtime 的状态；runbook 本身不证明通过。已知历史结果
->   与当前缺口见 [acceptance matrix](README.md)。
+> - Status: `unknown`（本工作项未执行 live probe）
 
-该验收只允许 `panel-claude-runtime`、`panel-main-runtime` 或 `paneltest`，并要求 runtime 在 `openclaw.json` 中没有任何 binding。脚本使用一次性 session，完成后按受限 artifact 清理流程注销和删除。
+本探针逐次只验收一个显式目标。目标必须是配置中的 channel-free chat runtime，ID 为
+`panel-<name>-runtime`、`panel-runtime-probe-<name>`，或兼容现有隔离 fixture 的 `paneltest`。
+它不会从默认 home 推断 config、sessions 或 workspace，也不会自动开启 live gate。
+
+## 人工前置确认
+
+执行前，操作者必须逐项确认并记录：
+
+1. 目标 agent ID、`openclaw.json`、目标 agent 的 `sessions` 根和 workspace 根均已明确；
+2. `openclaw.json` 中 `bindings` 精确为 `[]`，且 `agents.list` 恰有一个目标 agent，workspace
+   精确指向上述目录；目标没有任何 channel/cron/外部消息入口；
+3. 两个根均由当前用户拥有、不可被 group/other 访问、不是 symlink；sessions 根必须是该探针
+   独占且在执行前精确为空，不能含其他 session、archive 或 metadata；
+4. workspace 已由操作者预置普通私有文件
+   `memory/ark-panel-runtime-acceptance.md`，内容精确为：
+
+   ```text
+   # Fictional ark-panel runtime acceptance canary
+
+   ARK_PANEL_RUNTIME_ACCEPTANCE_QUERY_V1
+   ARK_PANEL_RUNTIME_ACCEPTANCE_RESULT_V1
+   ```
+
+5. 接受探针创建一次临时 session、发送一次固定虚构 prompt、调用一次 `memory_search`，并在
+   终态或已确认 abort 后删除该临时 session；不得以普通测试授权代替本次 live 授权。
+
+## 命令
+
+先设置三个显式路径与 live gate；下面的值必须由操作者替换，不能复制为默认目标：
 
 ```sh
-npm run test:runtime-acceptance -- panel-claude-runtime panel-main-runtime
+export PANEL_RUNTIME_ACCEPTANCE_CONFIG_PATH=/explicit/openclaw.json
+export PANEL_RUNTIME_ACCEPTANCE_SESSIONS_ROOT=/explicit/agents/panel-example-runtime/sessions
+export PANEL_RUNTIME_ACCEPTANCE_WORKSPACE_ROOT=/explicit/workspace
+export PANEL_ALLOW_RUNTIME_ACCEPTANCE=1
+
+npm run --silent test:runtime-acceptance -- \
+  --agent panel-example-runtime \
+  --expected-version 2026.6.11 \
+  --scenario memory-search-canary-v1 \
+  --max-runs 1 \
+  --cleanup delete-created-session-v1 \
+  --confirm runtime-acceptance:panel-example-runtime:2026.6.11
 ```
 
-每个 runtime 只发一次受控请求：以随机、预期无匹配的 nonce 调用 `memory_search`，随后自行列出系统提示中可见的 bootstrap 文档名、skill 名称和结果计数。prompt 不提供 bootstrap 文件名，避免把问题中的名字误当成注入证据；输出再经过本地固定白名单。脚本不打印文件、记忆或工具结果正文；只输出 workspace 受限快照的 hash/文件数、工具存在性和脱敏报告。
+`npm run test:runtime-acceptance` 本身不设置 gate。不要在 CI、普通单测或未经逐目标授权时运行。
 
-安全边界：
+## 通过条件与停止条件
 
-- 运行前强制确认 OpenClaw 版本为 `2026.6.11`、零 bindings、专用 sessions 根。
-- 请求明确禁止其它工具、文件读写和网络访问。
-- `browser` / `canvas` 只从编译后的工具列表确认存在性，不主动调用，因为启动浏览器或 canvas 是否写状态无法在通用环境中证明无副作用。
-- 快照只覆盖 `AGENTS.md`、`TOOLS.md`、`SOUL.md`、`USER.md`、`MEMORY.md` 与 `memory/`；前后 hash 必须一致。
-- `memory_search` 的可识别调用轨迹只存在于一次性 transcript/trajectory，验收后随 session artifact 清理。是否另有 OpenClaw 内部 recall 持久化只能报告观测结果，不能据此声称不存在。
-- 若 runtime 有 binding、目录不安全、报告包含非白名单字段或 workspace hash 改变，应视为失败并停止后续项。
-- `passed` 只有在五类 bootstrap 均得到正面注入证据、skills 非空、三个目标工具均存在、`memory_search` 确实调用且 workspace hash 不变时才为 true；任一 runtime 不通过时 CLI 以非零状态退出。
+探针在 send 前重新确认 config/root/workspace identity；要求 configured catalog 至少包含
+`browser`、`canvas`、`memory_search`，同时该临时 session 的 effective tools 必须精确为
+`["memory_search"]`。prompt 只给 QUERY marker；通过必须直接在对应 `tool_result` 中看到不同的
+RESULT marker，因此 query 回显或 “no results” 不能假通过。模型最终输出只允许固定 JSON：五个
+bootstrap 文档名称与经过严格字符白名单的非空 skill 名称；正文、路径和 tool result 不进入报告。
+
+任何 config/root/workspace/canary 变化、额外工具、缺少 bootstrap/skill、run ID 不一致、终态未知、
+workspace 改写或清理失败都立即失败。send 后终态未知只以该次 requested run ID 尝试一次 abort；
+abort 未确认时不删除 runtime artifact，也不重试 send。清理前验证 pinned sessions-root dev/inode，
+只删除新建 session 的 allowlisted artifact。
+
+成功 stdout 仅含固定 shape、最小目标 agent ID、版本、布尔值和 skill 数量；不含 skill 名、config/workspace/
+sessions path、凭据、hash、正文、session/run/tool-call ID。失败 stderr 只含固定 error code 与 cleanup code。
+
+实际执行后，把日期、ark-panel canonical commit、OpenClaw 版本、最小目标 ID、完整命令形状和脱敏
+JSON 结论新增到 current acceptance matrix；不要改写旧日期 evidence。一个 runtime 的通过不能外推到另一个。
