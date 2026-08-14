@@ -13,7 +13,8 @@
 本矩阵更新于 2026-08-14。既有行仍以各自行内 commit 为实现或证据快照；#41 的
 fixture 生命周期重复验收以 ark-panel `9663899` 为实现快照，#13、#27 与 #19/#20
 浏览器范围的 canonical commits 分别为 `c880390`、`3db3d00` 与 `1f97c0c`，#50
-成功截图合同的 canonical commit 为 `ada1548`。表中的
+成功截图合同的 canonical commit 为 `ada1548`，#48 默认关闭的当前 runtime probe 为
+`ca95431`。表中的
 commit 是产生证据或引入当前自动检查的代码 commit，不是本文档自己的 commit。
 #41 与 #47 都没有运行真实 OpenClaw、Gateway、模型或真实活会话验收。
 
@@ -75,9 +76,9 @@ commit 是产生证据或引入当前自动检查的代码 commit，不是本文
 | Pre-journal abort, cleanup, and durability fixtures | `historical pass` | deterministic in-memory/temporary-directory fixtures | 当时的 `npm test` 与 `npm run test:deployment` | 2026-07-12 | `cf67b56` | 不适用 | 只描述当时的断线 abort、内存 completed cache 和无 run journal 架构；当前 durable journal 另见自动化矩阵 | [2026-07-12 evidence](durability-results.md) |
 | `panel-claude-runtime` bootstrap injection and `memory_search` | `historical pass` | isolated live runtime | `npm run test:runtime-acceptance -- panel-claude-runtime` | 2026-07-12 | `cf67b56` | `2026.6.11` | 当次 bootstrap 5/5、memory nonce 0 results、workspace hash unchanged | [2026-07-12 evidence](runtime-acceptance-2026-07-12.md) |
 | `panel-main-runtime` bootstrap injection and `memory_search` | `failed` | isolated live runtime | `npm run test:runtime-acceptance -- panel-main-runtime` | 2026-07-12 | `cf67b56` | `2026.6.11` | 当次 bootstrap 0/5；memory tool 存在不能替代 bootstrap 注入证明 | [2026-07-12 evidence](runtime-acceptance-2026-07-12.md) |
-| Current `panel-claude-runtime` bootstrap/memory behavior | `unknown` | current runbook + superseded historical pass | `npm run test:runtime-acceptance -- panel-claude-runtime`（需显式授权） | 未执行 | `cfe53d9` | 目标 `2026.6.11` | 当前 #42 控制连接后的真实复验尚未执行；不能沿用 2026-07-12 结果 | [runtime runbook](runtime-acceptance.md) |
-| Current `panel-main-runtime` bootstrap/memory behavior | `unknown` | current runbook + superseded historical failure | `npm run test:runtime-acceptance -- panel-main-runtime`（需显式授权） | 未执行 | `cfe53d9` | 目标 `2026.6.11` | 当前 #42 控制连接后的真实复验尚未执行；历史失败也不能推断当前结果 | [runtime runbook](runtime-acceptance.md) |
-| Current `paneltest` bootstrap/memory behavior | `unknown` | current runbook, no current result | `npm run test:runtime-acceptance -- paneltest`（需显式授权） | 未执行 | `cfe53d9` | 目标 `2026.6.11` | runbook 允许的第三个 runtime，须独立证明，不能从其它 runtime 推广 | [runtime runbook](runtime-acceptance.md) |
+| Current `panel-claude-runtime` bootstrap/memory behavior | `unknown` | current default-off runbook + superseded historical pass | 显式 gate/三个 path 环境 + `npm run --silent test:runtime-acceptance -- <fixed arguments>`（需逐目标授权） | 未执行 | `ca95431` | 目标 `2026.6.11` | 当前 probe 要求唯一 config target、零 bindings、专用空 sessions root、固定 fictional canary、精确 effective tool 与受限清理；尚未执行，不能沿用 2026-07-12 结果 | [runtime runbook](runtime-acceptance.md) |
+| Current `panel-main-runtime` bootstrap/memory behavior | `unknown` | current default-off runbook + superseded historical failure | 显式 gate/三个 path 环境 + `npm run --silent test:runtime-acceptance -- <fixed arguments>`（需逐目标授权） | 未执行 | `ca95431` | 目标 `2026.6.11` | 当前 probe 的相同 fail-closed 边界尚未在此目标执行；历史失败也不能推断当前结果 | [runtime runbook](runtime-acceptance.md) |
+| Current `paneltest` bootstrap/memory behavior | `unknown` | current default-off runbook, no current result | 显式 gate/三个 path 环境 + `npm run --silent test:runtime-acceptance -- <fixed arguments>`（需逐目标授权） | 未执行 | `ca95431` | 目标 `2026.6.11` | 兼容目标仍须使用独占空 sessions root 独立证明，不能从其它 runtime 推广 | [runtime runbook](runtime-acceptance.md) |
 | `panel-claude-runtime` isolation from a concurrently active source | `partial` | isolated live generation, three calls | `npm run test:panel-claude-runtime` | 2026-07-11 | `cf67b56` | `2026.6.11` (`e085fa1`) | 专用 runtime 清理通过；真实 source 同期被外部写入，整目录不变性无法严格证明 | [isolation evidence](runtime-isolation-results.md) |
 | OpenClaw internal recall statistics/persistence outside cleaned artifacts | `unknown` | observation boundary in live runtime evidence | 无可证明不存在性的仓库命令 | 2026-07-12 | `cf67b56` | `2026.6.11` | 一次性 transcript/trajectory 已清理，但共享内部状态是否记录 recall 统计未确认 | [runtime evidence](runtime-acceptance-2026-07-12.md) |
 | Memory candidate generation and confirmed consolidation with isolated memory runtimes | `historical pass` | live isolated runtime + fictional source; one closed-loop confirmation and two candidate-only runs | 未保留为单一可重放仓库命令；必须按证据边界重新设计显式 gate 后复验 | 2026-07-22 | `218bbef` | `2026.6.11` | `panel-memory-claude`、`panel-memory-main`；零 bindings、限定有效工具、workspace/source unchanged | [2026-07-22 evidence](memory-runtime-acceptance-2026-07-22.md) |

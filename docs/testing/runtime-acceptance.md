@@ -3,6 +3,7 @@
 > **Runbook metadata，不是执行结果**
 >
 > - Date: `2026-08-14`（runbook review）
+> - ark-panel implementation: `ca95431`
 > - OpenClaw version: target `2026.6.11`
 > - Status: `unknown`（本工作项未执行 live probe）
 
