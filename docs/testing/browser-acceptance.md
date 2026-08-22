@@ -157,8 +157,11 @@ DOM 顺序为第一段文本、同一 tool 卡片、第二段文本，并显示�
 快照的单文本降级。该证据只证明 synthetic Gateway 事件中的 ordered text/tool args
 到 DOM 的投影。真实 OpenClaw 的跨事件 sequence、delta/replace，以及 upstream
 result 字段的 shape/语义均为 `unknown`，仍需 #48 的显式隔离 runtime 验收。当前
-panel 对 tool result/stdout 的 live rendering 是 `unsupported`：尚未实现，也不会显示
-其正文，需等待 upstream schema 被接受后再实现；因此 #27 仍 open。
+2026-08-22 的后续工作项把固定 OpenClaw `2026.6.11` 终态 `data.result` 接入同一
+tool 卡片，保留 JSON 结构并限制为 64 KiB；超限值显示固定省略标记。Firefox desktop
+会展开完成卡片并读取固定虚构 result，coarse-mobile 同轮 smoke 通过；完整 `npm test`
+为 566/566，browser suite 为 2/2。该证据不声称 partial result、reasoning 或真实模型
+结果内容已验收。
 
 2026-08-14 的 #19/#20 会话状态验收以 canonical commit `1f97c0c` 为证据快照，使用
 Node.js 22.22.0、Firefox 153.0.1 与 geckodriver 0.37.0 有界执行三轮完整 suite，
@@ -240,8 +243,8 @@ Linux supervisor 每次发送 `SIGTERM`/`SIGKILL` 前都按 PID 与 `/proc` star
 
 自动化覆盖 Firefox 的桌面和 coarse-pointer 移动布局，但不声称等同于真实触屏
 硬件，也不证明 Chromium/WebKit 的渲染一致性。依赖真实软件键盘、缩放、刘海
-安全区或跨浏览器排版的变化仍需相应设备/浏览器验收。#27 的真实跨事件 sequence 与
-upstream result 字段 shape/语义仍为 `unknown`；当前 panel 的 tool result/stdout live
-rendering 未实现并标为 `unsupported`，#27 仍 open。#19/#20 的 synthetic compaction
+安全区或跨浏览器排版的变化仍需相应设备/浏览器验收。#27 的真实模型结果内容仍未在
+live probe 中观察；当前实现只接受固定 OpenClaw `2026.6.11` 的终态 `data.result`，并以
+64 KiB 上限显示，不转发 partial result 或 reasoning。#19/#20 的 synthetic compaction
 也不替代 #21 live compaction。实机 OpenClaw 集成继续使用独立、显式授权的 runtime
 acceptance 流程，不能由此 fixture 替代。

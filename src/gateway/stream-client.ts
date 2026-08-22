@@ -82,7 +82,7 @@ export function resolveGatewayControlTransport(connection?: GatewayControlTransp
 export type GatewayStreamEvent =
   | { type: "connection"; state: "connected" | "disconnected" }
   | { type: "assistant_text"; runId: string; sessionKey: string; upstreamSeq: number; text: string; deltaText: string; replace: boolean }
-  | { type: "tool"; runId: string; sessionKey: string; upstreamSeq: number; callId: string; name: string; phase: "started" | "completed" | "failed"; args?: unknown };
+  | { type: "tool"; runId: string; sessionKey: string; upstreamSeq: number; callId: string; name: string; phase: "started" | "completed" | "failed"; args?: unknown; result?: unknown; isError?: boolean };
 type GatewayDataStreamEvent = Exclude<GatewayStreamEvent, { type: "connection" }>;
 
 export type GatewayStreamListener = (event: GatewayStreamEvent) => void;
@@ -159,10 +159,10 @@ function contentText(message: unknown): string | undefined {
   return text || undefined;
 }
 
-function safeArgs(value: unknown): unknown {
+function safeToolValue(value: unknown, label: string): unknown {
   if (value === undefined) return undefined;
-  try { const encoded = JSON.stringify(value); return Buffer.byteLength(encoded, "utf8") <= 64 * 1024 ? value : { omitted: true, reason: "arguments too large" }; }
-  catch { return { omitted: true, reason: "arguments are not serializable" }; }
+  try { const encoded = JSON.stringify(value); return Buffer.byteLength(encoded, "utf8") <= 64 * 1024 ? value : { omitted: true, reason: `${label} too large` }; }
+  catch { return { omitted: true, reason: `${label} is not serializable` }; }
 }
 
 export function normalizeGatewayStreamEvent(eventName: string, rawPayload: unknown): GatewayDataStreamEvent | undefined {
@@ -179,8 +179,9 @@ export function normalizeGatewayStreamEvent(eventName: string, rawPayload: unkno
     if (!data || !rawPhase || !callId || !name) return undefined;
     const phase = rawPhase === "start" ? "started" : rawPhase === "result" || rawPhase === "end" ? data.isError === true ? "failed" : "completed" : rawPhase === "error" ? "failed" : undefined;
     if (!phase) return undefined;
-    const args = safeArgs(data.args ?? data.input);
-    return { type: "tool", runId, sessionKey, upstreamSeq, callId, name, phase, ...(args !== undefined ? { args } : {}) };
+    const args = safeToolValue(data.args ?? data.input, "arguments"), result = safeToolValue(data.result, "result");
+    return { type: "tool", runId, sessionKey, upstreamSeq, callId, name, phase, ...(args !== undefined ? { args } : {}),
+      ...(result !== undefined ? { result } : {}), ...(phase !== "started" ? { isError: data.isError === true } : {}) };
   }
   return undefined;
 }

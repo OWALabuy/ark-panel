@@ -784,6 +784,8 @@ test("desktop browser acceptance covers security and session lifecycle", {
     fixture.advanceRun(createdRecordId);
     await waitText(driver, ".stream-preview", "第二段仍为脱敏内容");
     await visible(driver, ".stream-tool.completed");
+    await (await visible(driver, ".stream-tool.completed summary")).click();
+    await waitText(driver, ".stream-tool.completed .tool-result", "fixture-result");
     assert.deepEqual(await driver.executeScript("return [...document.querySelectorAll('.stream-preview .message-body > *')].map(node=>node.classList.contains('stream-tool')?'tool':node.textContent.trim())"), ["第一段虚构实时预览", "tool", "第二段仍为脱敏内容"]);
     fixture.completeRun(createdRecordId);
     await waitText(driver, "#messages", "虚构 SSE 回复：桌面键盘发送验收");

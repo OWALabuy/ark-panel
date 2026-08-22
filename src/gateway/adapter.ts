@@ -155,7 +155,7 @@ export type BridgeLifecycleCallback = (event: BridgeLifecycleEvent) => Promise<v
 export type BridgeStreamEvent =
   | { type: "connection"; state: "connected" | "disconnected" }
   | { type: "assistant_text"; upstreamSeq: number; text: string; deltaText: string; replace: boolean }
-  | { type: "tool"; upstreamSeq: number; callId: string; name: string; phase: "started" | "completed" | "failed"; args?: unknown };
+  | { type: "tool"; upstreamSeq: number; callId: string; name: string; phase: "started" | "completed" | "failed"; args?: unknown; result?: unknown; isError?: boolean };
 export type BridgeStreamCallback = (event: BridgeStreamEvent) => void;
 
 export interface BridgeOrphanCleanupRequest {

@@ -251,7 +251,7 @@ export async function startBrowserFixture({ port = 0 } = {}) {
   function advanceRun(recordId) {
     const run = activeRun(recordId);
     if (!run) throw new Error(`No active fixture run for ${recordId}`);
-    run.stream = { revision: 2, state: "streaming", text: "第一段虚构实时预览\n\n第二段仍为脱敏内容", tools: [{ callId: "fixture-tool-1", name: "fixture_lookup", phase: "completed", args: { query: "fictional-only" } }], items: [{ type: "text", sequence: 1, text: "第一段虚构实时预览" }, { type: "tool", sequence: 2, updatedSequence: 3, callId: "fixture-tool-1", name: "fixture_lookup", phase: "completed", args: { query: "fictional-only" } }, { type: "text", sequence: 4, text: "第二段仍为脱敏内容" }] };
+    run.stream = { revision: 2, state: "streaming", text: "第一段虚构实时预览\n\n第二段仍为脱敏内容", tools: [{ callId: "fixture-tool-1", name: "fixture_lookup", phase: "completed", args: { query: "fictional-only" }, result: { answer: "fixture-result" }, isError: false }], items: [{ type: "text", sequence: 1, text: "第一段虚构实时预览" }, { type: "tool", sequence: 2, updatedSequence: 3, callId: "fixture-tool-1", name: "fixture_lookup", phase: "completed", args: { query: "fictional-only" }, result: { answer: "fixture-result" }, isError: false }, { type: "text", sequence: 4, text: "第二段仍为脱敏内容" }] };
     publish(run);
     return publicRun(run);
   }

@@ -56,11 +56,14 @@ function project(events: ReadonlyMap<number, StoredEvent>, baseline?: AssistantB
     }
     const previous = toolItems.get(event.callId);
     const args = event.args ?? previous?.args;
+    const result = event.result !== undefined ? event.result : previous?.result;
     if (previous) {
       previous.updatedSequence = event.upstreamSeq;
       previous.name = event.name;
       previous.phase = event.phase;
       if (args !== undefined) previous.args = args;
+      if (result !== undefined) previous.result = result;
+      if (event.isError !== undefined) previous.isError = event.isError;
       continue;
     }
     const item: Extract<PublicRunStreamItem, { type: "tool" }> = {
@@ -70,7 +73,9 @@ function project(events: ReadonlyMap<number, StoredEvent>, baseline?: AssistantB
       callId: event.callId,
       name: event.name,
       phase: event.phase,
-      ...(args !== undefined ? { args } : {})
+      ...(args !== undefined ? { args } : {}),
+      ...(result !== undefined ? { result } : {}),
+      ...(event.isError !== undefined ? { isError: event.isError } : {})
     };
     toolItems.set(event.callId, item);
     items.push(item);
@@ -177,19 +182,26 @@ export class RunStreamProjector {
       this.testHooks.onToolIndexLookup?.(); const item = this.#toolItems.get(event.callId);
       this.testHooks.onToolIndexLookup?.(); const tool = this.#tools.get(event.callId);
       const args = event.args ?? item?.args;
+      const result = event.result !== undefined ? event.result : item?.result;
       if (item?.type === "tool") {
         item.updatedSequence = event.upstreamSeq; item.name = event.name; item.phase = event.phase;
         if (args !== undefined) item.args = args;
+        if (result !== undefined) item.result = result;
+        if (event.isError !== undefined) item.isError = event.isError;
       } else {
         const created: Extract<PublicRunStreamItem, { type: "tool" }> = { type: "tool", sequence: event.upstreamSeq, updatedSequence: event.upstreamSeq,
-          callId: event.callId, name: event.name, phase: event.phase, ...(args !== undefined ? { args } : {}) };
+          callId: event.callId, name: event.name, phase: event.phase, ...(args !== undefined ? { args } : {}),
+          ...(result !== undefined ? { result } : {}), ...(event.isError !== undefined ? { isError: event.isError } : {}) };
         this.#public.items.push(created); this.#toolItems.set(event.callId, created);
       }
       if (tool) {
         tool.name = event.name; tool.phase = event.phase;
         if (args !== undefined) tool.args = args;
+        if (result !== undefined) tool.result = result;
+        if (event.isError !== undefined) tool.isError = event.isError;
       } else {
-        const created: PublicRunTool = { callId: event.callId, name: event.name, phase: event.phase, ...(args !== undefined ? { args } : {}) };
+        const created: PublicRunTool = { callId: event.callId, name: event.name, phase: event.phase, ...(args !== undefined ? { args } : {}),
+          ...(result !== undefined ? { result } : {}), ...(event.isError !== undefined ? { isError: event.isError } : {}) };
         this.#public.tools.push(created); this.#tools.set(event.callId, created);
       }
     }

@@ -6,7 +6,7 @@ import { RunStreamProjector } from "../src/server/run-stream-projector.js";
 const events: BridgeStreamEvent[] = [
   { type: "assistant_text", upstreamSeq: 1, text: "第一段", deltaText: "第一段", replace: false },
   { type: "tool", upstreamSeq: 2, callId: "one", name: "lookup", phase: "started", args: { query: "fictional" } },
-  { type: "tool", upstreamSeq: 3, callId: "one", name: "lookup", phase: "completed" },
+  { type: "tool", upstreamSeq: 3, callId: "one", name: "lookup", phase: "completed", result: { value: "fictional" }, isError: false },
   { type: "assistant_text", upstreamSeq: 4, text: "第一段第二段", deltaText: "第二段", replace: false },
   { type: "tool", upstreamSeq: 5, callId: "two", name: "read", phase: "started" }
 ];
@@ -19,12 +19,12 @@ test("projects text and tool events into one deterministic timeline", () => {
     state: "streaming",
     text: "第一段第二段",
     tools: [
-      { callId: "one", name: "lookup", phase: "completed", args: { query: "fictional" } },
+      { callId: "one", name: "lookup", phase: "completed", args: { query: "fictional" }, result: { value: "fictional" }, isError: false },
       { callId: "two", name: "read", phase: "started" }
     ],
     items: [
       { type: "text", sequence: 1, text: "第一段" },
-      { type: "tool", sequence: 2, updatedSequence: 3, callId: "one", name: "lookup", phase: "completed", args: { query: "fictional" } },
+      { type: "tool", sequence: 2, updatedSequence: 3, callId: "one", name: "lookup", phase: "completed", args: { query: "fictional" }, result: { value: "fictional" }, isError: false },
       { type: "text", sequence: 4, text: "第二段" },
       { type: "tool", sequence: 5, updatedSequence: 5, callId: "two", name: "read", phase: "started" }
     ]

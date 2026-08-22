@@ -237,8 +237,10 @@ tip 重新开始。
 timeline 是兼容字段 `text` / `tools` 之上的公开有序投影。正常 delta 只保留线性增量；晚
 订阅时保留首个累计快照缺失的前缀。非前缀累计快照与 `replace=true` 不能伪造交错边界，
 而是降级为一个明确的文本项，同时保留已观察到的工具锚点。前端文本继续走统一安全
-Markdown renderer，tool 参数只用文本节点。固定 runtime 的真实 result 字段、重复语义、
-大小上限和脱敏规则在 #48 隔离验收前均为 unknown，因此当前不得透传 tool result/stdout。
+Markdown renderer，tool 参数和固定 OpenClaw `2026.6.11` 的终态 `result` 只用文本节点。
+终态 result 保留 JSON 结构但限制为 64 KiB，超限或不可序列化时输出固定省略标记；它只
+属于临时预览，不能替代完成后读取并验证的权威 transcript。partial result 与 reasoning
+不透传。
 
 ### 6.3 重启与 active-run 索引
 

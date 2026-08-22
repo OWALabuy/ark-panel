@@ -14,6 +14,14 @@ test("stream parser accepts full text snapshots and tool lifecycle while rejecti
   assert.deepEqual(normalizeGatewayStreamEvent("session.tool", { runId: "run", sessionKey: "agent:a:s", seq: 3, stream: "tool",
     data: { phase: "start", toolCallId: "call", name: "exec", args: { command: "true" } } }),
     { type: "tool", runId: "run", sessionKey: "agent:a:s", upstreamSeq: 3, callId: "call", name: "exec", phase: "started", args: { command: "true" } });
+  assert.deepEqual(normalizeGatewayStreamEvent("session.tool", { runId: "run", sessionKey: "agent:a:s", seq: 4, stream: "tool",
+    data: { phase: "result", toolCallId: "call", name: "exec", result: { stdout: "fictional result" }, isError: false } }),
+  { type: "tool", runId: "run", sessionKey: "agent:a:s", upstreamSeq: 4, callId: "call", name: "exec", phase: "completed",
+    result: { stdout: "fictional result" }, isError: false });
+  assert.deepEqual(normalizeGatewayStreamEvent("session.tool", { runId: "run", sessionKey: "agent:a:s", seq: 5, stream: "tool",
+    data: { phase: "result", toolCallId: "large", name: "exec", result: "x".repeat(64 * 1024), isError: true } }),
+  { type: "tool", runId: "run", sessionKey: "agent:a:s", upstreamSeq: 5, callId: "large", name: "exec", phase: "failed",
+    result: { omitted: true, reason: "result too large" }, isError: true });
   assert.equal(normalizeGatewayStreamEvent("chat", { runId: "run", sessionKey: "agent:a:s", state: "delta", message: {} }), undefined);
   for (const seq of [undefined, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) assert.equal(normalizeGatewayStreamEvent("chat", {
     runId: "run", sessionKey: "agent:a:s", ...(seq === undefined ? {} : { seq }), state: "delta", message: { content: "safe" }, deltaText: "safe"
@@ -534,7 +542,7 @@ test("observer ignores business events until the exact hello and subscriptions c
   unobserve(); observer.stop();
 });
 
-test("authenticated observer exposes only scoped tool-result shape while ordinary listeners stay normalized", async t => {
+test("authenticated observer exposes bounded tool results while schema reports stay redacted", async t => {
   const sockets: FakeSocket[] = [], events: GatewayStreamEvent[] = [];
   const collector = createToolSchemaCollector("agent:a:schema", "schema-run");
   const observer = new OpenClawStreamObserver({ url: "ws://fixture.local", token: "fixture", requestTimeoutMs: 300,
@@ -568,8 +576,9 @@ test("authenticated observer exposes only scoped tool-result shape while ordinar
   const normalizedJson = JSON.stringify(events.filter(event => event.type !== "tool" || event.runId === "schema-run"));
   assert.equal(normalizedJson.includes("private-call"), true, "ordinary normalized events preserve call identity");
   assert.equal(normalizedJson.includes("private command"), true, "ordinary normalized start events preserve bounded args");
-  for (const secret of ["private partial", "private stdout", "must never reach listener or report"])
-    assert.equal(normalizedJson.includes(secret), false, `ordinary listener leaked raw result value ${secret}`);
+  assert.equal(normalizedJson.includes("private partial"), false, "partial results are not part of the normalized contract");
+  for (const expected of ["private stdout", "must never reach listener or report"])
+    assert.equal(normalizedJson.includes(expected), true, `ordinary listener omitted bounded terminal result value ${expected}`);
   unobserve(); observer.stop();
 });
 

@@ -64,7 +64,7 @@ export type StoredPanelRun = PanelRunRecord | PanelRunTombstone;
 export interface RunRetentionOptions { retentionDays: number; now?: Date; backupConfirmed?: boolean }
 export interface RunRetentionResult { scanned: number; retired: number; retained: number }
 
-export interface PublicRunTool { callId: string; name: string; phase: "started" | "completed" | "failed"; args?: unknown }
+export interface PublicRunTool { callId: string; name: string; phase: "started" | "completed" | "failed"; args?: unknown; result?: unknown; isError?: boolean }
 export interface PublicRunTextItem { type: "text"; sequence: number; text: string }
 export interface PublicRunToolItem extends PublicRunTool { type: "tool"; sequence: number; updatedSequence: number }
 export type PublicRunStreamItem = PublicRunTextItem | PublicRunToolItem;
