@@ -54,6 +54,7 @@ export interface CompactionProbeObservation {
   compacted: boolean;
   reason?: unknown;
   upstreamCompacted?: unknown;
+  tokensBefore?: unknown;
   createCalls: number;
   compactCalls: number;
   sendCalls: number;
@@ -72,14 +73,15 @@ export function classifyCompactionProbeObservation(observation: CompactionProbeO
   const preUsage = observation.preUsage, postUsage = observation.postUsage;
   if (!preUsage || !postUsage) return "PROBE_USAGE_MISSING";
   if (preUsage.source !== "openclaw-session" || postUsage.source !== "openclaw-session") return "PROBE_USAGE_SOURCE_INVALID";
-  if (preUsage.totalTokensFresh !== true || postUsage.totalTokensFresh !== true) return "PROBE_USAGE_STALE";
-  if (typeof preUsage.totalTokens !== "number" || typeof postUsage.totalTokens !== "number" || typeof preUsage.contextTokens !== "number" ||
-    typeof postUsage.contextTokens !== "number" || !Number.isSafeInteger(preUsage.totalTokens) ||
+  if (postUsage.totalTokensFresh !== true) return "PROBE_USAGE_STALE";
+  if (typeof observation.tokensBefore !== "number" || typeof postUsage.totalTokens !== "number" ||
+    typeof preUsage.contextTokens !== "number" || typeof postUsage.contextTokens !== "number" ||
+    !Number.isSafeInteger(observation.tokensBefore) ||
     !Number.isSafeInteger(postUsage.totalTokens) || !Number.isSafeInteger(preUsage.contextTokens) ||
-    !Number.isSafeInteger(postUsage.contextTokens) || preUsage.totalTokens < 0 || postUsage.totalTokens < 0 ||
+    !Number.isSafeInteger(postUsage.contextTokens) || observation.tokensBefore <= 0 || postUsage.totalTokens < 0 ||
     preUsage.contextTokens <= 0 || postUsage.contextTokens <= 0) return "PROBE_USAGE_VALUES_INVALID";
   if (postUsage.contextTokens !== preUsage.contextTokens) return "PROBE_CONTEXT_WINDOW_CHANGED";
-  if (postUsage.totalTokens >= preUsage.totalTokens) return "PROBE_USAGE_NOT_REDUCED";
+  if (postUsage.totalTokens >= observation.tokensBefore) return "PROBE_USAGE_NOT_REDUCED";
   return null;
 }
 
@@ -323,23 +325,26 @@ export async function runCompactionLiveProbe(request: CompactionLiveProbeRequest
     const transcriptPath = join(panel.path, "sessions", PANEL_AGENT_ID, RECORD_ID, "transcript.jsonl");
     const initial = await loadPanelSession(panel.path, PANEL_AGENT_ID, RECORD_ID), initialStat = await lstat(transcriptPath);
     const initialRevision = `${initialStat.size}:${initialStat.mtimeMs}`, result = await api.compact(RECORD_ID, initialRevision);
+    const reloaded = await loadPanelSession(panel.path, PANEL_AGENT_ID, RECORD_ID), tail = reloaded.document.entries.at(-1);
     const observationError = classifyCompactionProbeObservation({ compacted: result.compacted, reason: result.reason,
       upstreamCompacted: client.upstreamCompacted,
+      tokensBefore: tail?.type === "compaction" ? tail.tokensBefore : undefined,
       createCalls: client.createCalls,
       compactCalls: client.compactCalls, sendCalls: client.sendCalls, deleteCalls: client.deleteCalls, usageCalls: client.usageCalls,
       ...(client.preUsage ? { preUsage: client.preUsage } : {}), ...(client.postUsage ? { postUsage: client.postUsage } : {}) });
     if (observationError) throw new CompactionLiveProbeError(observationError);
     const preUsage = client.preUsage, postUsage = client.postUsage;
     if (!preUsage || !postUsage) throw new CompactionLiveProbeError("PROBE_USAGE_MISSING");
-    const preTotalTokens = preUsage.totalTokens, postTotalTokens = postUsage.totalTokens, contextTokens = postUsage.contextTokens;
-    if (preTotalTokens === null || postTotalTokens === null || contextTokens === null) {
+    const tokensBefore = tail?.type === "compaction" ? tail.tokensBefore : undefined;
+    const postTotalTokens = postUsage.totalTokens, contextTokens = postUsage.contextTokens;
+    if (typeof tokensBefore !== "number" || postTotalTokens === null || contextTokens === null) {
       throw new CompactionLiveProbeError("PROBE_USAGE_VALUES_INVALID");
     }
     const index = new SessionReadIndex([{ agentId: PANEL_AGENT_ID }], panel.path), reads = new SessionReadData([{ agentId: PANEL_AGENT_ID,
       sessionsRoot: join(panel.path, "unused-source") }], panel.path, index, budget);
     const conversation = await reads.conversation(RECORD_ID) as { revision?: string; status?: { contextUsage?: OpenClawContextUsage | null } } | null;
-    const reloaded = await loadPanelSession(panel.path, PANEL_AGENT_ID, RECORD_ID), afterTokens = budget.estimate(reloaded.document, "").estimatedTokens;
-    const usage = conversation?.status?.contextUsage, tail = reloaded.document.entries.at(-1), branchTip = currentTranscriptBranch(reloaded.document).entries.at(-1);
+    const afterTokens = budget.estimate(reloaded.document, "").estimatedTokens;
+    const usage = conversation?.status?.contextUsage, branchTip = currentTranscriptBranch(reloaded.document).entries.at(-1);
     const prefixPreserved = isDeepStrictEqual(reloaded.document.entries.slice(0, -1), initial.document.entries);
     const exactCompaction = reloaded.document.entries.filter(entry => entry.type === "compaction").length === 1 && tail?.type === "compaction" &&
       typeof tail.id === "string" && branchTip?.id === tail.id;
@@ -351,7 +356,7 @@ export async function runCompactionLiveProbe(request: CompactionLiveProbeRequest
     report = Object.freeze({ schemaVersion: 1, probe: "compaction", status: "passed", version: request.expectedVersion, scenario: SCENARIO,
       preflight: Object.freeze({ explicitTarget: true, doubleGate: true, zeroBindings: true, sessionsRootIsolated: true, effectiveToolsExact: true }),
       observation: Object.freeze({ createCalls: 1, compactCalls: 1, sendCalls: 0, sameSessionUsage: true, prefixPreserved: true,
-        effectiveReduction: true, tokensBefore: preTotalTokens, postTotalTokens,
+        effectiveReduction: true, tokensBefore, postTotalTokens,
         contextTokens }),
       reload: Object.freeze({ revisionBefore: initialRevision, revisionAfter: result.revision,
         revisionChanged: true, usageAtCurrentTip: true, matchesPost: true }),

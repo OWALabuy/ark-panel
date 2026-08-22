@@ -49,7 +49,8 @@ test("fixed fictional history forces an old prefix outside OpenClaw's retained t
 
 test("compaction observation classifier returns every fixed code in priority order", () => {
   const usage = { source: "openclaw-session" as const, totalTokens: 12_000, contextTokens: 128_000, totalTokensFresh: true };
-  const valid = { compacted: true, upstreamCompacted: true, createCalls: 1, compactCalls: 1, sendCalls: 0, deleteCalls: 1, usageCalls: 2,
+  const valid = { compacted: true, upstreamCompacted: true, tokensBefore: 12_000,
+    createCalls: 1, compactCalls: 1, sendCalls: 0, deleteCalls: 1, usageCalls: 2,
     preUsage: usage, postUsage: { ...usage, totalTokens: 2_000 } };
   const cases = [
     [{ ...valid, compacted: false, createCalls: 0, preUsage: undefined }, "PROBE_COMPACTION_NOT_ACCEPTED"],
@@ -61,9 +62,9 @@ test("compaction observation classifier returns every fixed code in priority ord
     [{ ...valid, createCalls: 2, preUsage: undefined }, "PROBE_CALL_COUNTS_INVALID"],
     [{ ...valid, preUsage: undefined }, "PROBE_USAGE_MISSING"],
     [{ ...valid, preUsage: { ...usage, source: "fixture" } }, "PROBE_USAGE_SOURCE_INVALID"],
-    [{ ...valid, preUsage: { ...usage, totalTokensFresh: false } }, "PROBE_USAGE_STALE"],
-    [{ ...valid, preUsage: { ...usage, totalTokensFresh: "true" } }, "PROBE_USAGE_STALE"],
-    [{ ...valid, preUsage: { ...usage, totalTokens: null } }, "PROBE_USAGE_VALUES_INVALID"],
+    [{ ...valid, preUsage: { ...usage, totalTokens: null, totalTokensFresh: false } }, null],
+    [{ ...valid, postUsage: { ...usage, totalTokens: 2_000, totalTokensFresh: false } }, "PROBE_USAGE_STALE"],
+    [{ ...valid, tokensBefore: null }, "PROBE_USAGE_VALUES_INVALID"],
     [{ ...valid, postUsage: { ...usage, totalTokens: 2_000, contextTokens: 64_000 } }, "PROBE_CONTEXT_WINDOW_CHANGED"],
     [{ ...valid, postUsage: { ...usage, totalTokens: 12_000 } }, "PROBE_USAGE_NOT_REDUCED"],
     [valid, null]
@@ -136,7 +137,7 @@ async function fixture(t: import("node:test").TestContext, overrides: FixtureOve
     async sessionContextUsage(_agent, key) { calls.push(compacted ? "post-usage" : "pre-usage"); assert.equal(key, sessionKey);
       return { source: "openclaw-session", totalTokens: compacted ? overrides.postTotalTokens ?? 2_000 : 12_000,
         contextTokens: compacted ? overrides.postContextTokens ?? 128_000 : 128_000,
-        totalTokensFresh: compacted ? overrides.postFresh ?? true : overrides.preFresh ?? true }; },
+        totalTokensFresh: compacted ? overrides.postFresh ?? true : overrides.preFresh ?? false }; },
     async compactSession(key) { calls.push("compact"); assert.equal(key, sessionKey); compacted = true;
       if (overrides.compactFails) throw new Error("private compact failure");
       const history = (await readFile(transcriptPath, "utf8")).trim().split("\n").map(line => JSON.parse(line) as { id?: string });
@@ -219,8 +220,7 @@ test("compaction config overrides are rejected before create so the fixed cut po
 });
 
 test("fresh decreasing same-window usage is mandatory", async t => {
-  for (const [overrides, code] of [[{ preFresh: false }, "PROBE_USAGE_STALE"],
-    [{ postFresh: false }, "PROBE_USAGE_STALE"], [{ postTotalTokens: -1 }, "PROBE_USAGE_VALUES_INVALID"],
+  for (const [overrides, code] of [[{ postFresh: false }, "PROBE_USAGE_STALE"], [{ postTotalTokens: -1 }, "PROBE_USAGE_VALUES_INVALID"],
     [{ postTotalTokens: 12_000 }, "PROBE_USAGE_NOT_REDUCED"], [{ postTotalTokens: 13_000 }, "PROBE_USAGE_NOT_REDUCED"],
     [{ postContextTokens: 64_000 }, "PROBE_CONTEXT_WINDOW_CHANGED"]] satisfies readonly [FixtureOverrides, string][]) {
     const value = await fixture(t, overrides);

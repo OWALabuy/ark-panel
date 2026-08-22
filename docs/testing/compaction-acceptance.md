@@ -55,8 +55,9 @@ cleanup uncertainty fails closed.
 
 A pass requires all of the following from one created session and one compact call:
 
-- fresh safe-integer pre/post usage from `openclaw-session`, with the same context window and a
-  strictly smaller post total;
+- a positive safe-integer pre-compaction total from the verified OpenClaw compaction entry, plus a
+  fresh safe-integer post total from the same OpenClaw session registry; the pre/post registry rows
+  must report the same positive context window and the post total must be strictly smaller;
 - the original transcript prefix unchanged, exactly one verified compaction entry at the current
   branch tip, and a changed authoritative revision;
 - a fresh `SessionReadIndex` / `SessionReadData` reload whose revision and current-tip usage match
