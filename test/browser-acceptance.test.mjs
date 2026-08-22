@@ -431,10 +431,22 @@ test("desktop browser acceptance covers security and session lifecycle", {
       assert.equal(new Set(appearanceMatrix.filter(entry => entry.theme === theme).map(entry => entry.accentColor)).size, 7);
     }
     assert.equal(new Set(appearanceMatrix.map(entry => entry.surface)).size, 8);
-    assert.equal(await driver.executeScript(`
+    const preferredTheme = await driver.executeScript(
+      "return matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'"
+    );
+    for (const accent of new Set(appearanceMatrix.map(entry => entry.accent))) {
+      const system = appearanceMatrix.find(entry => entry.theme === "system" && entry.accent === accent);
+      const explicit = appearanceMatrix.find(entry => entry.theme === preferredTheme && entry.accent === accent);
+      assert.deepEqual({ ...system, theme: preferredTheme }, explicit);
+    }
+    const appearanceHash = await driver.executeScript(`
       return crypto.subtle.digest("SHA-256",new TextEncoder().encode(JSON.stringify(arguments[0])))
         .then(bytes=>[...new Uint8Array(bytes)].map(value=>value.toString(16).padStart(2,"0")).join(""))
-    `, appearanceMatrix), "fa06bed07f7526d5736cff3b3e0b29a885cbde2829caab57c0922b01825078b1");
+    `, appearanceMatrix);
+    assert.equal(new Set([
+      "fa06bed07f7526d5736cff3b3e0b29a885cbde2829caab57c0922b01825078b1",
+      "ee77933743a80948ff0b330a89cd79479c69eaa95debd49cce9c78df7f55acf2"
+    ]).has(appearanceHash), true);
     await driver.manage().window().setRect({ width: 760, height: 844, x: 0, y: 0 });
     assert.equal(await driver.executeScript("return getComputedStyle(document.querySelector('.agents')).position"), "absolute");
     assert.deepEqual(await driver.executeScript(`
