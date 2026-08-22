@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { constants } from "node:fs";
-import { lstat, open, readdir, realpath } from "node:fs/promises";
+import { constants, type BigIntStats } from "node:fs";
+import { lstat, open, opendir, readdir, realpath, rmdir, unlink } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type { CreatedSession, GatewayClient } from "./adapter.js";
@@ -21,6 +21,9 @@ const BOOTSTRAP = ["AGENTS.md", "TOOLS.md", "SOUL.md", "USER.md", "MEMORY.md"] a
 const REQUIRED_CONFIGURED_TOOLS = ["browser", "canvas", "memory_search"] as const;
 const MAX_WORKSPACE_FILES = 1_000;
 const MAX_WORKSPACE_BYTES = 16 * 1024 * 1024;
+const MAX_SKILL_PROMPT_FILES = 8;
+const MAX_SKILL_PROMPT_PREFIXES = 8;
+const MAX_SKILL_PROMPT_BYTES = 4 * 1024 * 1024;
 
 export interface RuntimeAcceptanceRequest {
   agentId: string; configPath: string; sessionsRoot: string; workspaceRoot: string; expectedVersion: string;
@@ -182,19 +185,24 @@ function directMemorySearch(entries: readonly JsonObject[]): string | undefined 
   const calls: Array<{ entry: JsonObject; index: number; id: string; query: string }> = [];
   const results: Array<{ entry: JsonObject; index: number; id: string; content: string }> = [];
   for (const [index, entry] of entries.entries()) {
-    const message = object(entry.message), content = message?.content;
-    if (!Array.isArray(content)) continue;
+    const message = object(entry.message);
+    if (!message) continue;
+    if (message.role === "toolResult") {
+      if (entry.type !== "message" || !Array.isArray(message.content)) return undefined;
+      const id = typeof message.toolCallId === "string" ? message.toolCallId : "";
+      if (!id || message.toolName !== "memory_search" || message.isError !== false) return undefined;
+      results.push({ entry, index, id, content: resultText(message) });
+    }
+    if (!Array.isArray(message.content)) continue;
+    const content = message.content;
     for (const raw of content) {
       const block = object(raw); if (!block) continue;
-      if (block.type === "tool_use" || block.type === "toolCall") {
-        const input = object(block.input ?? block.args), id = typeof block.id === "string" ? block.id : typeof block.toolCallId === "string" ? block.toolCallId : "";
-        if (message?.role !== "assistant" || block.name !== "memory_search" || !id || typeof input?.query !== "string") return undefined;
+      if (block.type === "tool_use" || block.type === "tool_result" || block.type === "toolResult") return undefined;
+      if (block.type === "toolCall") {
+        const input = object(block.arguments), id = typeof block.id === "string" ? block.id : "";
+        if (entry.type !== "message" || message.role !== "assistant" || block.name !== "memory_search" || !id ||
+          typeof input?.query !== "string") return undefined;
         calls.push({ entry, index, id, query: input.query });
-      }
-      if (block.type === "tool_result" || block.type === "toolResult") {
-        const id = typeof block.tool_use_id === "string" ? block.tool_use_id : typeof block.toolCallId === "string" ? block.toolCallId : "";
-        if (message?.role !== "toolResult" || !id) return undefined;
-        results.push({ entry, index, id, content: resultText(block) });
       }
     }
   }
@@ -203,7 +211,7 @@ function directMemorySearch(entries: readonly JsonObject[]): string | undefined 
     result.index <= call.index || typeof call.entry.id !== "string" || result.entry.parentId !== call.entry.id ||
     !result.content.includes(RESULT_MARKER) || typeof result.entry.id !== "string") return undefined;
   const summaries = entries.flatMap((entry, index) => {
-    if (index <= result.index || entry.parentId !== result.entry.id) return [];
+    if (index <= result.index || entry.type !== "message" || entry.parentId !== result.entry.id) return [];
     const message = object(entry.message); if (message?.role !== "assistant") return [];
     if (typeof message.content === "string") return [{ text: message.content }];
     if (!Array.isArray(message.content)) return [];
@@ -213,6 +221,78 @@ function directMemorySearch(entries: readonly JsonObject[]): string | undefined 
     return texts.length ? [{ text: texts.join("\n") }] : [];
   });
   return summaries.length === 1 ? summaries[0]!.text : undefined;
+}
+
+export async function cleanupOwnedSkillPromptCache(root: string, agentId: string, identity: LiveProbeRootIdentity,
+  hooks: Readonly<{ beforeDelete?(): Promise<void> }> = {}): Promise<void> {
+  await inspectLiveProbeRoot(root, agentId, identity,
+    code => new RuntimeAcceptanceError(code));
+  const cache = join(root, "skills-prompts"); let cacheStat: BigIntStats;
+  try { cacheStat = await lstat(cache, { bigint: true }); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return; throw error; }
+  const uid = typeof process.getuid === "function" ? BigInt(process.getuid()) : cacheStat.uid;
+  const directorySafe = (stat: BigIntStats) => stat.isDirectory() && !stat.isSymbolicLink() && stat.dev === identity.dev &&
+    stat.uid === uid && (stat.mode & 0o077n) === 0n;
+  const assertDirectoryIdentity = async (path: string, expected: BigIntStats): Promise<void> => {
+    const current = await lstat(path, { bigint: true });
+    if (!directorySafe(current) || current.dev !== expected.dev || current.ino !== expected.ino) {
+      throw new RuntimeAcceptanceError("PROBE_SKILL_CACHE_CHANGED");
+    }
+  };
+  if (!directorySafe(cacheStat)) throw new RuntimeAcceptanceError("PROBE_SKILL_CACHE_UNSAFE");
+  const algorithm = join(cache, "sha256"), algorithmStat = await lstat(algorithm, { bigint: true });
+  if (!directorySafe(algorithmStat)) throw new RuntimeAcceptanceError("PROBE_SKILL_CACHE_UNSAFE");
+  let prefixCount = 0, fileCount = 0, totalBytes = 0n;
+  const files: Array<{ path: string; stat: BigIntStats; directory: string; directoryStat: BigIntStats }> = [];
+  const directories: Array<{ path: string; stat: BigIntStats }> = [];
+  const algorithmDirectory = await opendir(algorithm);
+  for await (const prefixEntry of algorithmDirectory) {
+    const prefix = prefixEntry.name;
+    if (++prefixCount > MAX_SKILL_PROMPT_PREFIXES) throw new RuntimeAcceptanceError("PROBE_SKILL_CACHE_TOO_LARGE");
+    if (!/^[a-f0-9]{2}$/u.test(prefix)) throw new RuntimeAcceptanceError("PROBE_SKILL_CACHE_UNSAFE");
+    const directory = join(algorithm, prefix), stat = await lstat(directory, { bigint: true });
+    if (!directorySafe(stat)) throw new RuntimeAcceptanceError("PROBE_SKILL_CACHE_UNSAFE");
+    directories.push({ path: directory, stat });
+    const prefixDirectory = await opendir(directory);
+    for await (const entry of prefixDirectory) {
+      const name = entry.name;
+      if (++fileCount > MAX_SKILL_PROMPT_FILES) throw new RuntimeAcceptanceError("PROBE_SKILL_CACHE_TOO_LARGE");
+      if (!/^[a-f0-9]{64}\.txt$/u.test(name)) throw new RuntimeAcceptanceError("PROBE_SKILL_CACHE_UNSAFE");
+      const path = join(directory, name), file = await lstat(path, { bigint: true });
+      totalBytes += file.size;
+      if (!file.isFile() || file.isSymbolicLink() || file.dev !== identity.dev || file.uid !== uid || file.nlink !== 1n ||
+        (file.mode & 0o077n) !== 0n) {
+        throw new RuntimeAcceptanceError("PROBE_SKILL_CACHE_UNSAFE");
+      }
+      if (totalBytes > BigInt(MAX_SKILL_PROMPT_BYTES)) throw new RuntimeAcceptanceError("PROBE_SKILL_CACHE_TOO_LARGE");
+      files.push({ path, stat: file, directory, directoryStat: stat });
+    }
+  }
+  await hooks.beforeDelete?.();
+  for (const file of files) {
+    await assertDirectoryIdentity(cache, cacheStat); await assertDirectoryIdentity(algorithm, algorithmStat);
+    await assertDirectoryIdentity(file.directory, file.directoryStat);
+    const current = await lstat(file.path, { bigint: true });
+    if (!current.isFile() || current.isSymbolicLink() || current.dev !== file.stat.dev || current.ino !== file.stat.ino ||
+      current.uid !== file.stat.uid || current.mode !== file.stat.mode || current.nlink !== file.stat.nlink ||
+      current.size !== file.stat.size || current.mtimeNs !== file.stat.mtimeNs || current.ctimeNs !== file.stat.ctimeNs) {
+      throw new RuntimeAcceptanceError("PROBE_SKILL_CACHE_CHANGED");
+    }
+    await unlink(file.path);
+    await assertDirectoryIdentity(cache, cacheStat); await assertDirectoryIdentity(algorithm, algorithmStat);
+    await assertDirectoryIdentity(file.directory, file.directoryStat);
+  }
+  for (const directory of directories) {
+    await assertDirectoryIdentity(cache, cacheStat); await assertDirectoryIdentity(algorithm, algorithmStat);
+    await assertDirectoryIdentity(directory.path, directory.stat);
+    await rmdir(directory.path);
+    await assertDirectoryIdentity(cache, cacheStat); await assertDirectoryIdentity(algorithm, algorithmStat);
+  }
+  await assertDirectoryIdentity(cache, cacheStat); await assertDirectoryIdentity(algorithm, algorithmStat);
+  await rmdir(algorithm); await assertDirectoryIdentity(cache, cacheStat);
+  await rmdir(cache);
+  await inspectLiveProbeRoot(root, agentId, identity,
+    code => new RuntimeAcceptanceError(code));
 }
 
 function runtimeSummary(text: string): { bootstrap: Record<typeof BOOTSTRAP[number], true>; skillCount: number } {
@@ -315,7 +395,10 @@ export async function runRuntimeAcceptance(request: RuntimeAcceptanceRequest,
         catch { cleanupCode = "PROBE_ABORT_UNCONFIRMED"; }
       }
       if (safe) {
-        try { await cleanup(dependencies.client, created, request, rootIdentity); }
+        try {
+          await cleanup(dependencies.client, created, request, rootIdentity);
+          await cleanupOwnedSkillPromptCache(request.sessionsRoot, request.agentId, rootIdentity);
+        }
         catch { cleanupCode = "PROBE_CLEANUP_FAILED"; }
       }
     }

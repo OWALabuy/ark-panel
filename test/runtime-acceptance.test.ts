@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmod, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, readFile, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 import type { GatewayClient } from "../src/gateway/adapter.js";
 import { liveProbeRuntimeSnapshot } from "../src/gateway/live-probe-preflight.js";
-import { RuntimeAcceptanceError, parseRuntimeAcceptanceArguments, runRuntimeAcceptance,
+import { cleanupOwnedSkillPromptCache, RuntimeAcceptanceError, parseRuntimeAcceptanceArguments, runRuntimeAcceptance,
   workspaceSnapshot, type RuntimeAcceptanceDependencies, type RuntimeAcceptanceRequest } from "../src/gateway/runtime-acceptance.js";
 import { tempFixture } from "./test-helpers.js";
 
@@ -50,7 +50,9 @@ async function fixture(t: import("node:test").TestContext, overrides: { gate?: s
   configuredTools?: string[]; bootstrapNames?: string[]; rootIdentityMismatch?: boolean; resultText?: string;
   resultBlocks?: boolean; preexistingRootFile?: boolean;
   emptyRegistryBefore?: boolean; emptyRegistryAfterCleanup?: boolean; invalidRegistryBefore?: boolean;
-  transcriptMutation?: "assistant-result" | "duplicate-result" | "unmatched-result" | "out-of-order" } = {}) {
+  skillsCache?: "valid" | "unexpected";
+  transcriptMutation?: "assistant-result" | "duplicate-result" | "unmatched-result" | "out-of-order" | "provider-result" |
+    "result-error" | "additive-provider" | "additive-string-result" | "nonmessage-call" | "nonmessage-result" } = {}) {
   const root = await tempFixture(t, "runtime-acceptance-"), workspaceRoot = join(root, "workspace");
   const sessionsRoot = join(root, "agents", agentId, "sessions"), configPath = join(root, "openclaw.json");
   await mkdir(join(workspaceRoot, "memory"), { recursive: true, mode: 0o700 });
@@ -75,17 +77,30 @@ async function fixture(t: import("node:test").TestContext, overrides: { gate?: s
     async effectiveTools() { calls.push("tools"); return { agentId, scope: "effective-session-tools", toolIds: overrides.tools ?? ["memory_search"] }; },
     async send(key, _prompt, runId) { calls.push("send"); assert.equal(key, sessionKey);
       const user = { type: "message", id: "u1", parentId: null, message: { role: "user", content: "fixture" } };
-      const call = { type: "message", id: "a1", parentId: "u1", message: { role: "assistant", content: [
-        { type: "tool_use", id: "call-1", name: "memory_search", input: { query: "ARK_PANEL_RUNTIME_ACCEPTANCE_QUERY_V1" } }] } };
-      const result = { type: "message", id: "r1", parentId: "a1", message: { role: overrides.transcriptMutation === "assistant-result" ? "assistant" : "toolResult", content: [
-        { type: "tool_result", tool_use_id: overrides.transcriptMutation === "unmatched-result" ? "other-call" : "call-1",
-          content: overrides.resultBlocks ? [{ type: "text", text: "ARK_PANEL_RUNTIME_ACCEPTANCE_RESULT_V1" }] :
-            overrides.resultText ?? "ARK_PANEL_RUNTIME_ACCEPTANCE_RESULT_V1" }] } };
+      const call = { type: overrides.transcriptMutation === "nonmessage-call" ? "event" : "message", id: "a1", parentId: "u1", message: { role: "assistant", content: [
+        { type: "toolCall", id: "call-1", name: "memory_search", arguments: { query: "ARK_PANEL_RUNTIME_ACCEPTANCE_QUERY_V1" } }] } };
+      const nativeResult = { role: overrides.transcriptMutation === "assistant-result" ? "assistant" : "toolResult",
+        toolCallId: overrides.transcriptMutation === "unmatched-result" ? "other-call" : "call-1", toolName: "memory_search",
+        isError: overrides.transcriptMutation === "result-error", content: overrides.resultBlocks ?
+          [{ type: "text", text: "ARK_PANEL_RUNTIME_ACCEPTANCE_RESULT_V1" }] :
+          [{ type: "text", text: overrides.resultText ?? "ARK_PANEL_RUNTIME_ACCEPTANCE_RESULT_V1" }] };
+      const providerResult = { role: "toolResult", content: [{ type: "tool_result", tool_use_id: "call-1",
+        content: "ARK_PANEL_RUNTIME_ACCEPTANCE_RESULT_V1" }] };
+      const result = { type: overrides.transcriptMutation === "nonmessage-result" ? "event" : "message", id: "r1", parentId: "a1",
+        message: overrides.transcriptMutation === "provider-result" ? providerResult : nativeResult };
+      const additive = overrides.transcriptMutation === "additive-provider" ? [{ type: "message", id: "rp", parentId: "a1",
+        message: providerResult }] : overrides.transcriptMutation === "additive-string-result" ? [{ type: "message", id: "rs", parentId: "a1",
+        message: { role: "toolResult", toolCallId: "call-1", toolName: "memory_search", isError: false,
+          content: "ARK_PANEL_RUNTIME_ACCEPTANCE_RESULT_V1" } }] : [];
       const summary = { type: "message", id: "a2", parentId: "r1", message: { role: "assistant", content: JSON.stringify({
         bootstrapNames: overrides.bootstrapNames ?? ["AGENTS.md", "TOOLS.md", "SOUL.md", "USER.md", "MEMORY.md"], skillNames: ["fixture-skill"] }) } };
       const entries = overrides.transcriptMutation === "out-of-order" ? [user, result, call, summary] : [user, call, result,
-        ...(overrides.transcriptMutation === "duplicate-result" ? [{ ...result, id: "r2" }] : []), summary];
+        ...(overrides.transcriptMutation === "duplicate-result" ? [{ ...result, id: "r2" }] : []), ...additive, summary];
       await writeFile(transcriptPath, `${await readFile(transcriptPath, "utf8")}${entries.map(entry => JSON.stringify(entry)).join("\n")}\n`);
+      if (overrides.skillsCache) {
+        const cache = join(sessionsRoot, "skills-prompts", "sha256", "aa"); await mkdir(cache, { recursive: true, mode: 0o700 });
+        await writeFile(join(cache, overrides.skillsCache === "valid" ? `${"a".repeat(64)}.txt` : "unexpected.txt"), "fixture", { mode: 0o600 });
+      }
       return { runId }; },
     async waitForCompletion() { calls.push("wait"); if (overrides.waitFails) throw new Error("unknown outcome"); },
     async abort(_key, runId) { calls.push(`abort:${runId ?? "none"}`); },
@@ -142,12 +157,80 @@ test("query echo and no-result text cannot satisfy the distinct result marker", 
   }
 });
 
-test("tool result sequence rejects assistant forgery, duplicate, unmatched, and out-of-order rows", async t => {
-  for (const transcriptMutation of ["assistant-result", "duplicate-result", "unmatched-result", "out-of-order"] as const) {
+test("tool result sequence rejects forged, provider, malformed, duplicate, unmatched, and out-of-order rows", async t => {
+  for (const transcriptMutation of ["assistant-result", "provider-result", "result-error", "duplicate-result", "unmatched-result",
+    "out-of-order", "additive-provider", "additive-string-result", "nonmessage-call", "nonmessage-result"] as const) {
     const value = await fixture(t, { transcriptMutation });
     await assert.rejects(runRuntimeAcceptance(value.request, value.dependencies),
       (error: unknown) => (error as RuntimeAcceptanceError).code === "PROBE_MEMORY_RESULT_INVALID");
     assert.equal(value.calls.includes("delete"), true);
+  }
+});
+
+test("a newly generated bounded native skill-prompt cache is removed without reading its contents", async t => {
+  const valid = await fixture(t, { skillsCache: "valid" });
+  assert.equal((await runRuntimeAcceptance(valid.request, valid.dependencies)).status, "passed");
+  assert.deepEqual(await readdir(valid.request.sessionsRoot), []);
+
+  const unexpected = await fixture(t, { skillsCache: "unexpected" });
+  await assert.rejects(runRuntimeAcceptance(unexpected.request, unexpected.dependencies), (error: unknown) => {
+    assert.equal((error as RuntimeAcceptanceError).cleanupCode, "PROBE_CLEANUP_FAILED"); return true;
+  });
+  assert.equal((await readdir(join(unexpected.request.sessionsRoot, "skills-prompts", "sha256", "aa"))).includes("unexpected.txt"), true);
+});
+
+async function skillCacheFixture(t: import("node:test").TestContext): Promise<{ sessionsRoot: string; identity: { dev: bigint; ino: bigint };
+  prefix: string }> {
+  const root = await tempFixture(t, "runtime-skill-cache-"), sessionsRoot = join(root, "agents", agentId, "sessions");
+  const prefix = join(sessionsRoot, "skills-prompts", "sha256", "aa");
+  await mkdir(prefix, { recursive: true, mode: 0o700 });
+  const stat = await lstat(sessionsRoot, { bigint: true });
+  return { sessionsRoot, identity: { dev: stat.dev, ino: stat.ino }, prefix };
+}
+
+test("skill-prompt cleanup rejects capacity, links, and identity replacement before deletion", async t => {
+  const tooMany = await skillCacheFixture(t);
+  for (let index = 0; index < 9; index++) await writeFile(join(tooMany.prefix, `${index.toString(16).padStart(64, "0")}.txt`), "x", { mode: 0o600 });
+  await assert.rejects(cleanupOwnedSkillPromptCache(tooMany.sessionsRoot, agentId, tooMany.identity),
+    (error: unknown) => (error as RuntimeAcceptanceError).code === "PROBE_SKILL_CACHE_TOO_LARGE");
+  assert.equal((await readdir(tooMany.prefix)).length, 9);
+
+  const oversized = await skillCacheFixture(t), oversizedPath = join(oversized.prefix, `${"b".repeat(64)}.txt`);
+  await writeFile(oversizedPath, Buffer.alloc(4 * 1024 * 1024 + 1), { mode: 0o600 });
+  await assert.rejects(cleanupOwnedSkillPromptCache(oversized.sessionsRoot, agentId, oversized.identity),
+    (error: unknown) => (error as RuntimeAcceptanceError).code === "PROBE_SKILL_CACHE_TOO_LARGE");
+
+  const hardlinked = await skillCacheFixture(t), first = join(hardlinked.prefix, `${"c".repeat(64)}.txt`);
+  await writeFile(first, "x", { mode: 0o600 }); await link(first, join(hardlinked.prefix, `${"d".repeat(64)}.txt`));
+  await assert.rejects(cleanupOwnedSkillPromptCache(hardlinked.sessionsRoot, agentId, hardlinked.identity),
+    (error: unknown) => (error as RuntimeAcceptanceError).code === "PROBE_SKILL_CACHE_UNSAFE");
+
+  const symlinked = await skillCacheFixture(t), target = join(symlinked.prefix, `${"e".repeat(64)}.txt`);
+  await writeFile(target, "x", { mode: 0o600 }); await symlink(target, join(symlinked.prefix, `${"f".repeat(64)}.txt`));
+  await assert.rejects(cleanupOwnedSkillPromptCache(symlinked.sessionsRoot, agentId, symlinked.identity),
+    (error: unknown) => (error as RuntimeAcceptanceError).code === "PROBE_SKILL_CACHE_UNSAFE");
+
+  const replaced = await skillCacheFixture(t), original = join(replaced.prefix, `${"1".repeat(64)}.txt`);
+  await writeFile(original, "original", { mode: 0o600 });
+  await assert.rejects(cleanupOwnedSkillPromptCache(replaced.sessionsRoot, agentId, replaced.identity, { async beforeDelete() {
+    await rename(original, `${original}.moved`); await writeFile(original, "replacement", { mode: 0o600 });
+  } }), (error: unknown) => (error as RuntimeAcceptanceError).code === "PROBE_SKILL_CACHE_CHANGED");
+  assert.equal(await readFile(original, "utf8"), "replacement");
+
+  for (const ancestor of ["algorithm", "cache"] as const) {
+    const value = await skillCacheFixture(t), file = join(value.prefix, `${ancestor === "algorithm" ? "2" : "3"}`.repeat(64) + ".txt");
+    await writeFile(file, "must-remain", { mode: 0o600 });
+    let preserved: string;
+    await assert.rejects(cleanupOwnedSkillPromptCache(value.sessionsRoot, agentId, value.identity, { async beforeDelete() {
+      if (ancestor === "algorithm") {
+        const algorithm = join(value.sessionsRoot, "skills-prompts", "sha256"), moved = `${algorithm}.moved`;
+        await rename(algorithm, moved); await symlink(moved, algorithm); preserved = join(moved, "aa", file.slice(value.prefix.length + 1));
+      } else {
+        const cache = join(value.sessionsRoot, "skills-prompts"), moved = `${cache}.moved`;
+        await rename(cache, moved); await symlink(moved, cache); preserved = join(moved, "sha256", "aa", file.slice(value.prefix.length + 1));
+      }
+    } }), (error: unknown) => (error as RuntimeAcceptanceError).code === "PROBE_SKILL_CACHE_CHANGED");
+    assert.equal(await readFile(preserved!, "utf8"), "must-remain");
   }
 });
 
