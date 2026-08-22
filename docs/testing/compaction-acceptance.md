@@ -22,6 +22,15 @@ object, which the probe normalizes as empty. Any nonempty registry, extra key, p
 other file fails closed. The workspace must be empty before the run. The strict config must contain
 exactly one matching agent entry whose workspace is that exact path; the newly created transcript must be
 empty and belong to the returned session before the probe replaces it with fictional history.
+The agent must use the pinned OpenClaw `2026.6.11` compaction defaults: the config must not override
+`agents.defaults.compaction` (the reviewed defaults retain about 20,000 recent tokens and reserve
+16,384 tokens). Any compaction override fails before session creation.
+
+This probe makes one billed provider summarization request. Its fixed fictional input contains
+about 35,875 OpenClaw heuristic tokens in the old prefix plus about 24,000 in the retained tail;
+the reviewed default permits up to about 13,107 output tokens. The provider's actual tokenizer,
+context use, latency, and charge may differ. Authorization must therefore explicitly cover a target
+model with enough context and the cost of this one fixed-size request.
 
 ```sh
 PANEL_ALLOW_COMPACTION_LIVE_PROBE=1 \

@@ -24,6 +24,8 @@ const CLEANUP_CONFIRMATION = "delete-created-session-v1";
 const RECORD_ID = "compaction-probe-record";
 const PANEL_AGENT_ID = "compaction-probe-panel";
 const PANEL_ROOT_PREFIX = "ark-panel-compaction-probe-";
+export const COMPACTION_PROBE_CONTEXT_BUDGET = 300_000;
+export const COMPACTION_PROBE_RECENT_CHARACTER_FLOOR = 80_000;
 const PANEL_ROOT_CONTENTS = new Set([
   "sessions", `sessions/${PANEL_AGENT_ID}`, `sessions/${PANEL_AGENT_ID}/${RECORD_ID}`,
   `sessions/${PANEL_AGENT_ID}/${RECORD_ID}/metadata.json`, `sessions/${PANEL_AGENT_ID}/${RECORD_ID}/transcript.jsonl`
@@ -130,14 +132,27 @@ function validateRequest(request: CompactionLiveProbeRequest): void {
   }
 }
 
-function fixedHistory(): TranscriptDocument {
+export function compactionProbeHistory(): TranscriptDocument {
   return { header: { type: "session", version: 3, id: "10000000-0000-4000-8000-000000000001", timestamp: "2026-08-14T00:00:00.000Z",
     panel: { recordId: RECORD_ID, createdAt: "2026-08-14T00:00:00.000Z", title: "Fictional compaction probe" } }, entries: [
     { type: "message", id: "probe-u1", parentId: null, timestamp: "2026-08-14T00:00:01.000Z",
-      message: { role: "user", content: "Fictional old context. ".repeat(500) } },
+      message: { role: "user", content: "Fictional old context for summarization. ".repeat(3_500) } },
     { type: "message", id: "probe-a1", parentId: "probe-u1", timestamp: "2026-08-14T00:00:02.000Z",
-      message: { role: "assistant", content: "Fictional kept tail." } }
+      message: { role: "assistant", content: "Fictional acknowledgement before the retained tail." } },
+    { type: "message", id: "probe-u2", parentId: "probe-a1", timestamp: "2026-08-14T00:00:03.000Z",
+      message: { role: "user", content: "Fictional recent context that must remain after compaction. ".repeat(1_600) } },
+    { type: "message", id: "probe-a2", parentId: "probe-u2", timestamp: "2026-08-14T00:00:04.000Z",
+      message: { role: "assistant", content: "Fictional retained tail." } }
   ] };
+}
+
+function compactionConfigDefaults(config: Readonly<Record<string, unknown>>): string | null {
+  const agents = config.agents;
+  if (!agents || typeof agents !== "object" || Array.isArray(agents)) return "PROBE_AGENT_CONFIG_INVALID";
+  const defaults = (agents as Readonly<Record<string, unknown>>).defaults;
+  if (defaults === undefined) return null;
+  if (!defaults || typeof defaults !== "object" || Array.isArray(defaults)) return "PROBE_AGENT_CONFIG_INVALID";
+  return Object.prototype.hasOwnProperty.call(defaults, "compaction") ? "PROBE_COMPACTION_CONFIG_OVERRIDE" : null;
 }
 
 async function ownedPanelRoot(parent: string): Promise<OwnedPanelRoot> {
@@ -271,7 +286,7 @@ export async function runCompactionLiveProbe(request: CompactionLiveProbeRequest
   }
   const fail = (code: string) => new CompactionLiveProbeError(code);
   const inspectConfig = dependencies.inspectConfig ?? ((path, agent, expected) =>
-    inspectLiveProbeConfig(path, agent, expected, fail, request.workspaceRoot));
+    inspectLiveProbeConfig(path, agent, expected, fail, request.workspaceRoot, compactionConfigDefaults));
   const inspectRoot = dependencies.inspectRoot ?? ((path, agent, expected) => inspectLiveProbeRoot(path, agent, expected, fail));
   const inspectCreated = dependencies.inspectCreated ?? ((created, value, root) => inspectLiveProbeCreatedSession(created, value.sessionsRoot, value.agentId, root, fail));
   const roots = new Map([[request.agentId, request.sessionsRoot]]);
@@ -296,7 +311,8 @@ export async function runCompactionLiveProbe(request: CompactionLiveProbeRequest
   let panel: OwnedPanelRoot | undefined, primary: unknown, report: CompactionLiveProbeReport | undefined, cleanupCode: string | null = null;
   try {
     panel = await createRoot(request.panelRootParent);
-    const history = fixedHistory(), budget = new ConservativeContextBudget(100_000), beforeTokens = budget.estimate(history, "").estimatedTokens;
+    const history = compactionProbeHistory(), budget = new ConservativeContextBudget(COMPACTION_PROBE_CONTEXT_BUDGET);
+    const beforeTokens = budget.assertWithinBudget(history, "").estimatedTokens;
     await createPanelSession(panel.path, PANEL_AGENT_ID, history, { recordId: RECORD_ID, createdAt: "2026-08-14T00:00:00.000Z" });
     const operations = new SessionOperationCoordinator(), client = new RecordingCompactionClient(dependencies.client, request, rootIdentity,
       inspectCreated, inspectRoot, cleanup);

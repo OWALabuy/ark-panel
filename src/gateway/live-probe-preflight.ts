@@ -7,6 +7,7 @@ import type { CreatedSession } from "./adapter.js";
 export interface LiveProbeRootIdentity { dev: bigint; ino: bigint }
 export interface LiveProbeConfigIdentity { dev: bigint; ino: bigint; size: bigint; mtimeNs: bigint; digest: string }
 export interface LiveProbeRuntimeSnapshotDependencies { afterRegistryRead?(path: string): Promise<void> }
+export type LiveProbeConfigValidator = (config: Readonly<Record<string, unknown>>) => string | null;
 
 const MAX_EMPTY_REGISTRY_BYTES = 1_024n;
 
@@ -34,7 +35,8 @@ async function safeJsonFile(path: string, fail: Failure): Promise<{ value: unkno
 }
 
 export async function inspectLiveProbeConfig(configPath: string, agentId: string,
-  expected?: LiveProbeConfigIdentity, fail: Failure = defaultFailure, workspaceRoot?: string): Promise<LiveProbeConfigIdentity> {
+  expected?: LiveProbeConfigIdentity, fail: Failure = defaultFailure, workspaceRoot?: string,
+  validate?: LiveProbeConfigValidator): Promise<LiveProbeConfigIdentity> {
   if (agentId !== "paneltest" && !/^panel-(?:(?:probe-[a-z0-9-]{1,48})|(?:runtime-probe-[a-z0-9-]{1,48})|(?:[a-z0-9-]{1,48}-runtime))$/u.test(agentId)) {
     throw fail("PROBE_AGENT_INVALID");
   }
@@ -42,6 +44,7 @@ export async function inspectLiveProbeConfig(configPath: string, agentId: string
   if (expected && (identity.dev !== expected.dev || identity.ino !== expected.ino || identity.size !== expected.size ||
     identity.mtimeNs !== expected.mtimeNs || identity.digest !== expected.digest)) throw fail("PROBE_CONFIG_CHANGED");
   if (!config || typeof config !== "object" || Array.isArray(config)) throw fail("PROBE_CONFIG_INVALID");
+  const configRecord = config as Readonly<Record<string, unknown>>;
   const gateway = (config as { gateway?: unknown }).gateway;
   if (!gateway || typeof gateway !== "object" || Array.isArray(gateway) ||
     ((gateway as { mode?: unknown }).mode !== undefined && (gateway as { mode?: unknown }).mode !== "local") ||
@@ -59,6 +62,7 @@ export async function inspectLiveProbeConfig(configPath: string, agentId: string
     if (matches.length !== 1 || typeof (matches[0] as { workspace?: unknown } | undefined)?.workspace !== "string" ||
       resolve((matches[0] as { workspace: string }).workspace) !== resolve(workspaceRoot)) throw fail("PROBE_AGENT_WORKSPACE_MISMATCH");
   }
+  const validationError = validate?.(configRecord); if (validationError) throw fail(validationError);
   return identity;
 }
 

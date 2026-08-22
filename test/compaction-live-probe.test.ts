@@ -6,11 +6,15 @@ import test from "node:test";
 import type { GatewayClient } from "../src/gateway/adapter.js";
 import {
   classifyCompactionProbeObservation,
+  compactionProbeHistory,
+  COMPACTION_PROBE_CONTEXT_BUDGET,
+  COMPACTION_PROBE_RECENT_CHARACTER_FLOOR,
   parseCompactionLiveProbeArguments,
   runCompactionLiveProbe,
   CompactionLiveProbeError,
   type CompactionLiveProbeRequest
 } from "../src/gateway/compaction-live-probe.js";
+import { ConservativeContextBudget } from "../src/domain/context-budget.js";
 import { tempFixture } from "./test-helpers.js";
 
 const request: CompactionLiveProbeRequest = {
@@ -25,6 +29,23 @@ const request: CompactionLiveProbeRequest = {
   cleanupConfirmation: "delete-created-session-v1",
   confirmation: "compaction:panel-probe-compaction:2026.6.11"
 };
+
+test("fixed fictional history forces an old prefix outside OpenClaw's retained tail", () => {
+  const history = compactionProbeHistory(), recent = history.entries.slice(2);
+  const recentCharacters = recent.reduce((total, entry) => {
+    if (entry.type !== "message" || typeof entry.message !== "object" || entry.message === null ||
+      !("content" in entry.message) || typeof entry.message.content !== "string") return total;
+    return total + entry.message.content.length;
+  }, 0);
+  assert.ok(recentCharacters > COMPACTION_PROBE_RECENT_CHARACTER_FLOOR);
+  const budget = new ConservativeContextBudget(COMPACTION_PROBE_CONTEXT_BUDGET);
+  const before = budget.assertWithinBudget(history, "").estimatedTokens;
+  const candidate = { ...history, entries: [...history.entries, { type: "compaction" as const, id: "probe-c1", parentId: "probe-a2",
+    timestamp: "2026-08-14T00:01:00.000Z", summary: "Fictional bounded summary. ".repeat(2_000),
+    firstKeptEntryId: "probe-u2", tokensBefore: 60_000 }] };
+  const after = budget.assertWithinBudget(candidate, "").estimatedTokens;
+  assert.ok(after < before, `${after} must be less than ${before}`);
+});
 
 test("compaction observation classifier returns every fixed code in priority order", () => {
   const usage = { source: "openclaw-session" as const, totalTokens: 12_000, contextTokens: 128_000, totalTokensFresh: true };
@@ -119,9 +140,9 @@ async function fixture(t: import("node:test").TestContext, overrides: FixtureOve
     async compactSession(key) { calls.push("compact"); assert.equal(key, sessionKey); compacted = true;
       if (overrides.compactFails) throw new Error("private compact failure");
       const history = (await readFile(transcriptPath, "utf8")).trim().split("\n").map(line => JSON.parse(line) as { id?: string });
-      await appendFile(transcriptPath, `${JSON.stringify({ type: "compaction", id: "probe-c1", parentId: "probe-a1",
-        timestamp: "2026-08-14T00:01:00.000Z", summary: "Fictional short summary.", firstKeptEntryId: "probe-a1", tokensBefore: 12_000 })}\n`);
-      assert.equal(history.at(-1)?.id, "probe-a1"); return { compacted: true };
+      await appendFile(transcriptPath, `${JSON.stringify({ type: "compaction", id: "probe-c1", parentId: "probe-a2",
+        timestamp: "2026-08-14T00:01:00.000Z", summary: "Fictional short summary.", firstKeptEntryId: "probe-u2", tokensBefore: 12_000 })}\n`);
+      assert.equal(history.at(-1)?.id, "probe-a2"); return { compacted: true };
     },
     async send() { calls.push("send"); throw new Error("send forbidden"); }, async waitForCompletion() {},
     async abort() { calls.push("abort"); if (overrides.abortFails) throw new Error("private abort failure"); },
@@ -180,6 +201,18 @@ test("config target and exact workspace are verified before create", async t => 
     const value = await fixture(t); await writeFile(value.request.configPath, JSON.stringify(config));
     await assert.rejects(runCompactionLiveProbe(value.request, value.dependencies), (error: unknown) => {
       assert.match((error as CompactionLiveProbeError).code, /PROBE_AGENT_(?:CONFIG_INVALID|WORKSPACE_MISMATCH)/u); return true;
+    });
+    assert.equal(value.calls.includes("create"), false);
+  }
+});
+
+test("compaction config overrides are rejected before create so the fixed cut point remains pinned", async t => {
+  for (const compaction of [{ keepRecentTokens: 20_001 }, { reserveTokens: 16_385 },
+    { keepRecentTokens: 20_000, reserveTokens: 16_384 }]) {
+    const value = await fixture(t); await writeFile(value.request.configPath, JSON.stringify({ gateway: { mode: "local" }, bindings: [],
+      agents: { defaults: { compaction }, list: [{ id: request.agentId, workspace: value.request.workspaceRoot }] } }));
+    await assert.rejects(runCompactionLiveProbe(value.request, value.dependencies), (error: unknown) => {
+      assert.equal((error as CompactionLiveProbeError).code, "PROBE_COMPACTION_CONFIG_OVERRIDE"); return true;
     });
     assert.equal(value.calls.includes("create"), false);
   }
