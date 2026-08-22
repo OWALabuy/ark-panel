@@ -2,7 +2,8 @@
 
 This is dated evidence, not a timeless compatibility guarantee.
 
-- ark-panel commit: `f9f20d461b775797c1f4fddd32e6bb97f6504ed2`
+- ark-panel commits: initial isolated probes at `f9f20d461b775797c1f4fddd32e6bb97f6504ed2`;
+  diagnostic compaction rerun at `299e80a9efbfe13cddc555e7a1faf68aacccd0dc`
 - OpenClaw: `2026.6.11 (e085fa1)`
 - Gateway: temporary loopback listener on an otherwise unused port, started with `umask 077`
 - configuration: built from an empty file with an allowlist of model/provider, local Gateway,
@@ -29,8 +30,24 @@ reduced-scope connection.
 
 ## Compaction revision and usage (#21)
 
-The final isolated attempt used `panel-probe-compaction-live`, zero bindings and an effective tool
-set of exactly `[]`. It created one temporary session, sent no user/model turn through
+After the combined failure below, commit `299e80a9efbfe13cddc555e7a1faf68aacccd0dc`
+split the fixed envelope into directly tested, privacy-safe validation stages. A new isolated agent,
+`panel-probe-compaction-diagnostic`, then repeated the same one-compact, zero-send scenario. The
+real provider request and `sessions.compact` RPC each completed once, but the production panel
+compaction API did not accept the candidate as `compacted: true`:
+
+```json
+{"schemaVersion":1,"probe":"compaction","status":"failed","errorCode":"PROBE_COMPACTION_NOT_ACCEPTED","cleanupCode":null}
+```
+
+This code is specific to the compact result and precedes the call-count and usage checks; it does
+not identify why the candidate was not accepted. The probe removed the temporary runtime session
+and panel root. The Gateway was then stopped, the exact temporary agent was deleted, its private
+state tree was validated and deleted, and no listener or probe root remained. Because no accepted
+compaction revision or fresh reload was produced, #21 remains open.
+
+The earlier final isolated attempt used `panel-probe-compaction-live`, zero bindings and an effective
+tool set of exactly `[]`. It created one temporary session, sent no user/model turn through
 `sessions.send`, and invoked the production compaction path exactly once. The probe reached the
 post-compaction validation but returned:
 
