@@ -3,7 +3,8 @@
 This is dated evidence, not a timeless compatibility guarantee.
 
 - ark-panel commits: initial isolated probes at `f9f20d461b775797c1f4fddd32e6bb97f6504ed2`;
-  diagnostic compaction rerun at `299e80a9efbfe13cddc555e7a1faf68aacccd0dc`
+  staged diagnostic reruns at `299e80a9efbfe13cddc555e7a1faf68aacccd0dc` and
+  `a9285217468a5eebd3ea969735a0ed750e8d16bb`
 - OpenClaw: `2026.6.11 (e085fa1)`
 - Gateway: temporary loopback listener on an otherwise unused port, started with `umask 077`
 - configuration: built from an empty file with an allowlist of model/provider, local Gateway,
@@ -29,6 +30,25 @@ connection contract, but not a different OpenClaw version, remote Gateway, addit
 reduced-scope connection.
 
 ## Compaction revision and usage (#21)
+
+The final diagnostic commit `a9285217468a5eebd3ea969735a0ed750e8d16bb` recognizes the exact
+reason string `NO_EFFECTIVE_REDUCTION`; missing and other reason values stay folded into the generic
+rejection code. Another newly created isolated agent repeated the same one-compact, zero-send
+scenario and returned:
+
+```json
+{"schemaVersion":1,"probe":"compaction","status":"failed","errorCode":"PROBE_NO_EFFECTIVE_REDUCTION","cleanupCode":null}
+```
+
+The real provider request and `sessions.compact` RPC each completed once, and the original panel
+revision was kept. `PanelCompactionApi` returned the exact `NO_EFFECTIVE_REDUCTION` reason, but this
+probe version does not preserve whether that reason originated in the upstream compact response or
+in the panel's conservative candidate comparison. It therefore does not prove that a candidate was
+accepted and verified by the bridge, and it does not satisfy #21: there is still no accepted
+post-compaction revision or fresh reload to validate. The runtime session and probe-owned panel root
+were cleaned; the Gateway was stopped; the exact temporary agent, known plugin-skill links and
+private state root were removed after identity/content checks; and no listener or probe root
+remained.
 
 After the combined failure below, commit `299e80a9efbfe13cddc555e7a1faf68aacccd0dc`
 split the fixed envelope into directly tested, privacy-safe validation stages. A new isolated agent,
