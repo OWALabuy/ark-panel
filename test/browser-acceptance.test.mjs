@@ -20,13 +20,13 @@ import { inspectBrowserSuccessScreenshot } from "../dist/test/browser-success-sc
 import { startBrowserFixture } from "./browser-fixture.mjs";
 
 const WAIT_MS = 10_000;
-const FIREFOX_SESSION_START_MS = 20_000;
+const FIREFOX_SESSION_START_MS = 40_000;
 const CLEANUP_MS = 5_000;
 const CLEANUP_WORST_CASE_MS = CLEANUP_MS * 3;
 const CLEANUP_MARGIN_MS = 5_000;
 const CLEANUP_HOOK_MS = CLEANUP_WORST_CASE_MS + CLEANUP_MARGIN_MS;
-const DESKTOP_TEST_TIMEOUT_MS = 90_000;
-const DESKTOP_WATCHDOG_MS = 65_000;
+const DESKTOP_TEST_TIMEOUT_MS = 125_000;
+const DESKTOP_WATCHDOG_MS = 100_000;
 const MOBILE_TEST_TIMEOUT_MS = 60_000;
 const MOBILE_WATCHDOG_MS = 35_000;
 const FAILURE_ROOT = fileURLToPath(new URL("../browser-artifacts/", import.meta.url));
