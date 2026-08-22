@@ -5,7 +5,9 @@ This is dated evidence, not a timeless compatibility guarantee.
 - ark-panel commits: initial isolated probes at `f9f20d461b775797c1f4fddd32e6bb97f6504ed2`;
   staged diagnostic reruns at `299e80a9efbfe13cddc555e7a1faf68aacccd0dc` and
   `a9285217468a5eebd3ea969735a0ed750e8d16bb`; provenance-confirmed rerun at
-  `8b6d35d3a7303d9934f2be92bbe92ccc5d2903ee`
+  `8b6d35d3a7303d9934f2be92bbe92ccc5d2903ee`; reducible fixture and final usage
+  provenance at `bd61b9d6711cf40c0eef2224fdea557abe694290` and
+  `28dfdf221efba42ef1d4658192452a923dd0b2c4`
 - OpenClaw: `2026.6.11 (e085fa1)`
 - Gateway: temporary loopback listener on an otherwise unused port, started with `umask 077`
 - configuration: built from an empty file with an allowlist of model/provider, local Gateway,
@@ -31,6 +33,34 @@ connection contract, but not a different OpenClaw version, remote Gateway, addit
 reduced-scope connection.
 
 ## Compaction revision and usage (#21)
+
+The final run used ark-panel `28dfdf221efba42ef1d4658192452a923dd0b2c4` and a
+new isolated agent. The fixed fictional transcript deliberately placed a large old prefix before a
+recent tail exceeding the pinned OpenClaw default retention window. The config had no compaction
+override, zero bindings and effective tools exactly `[]`. One provider summarization request and
+one `sessions.compact` RPC completed; `sessions.send` was never called. The probe returned:
+
+```json
+{"schemaVersion":1,"probe":"compaction","status":"passed","version":"2026.6.11","scenario":"panel-compaction-v1","preflight":{"explicitTarget":true,"doubleGate":true,"zeroBindings":true,"sessionsRootIsolated":true,"effectiveToolsExact":true},"observation":{"createCalls":1,"compactCalls":1,"sendCalls":0,"sameSessionUsage":true,"prefixPreserved":true,"effectiveReduction":true,"tokensBefore":59875,"postTotalTokens":163,"contextTokens":1000000},"reload":{"revisionBefore":"240356:1787405439389.2976","revisionAfter":"241396:1787405471468.087","revisionChanged":true,"usageAtCurrentTip":true,"matchesPost":true},"cleanup":{"confirmed":true,"completed":true,"residualCount":0}}
+```
+
+The pre total came from the verified OpenClaw compaction entry. The post total came from the fresh
+same-session registry row after compaction; the pre and post rows reported the same context window.
+The panel committed the compaction entry at the branch tip, changed the authoritative revision, and
+a fresh read index/data instance returned that revision and the exact post usage. The parsed
+original prefix remained deeply equal. This closes the live revision/usage/reload evidence gap for #21
+on the pinned versions; it is dated evidence, not a guarantee for another OpenClaw version or model.
+
+The probe cleaned its runtime session and panel root. The operator then stopped the Gateway,
+deleted the exact temporary agent, removed only the two known plugin-skill links, validated and
+deleted the private temporary state root, and confirmed zero listener, process and root residuals.
+
+An immediately preceding run at `bd61b9d6711cf40c0eef2224fdea557abe694290` used the same
+reducible history but still required the pre-materialization registry row to report fresh total
+tokens. OpenClaw correctly marked that manually materialized row stale, so the run failed with
+`PROBE_USAGE_STALE` and `cleanupCode:null`. No acceptance claim was made; its temporary agent,
+Gateway and private root were also fully removed. Commit `28dfdf2` replaced that impossible
+requirement with the verified-entry pre total while retaining same-window and fresh-post checks.
 
 Commit `8b6d35d3a7303d9934f2be92bbe92ccc5d2903ee` added an internal boolean recording
 whether the raw OpenClaw compact result was accepted; the boolean never enters probe output. A new

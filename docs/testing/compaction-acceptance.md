@@ -2,9 +2,10 @@
 
 > **Runbook only — not an execution result**
 >
-> - Date reviewed: `2026-08-14`
+> - Date reviewed: `2026-08-22`
 > - OpenClaw target: exactly `2026.6.11`
-> - Current status: `unknown`
+> - Current status: `historical pass` at ark-panel `28dfdf2` on `2026-08-22`; see the
+>   [dated evidence](live-probe-results-2026-08-22.md#compaction-revision-and-usage-21)
 
 This default-off probe exists solely to close the live evidence gap in #21. It creates a temporary
 panel data root containing a fixed fictional transcript, creates exactly one temporary OpenClaw
