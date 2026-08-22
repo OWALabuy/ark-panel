@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import type { GatewayClient } from "../src/gateway/adapter.js";
 import {
+  classifyCompactionProbeObservation,
   parseCompactionLiveProbeArguments,
   runCompactionLiveProbe,
   CompactionLiveProbeError,
@@ -24,6 +25,25 @@ const request: CompactionLiveProbeRequest = {
   cleanupConfirmation: "delete-created-session-v1",
   confirmation: "compaction:panel-probe-compaction:2026.6.11"
 };
+
+test("compaction observation classifier returns every fixed code in priority order", () => {
+  const usage = { source: "openclaw-session" as const, totalTokens: 12_000, contextTokens: 128_000, totalTokensFresh: true };
+  const valid = { compacted: true, createCalls: 1, compactCalls: 1, sendCalls: 0, deleteCalls: 1, usageCalls: 2,
+    preUsage: usage, postUsage: { ...usage, totalTokens: 2_000 } };
+  const cases = [
+    [{ ...valid, compacted: false, createCalls: 0, preUsage: undefined }, "PROBE_COMPACTION_NOT_ACCEPTED"],
+    [{ ...valid, createCalls: 2, preUsage: undefined }, "PROBE_CALL_COUNTS_INVALID"],
+    [{ ...valid, preUsage: undefined }, "PROBE_USAGE_MISSING"],
+    [{ ...valid, preUsage: { ...usage, source: "fixture" } }, "PROBE_USAGE_SOURCE_INVALID"],
+    [{ ...valid, preUsage: { ...usage, totalTokensFresh: false } }, "PROBE_USAGE_STALE"],
+    [{ ...valid, preUsage: { ...usage, totalTokensFresh: "true" } }, "PROBE_USAGE_STALE"],
+    [{ ...valid, preUsage: { ...usage, totalTokens: null } }, "PROBE_USAGE_VALUES_INVALID"],
+    [{ ...valid, postUsage: { ...usage, totalTokens: 2_000, contextTokens: 64_000 } }, "PROBE_CONTEXT_WINDOW_CHANGED"],
+    [{ ...valid, postUsage: { ...usage, totalTokens: 12_000 } }, "PROBE_USAGE_NOT_REDUCED"],
+    [valid, null]
+  ] as const;
+  for (const [observation, expected] of cases) assert.equal(classifyCompactionProbeObservation(observation), expected);
+});
 
 test("compaction probe arguments require every fixed boundary and both path inputs", () => {
   const argv = ["--agent", request.agentId, "--expected-version", request.expectedVersion,
@@ -61,6 +81,7 @@ interface FixtureOverrides {
   abortFails?: boolean;
   deleteFails?: boolean;
   postTotalTokens?: number;
+  preFresh?: boolean;
   postFresh?: boolean;
   postContextTokens?: number;
   emptyRegistryBefore?: boolean;
@@ -89,7 +110,7 @@ async function fixture(t: import("node:test").TestContext, overrides: FixtureOve
     async sessionContextUsage(_agent, key) { calls.push(compacted ? "post-usage" : "pre-usage"); assert.equal(key, sessionKey);
       return { source: "openclaw-session", totalTokens: compacted ? overrides.postTotalTokens ?? 2_000 : 12_000,
         contextTokens: compacted ? overrides.postContextTokens ?? 128_000 : 128_000,
-        totalTokensFresh: compacted ? overrides.postFresh ?? true : true }; },
+        totalTokensFresh: compacted ? overrides.postFresh ?? true : overrides.preFresh ?? true }; },
     async compactSession(key) { calls.push("compact"); assert.equal(key, sessionKey); compacted = true;
       if (overrides.compactFails) throw new Error("private compact failure");
       const history = (await readFile(transcriptPath, "utf8")).trim().split("\n").map(line => JSON.parse(line) as { id?: string });
@@ -160,12 +181,14 @@ test("config target and exact workspace are verified before create", async t => 
 });
 
 test("fresh decreasing same-window usage is mandatory", async t => {
-  for (const overrides of [{ postFresh: false }, { postTotalTokens: 12_000 }, { postTotalTokens: 13_000 },
-    { postContextTokens: 64_000 }] satisfies FixtureOverrides[]) {
+  for (const [overrides, code] of [[{ preFresh: false }, "PROBE_USAGE_STALE"],
+    [{ postFresh: false }, "PROBE_USAGE_STALE"], [{ postTotalTokens: -1 }, "PROBE_USAGE_VALUES_INVALID"],
+    [{ postTotalTokens: 12_000 }, "PROBE_USAGE_NOT_REDUCED"], [{ postTotalTokens: 13_000 }, "PROBE_USAGE_NOT_REDUCED"],
+    [{ postContextTokens: 64_000 }, "PROBE_CONTEXT_WINDOW_CHANGED"]] satisfies readonly [FixtureOverrides, string][]) {
     const value = await fixture(t, overrides);
     await assert.rejects(runCompactionLiveProbe(value.request, value.dependencies), (error: unknown) => {
       const observed = error as CompactionLiveProbeError;
-      assert.equal(observed.code, "PROBE_USAGE_INVALID"); assert.equal(observed.cleanupCode, null); return true;
+      assert.equal(observed.code, code); assert.equal(observed.cleanupCode, null); return true;
     });
     assert.equal(value.calls.includes("delete"), true);
     assert.deepEqual(await readdir(value.request.panelRootParent), []);

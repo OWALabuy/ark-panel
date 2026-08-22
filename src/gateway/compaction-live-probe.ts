@@ -48,6 +48,35 @@ export class CompactionLiveProbeError extends Error {
   constructor(readonly code: string, readonly cleanupCode: string | null = null) { super(code); this.name = "CompactionLiveProbeError"; }
 }
 
+export interface CompactionProbeObservation {
+  compacted: boolean;
+  createCalls: number;
+  compactCalls: number;
+  sendCalls: number;
+  deleteCalls: number;
+  usageCalls: number;
+  preUsage?: Readonly<{ source: unknown; totalTokens: unknown; contextTokens: unknown; totalTokensFresh: unknown }> | undefined;
+  postUsage?: Readonly<{ source: unknown; totalTokens: unknown; contextTokens: unknown; totalTokensFresh: unknown }> | undefined;
+}
+
+export function classifyCompactionProbeObservation(observation: CompactionProbeObservation): string | null {
+  if (!observation.compacted) return "PROBE_COMPACTION_NOT_ACCEPTED";
+  if (observation.createCalls !== 1 || observation.compactCalls !== 1 || observation.sendCalls !== 0 ||
+    observation.deleteCalls !== 1 || observation.usageCalls !== 2) return "PROBE_CALL_COUNTS_INVALID";
+  const preUsage = observation.preUsage, postUsage = observation.postUsage;
+  if (!preUsage || !postUsage) return "PROBE_USAGE_MISSING";
+  if (preUsage.source !== "openclaw-session" || postUsage.source !== "openclaw-session") return "PROBE_USAGE_SOURCE_INVALID";
+  if (preUsage.totalTokensFresh !== true || postUsage.totalTokensFresh !== true) return "PROBE_USAGE_STALE";
+  if (typeof preUsage.totalTokens !== "number" || typeof postUsage.totalTokens !== "number" || typeof preUsage.contextTokens !== "number" ||
+    typeof postUsage.contextTokens !== "number" || !Number.isSafeInteger(preUsage.totalTokens) ||
+    !Number.isSafeInteger(postUsage.totalTokens) || !Number.isSafeInteger(preUsage.contextTokens) ||
+    !Number.isSafeInteger(postUsage.contextTokens) || preUsage.totalTokens < 0 || postUsage.totalTokens < 0 ||
+    preUsage.contextTokens <= 0 || postUsage.contextTokens <= 0) return "PROBE_USAGE_VALUES_INVALID";
+  if (postUsage.contextTokens !== preUsage.contextTokens) return "PROBE_CONTEXT_WINDOW_CHANGED";
+  if (postUsage.totalTokens >= preUsage.totalTokens) return "PROBE_USAGE_NOT_REDUCED";
+  return null;
+}
+
 interface OwnedPanelRoot {
   path: string;
   cleanup(): Promise<void>;
@@ -272,16 +301,15 @@ export async function runCompactionLiveProbe(request: CompactionLiveProbeRequest
     const transcriptPath = join(panel.path, "sessions", PANEL_AGENT_ID, RECORD_ID, "transcript.jsonl");
     const initial = await loadPanelSession(panel.path, PANEL_AGENT_ID, RECORD_ID), initialStat = await lstat(transcriptPath);
     const initialRevision = `${initialStat.size}:${initialStat.mtimeMs}`, result = await api.compact(RECORD_ID, initialRevision);
-    if (!result.compacted || client.createCalls !== 1 || client.compactCalls !== 1 || client.sendCalls !== 0 || client.deleteCalls !== 1 ||
-      client.usageCalls !== 2 ||
-      !client.preUsage || !client.postUsage || !client.preUsage.totalTokensFresh || !client.postUsage.totalTokensFresh ||
-      client.preUsage.source !== "openclaw-session" || client.postUsage.source !== "openclaw-session" ||
-      client.preUsage.totalTokens === null || client.postUsage.totalTokens === null || client.preUsage.contextTokens === null ||
-      client.postUsage.contextTokens === null || !Number.isSafeInteger(client.preUsage.totalTokens) ||
-      !Number.isSafeInteger(client.postUsage.totalTokens) || !Number.isSafeInteger(client.preUsage.contextTokens) ||
-      client.preUsage.totalTokens < 0 || client.postUsage.totalTokens < 0 || client.preUsage.contextTokens <= 0 ||
-      client.postUsage.contextTokens !== client.preUsage.contextTokens || client.postUsage.totalTokens >= client.preUsage.totalTokens) {
-      throw new CompactionLiveProbeError("PROBE_USAGE_INVALID");
+    const observationError = classifyCompactionProbeObservation({ compacted: result.compacted, createCalls: client.createCalls,
+      compactCalls: client.compactCalls, sendCalls: client.sendCalls, deleteCalls: client.deleteCalls, usageCalls: client.usageCalls,
+      ...(client.preUsage ? { preUsage: client.preUsage } : {}), ...(client.postUsage ? { postUsage: client.postUsage } : {}) });
+    if (observationError) throw new CompactionLiveProbeError(observationError);
+    const preUsage = client.preUsage, postUsage = client.postUsage;
+    if (!preUsage || !postUsage) throw new CompactionLiveProbeError("PROBE_USAGE_MISSING");
+    const preTotalTokens = preUsage.totalTokens, postTotalTokens = postUsage.totalTokens, contextTokens = postUsage.contextTokens;
+    if (preTotalTokens === null || postTotalTokens === null || contextTokens === null) {
+      throw new CompactionLiveProbeError("PROBE_USAGE_VALUES_INVALID");
     }
     const index = new SessionReadIndex([{ agentId: PANEL_AGENT_ID }], panel.path), reads = new SessionReadData([{ agentId: PANEL_AGENT_ID,
       sessionsRoot: join(panel.path, "unused-source") }], panel.path, index, budget);
@@ -293,14 +321,14 @@ export async function runCompactionLiveProbe(request: CompactionLiveProbeRequest
       typeof tail.id === "string" && branchTip?.id === tail.id;
     if (result.revision === initialRevision || conversation?.revision !== result.revision || afterTokens >= beforeTokens ||
       !prefixPreserved || !exactCompaction || !usage ||
-      usage.totalTokens !== client.postUsage.totalTokens || usage.contextTokens !== client.postUsage.contextTokens || !usage.totalTokensFresh) {
+      usage.totalTokens !== postUsage.totalTokens || usage.contextTokens !== postUsage.contextTokens || !usage.totalTokensFresh) {
       throw new CompactionLiveProbeError("PROBE_RELOAD_INVALID");
     }
     report = Object.freeze({ schemaVersion: 1, probe: "compaction", status: "passed", version: request.expectedVersion, scenario: SCENARIO,
       preflight: Object.freeze({ explicitTarget: true, doubleGate: true, zeroBindings: true, sessionsRootIsolated: true, effectiveToolsExact: true }),
       observation: Object.freeze({ createCalls: 1, compactCalls: 1, sendCalls: 0, sameSessionUsage: true, prefixPreserved: true,
-        effectiveReduction: true, tokensBefore: client.preUsage.totalTokens, postTotalTokens: client.postUsage.totalTokens,
-        contextTokens: client.postUsage.contextTokens }),
+        effectiveReduction: true, tokensBefore: preTotalTokens, postTotalTokens,
+        contextTokens }),
       reload: Object.freeze({ revisionBefore: initialRevision, revisionAfter: result.revision,
         revisionChanged: true, usageAtCurrentTip: true, matchesPost: true }),
       cleanup: Object.freeze({ confirmed: true, completed: true, residualCount: 0 }) });
