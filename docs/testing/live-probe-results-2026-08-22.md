@@ -139,6 +139,27 @@ explicit wildcard deny and passed the exact-empty effective-tools gate.
 
 ## Bootstrap and memory continuity (#48)
 
+At ark-panel `1cceb76`, the three exact configured #48 targets were checked separately through the
+running loopback OpenClaw `2026.6.11` Gateway after a read-only configuration check confirmed zero
+bindings. Each target received one fixed fictional no-match query in a uniquely named temporary
+session. The model was instructed to call only `memory_search` and to return only bootstrap document
+names. OpenClaw's structured result reported one `memory_search` call, zero tool failures, terminal
+completion, and the actual injected-workspace-file inventory; no memory result, bootstrap content,
+credential, or private path is retained here.
+
+| Target | Model | Injected bootstrap result | Tool result | Cleanup |
+| --- | --- | --- | --- | --- |
+| `panel-claude-runtime` | `claude-opus-4-6` | Seven present documents, including `MEMORY.md`; none truncated | One `memory_search`, zero failures | Exact temporary session deleted |
+| `panel-main-runtime` | `gemini-3-flash-preview` | Six present documents; `MEMORY.md` was absent from the reused main workspace and was not claimed; none truncated | One `memory_search`, zero failures | Exact temporary session deleted |
+| `paneltest` | `claude-opus-4-6` | Seven present documents, including `MEMORY.md`; none truncated | One `memory_search`, zero failures | Exact temporary session deleted |
+
+The check intentionally distinguishes the default OpenClaw `main` agent from the separately named
+`panel-main-runtime`: the latter has its own agent directory but currently reuses the default main
+workspace/model. Results are not extrapolated between those identities. After all three calls,
+`openclaw sessions --agent <target> --json` reported zero active sessions for every target. These
+results close the configured-target evidence requested by #48; they do not claim byte-level absence
+of OpenClaw-internal recall statistics or support for a different OpenClaw version.
+
 At ark-panel `a45b6ec`, a new disposable target `panel-runtime-probe-memory-native` used the pinned
 native OpenClaw transcript contract and bounded cleanup for the generated skill-prompt cache. The
 target had zero bindings, configured catalog coverage for `browser`/`canvas`/`memory_search`, and an

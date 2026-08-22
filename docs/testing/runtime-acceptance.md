@@ -5,7 +5,8 @@
 > - Date: `2026-08-22`（runbook review）
 > - ark-panel implementation: `a45b6ec`
 > - OpenClaw version: target `2026.6.11`
-> - Status: 配置中的三个 #48 targets 仍为 `unknown`；一次性 disposable probe 的失败见 dated evidence
+> - Status: 配置中的三个 #48 targets 已于 2026-08-22 分别完成一次 exact-target live pass；
+>   本文保留更严格的 disposable/default-off 重验流程，结果见 dated evidence
 
 本探针逐次只验收一个显式目标。目标必须是配置中的 channel-free chat runtime，ID 为
 `panel-<name>-runtime`、`panel-runtime-probe-<name>`，或兼容现有隔离 fixture 的 `paneltest`。
