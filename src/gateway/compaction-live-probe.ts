@@ -50,6 +50,7 @@ export class CompactionLiveProbeError extends Error {
 
 export interface CompactionProbeObservation {
   compacted: boolean;
+  reason?: unknown;
   createCalls: number;
   compactCalls: number;
   sendCalls: number;
@@ -60,7 +61,8 @@ export interface CompactionProbeObservation {
 }
 
 export function classifyCompactionProbeObservation(observation: CompactionProbeObservation): string | null {
-  if (!observation.compacted) return "PROBE_COMPACTION_NOT_ACCEPTED";
+  if (!observation.compacted) return observation.reason === "NO_EFFECTIVE_REDUCTION" ?
+    "PROBE_NO_EFFECTIVE_REDUCTION" : "PROBE_COMPACTION_NOT_ACCEPTED";
   if (observation.createCalls !== 1 || observation.compactCalls !== 1 || observation.sendCalls !== 0 ||
     observation.deleteCalls !== 1 || observation.usageCalls !== 2) return "PROBE_CALL_COUNTS_INVALID";
   const preUsage = observation.preUsage, postUsage = observation.postUsage;
@@ -301,7 +303,8 @@ export async function runCompactionLiveProbe(request: CompactionLiveProbeRequest
     const transcriptPath = join(panel.path, "sessions", PANEL_AGENT_ID, RECORD_ID, "transcript.jsonl");
     const initial = await loadPanelSession(panel.path, PANEL_AGENT_ID, RECORD_ID), initialStat = await lstat(transcriptPath);
     const initialRevision = `${initialStat.size}:${initialStat.mtimeMs}`, result = await api.compact(RECORD_ID, initialRevision);
-    const observationError = classifyCompactionProbeObservation({ compacted: result.compacted, createCalls: client.createCalls,
+    const observationError = classifyCompactionProbeObservation({ compacted: result.compacted, reason: result.reason,
+      createCalls: client.createCalls,
       compactCalls: client.compactCalls, sendCalls: client.sendCalls, deleteCalls: client.deleteCalls, usageCalls: client.usageCalls,
       ...(client.preUsage ? { preUsage: client.preUsage } : {}), ...(client.postUsage ? { postUsage: client.postUsage } : {}) });
     if (observationError) throw new CompactionLiveProbeError(observationError);

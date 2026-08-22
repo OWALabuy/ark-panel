@@ -32,6 +32,8 @@ test("compaction observation classifier returns every fixed code in priority ord
     preUsage: usage, postUsage: { ...usage, totalTokens: 2_000 } };
   const cases = [
     [{ ...valid, compacted: false, createCalls: 0, preUsage: undefined }, "PROBE_COMPACTION_NOT_ACCEPTED"],
+    [{ ...valid, compacted: false, reason: "NO_EFFECTIVE_REDUCTION", createCalls: 0 }, "PROBE_NO_EFFECTIVE_REDUCTION"],
+    [{ ...valid, compacted: false, reason: "private upstream detail", createCalls: 0 }, "PROBE_COMPACTION_NOT_ACCEPTED"],
     [{ ...valid, createCalls: 2, preUsage: undefined }, "PROBE_CALL_COUNTS_INVALID"],
     [{ ...valid, preUsage: undefined }, "PROBE_USAGE_MISSING"],
     [{ ...valid, preUsage: { ...usage, source: "fixture" } }, "PROBE_USAGE_SOURCE_INVALID"],
