@@ -8,6 +8,11 @@ export interface GenerationRequestIdentity {
   requestOutputs?: boolean | undefined;
 }
 
+export const currentGenerationRequestFingerprintMatcherVersion = "current-v1";
+export const compatibleGenerationRequestFingerprintMatcherVersion = "current-or-legacy-v1";
+export type GenerationRequestFingerprintMatcherVersion =
+  typeof currentGenerationRequestFingerprintMatcherVersion | typeof compatibleGenerationRequestFingerprintMatcherVersion;
+
 function sha256(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
 }
@@ -37,4 +42,17 @@ export function generationRequestFingerprintMatches(request: GenerationRequestId
     expectedRevision: request.expectedRevision ?? null
   });
   return sha256(legacyCanonical) === fingerprint;
+}
+
+/** Dispatch a durable fingerprint through the matcher recorded beside it. Unknown future
+ * matcher versions fail closed instead of accidentally accepting or replaying a retired run. */
+export function generationRequestFingerprintMatchesVersion(request: GenerationRequestIdentity, fingerprint: string,
+  matcherVersion: unknown): boolean {
+  if (matcherVersion === currentGenerationRequestFingerprintMatcherVersion) {
+    return generationRequestFingerprint(request) === fingerprint;
+  }
+  if (matcherVersion === compatibleGenerationRequestFingerprintMatcherVersion) {
+    return generationRequestFingerprintMatches(request, fingerprint);
+  }
+  return false;
 }

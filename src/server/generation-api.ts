@@ -9,20 +9,26 @@ import { ConservativeContextBudget, type ContextBudgetEstimator } from "../domai
 import { ContextBudgetExceededError } from "../domain/context-budget.js";
 import { headerWithContextUsage } from "../domain/context-usage.js";
 import { SessionOperationCoordinator } from "./session-operation.js";
-import { PanelRunStore, publicRun, terminalRunStatuses, type PanelRunRecord, type PublicPanelRun } from "./run-store.js";
+import { isPanelRunTombstone, PanelRunStore, publicRun, terminalRunStatuses, type PanelRunRecord, type PublicPanelRun,
+  type StoredPanelRun } from "./run-store.js";
 import { RunStreamProjector } from "./run-stream-projector.js";
 import { GatewayRunError } from "../gateway/cli-client.js";
 import { GatewayControlError } from "../gateway/stream-client.js";
 import { assignSessionAttachments, garbageCollectAttachments, getSessionAttachment, pruneSessionAttachments,
   readSessionAttachmentBytes, removeSessionAttachments, storeSessionAttachment } from "../storage/attachments.js";
 import { currentTranscriptBranch } from "../domain/branch.js";
-import { generationRequestFingerprint, generationRequestFingerprintMatches } from "../domain/generation-request.js";
+import { compatibleGenerationRequestFingerprintMatcherVersion, currentGenerationRequestFingerprintMatcherVersion,
+  generationRequestFingerprint, generationRequestFingerprintMatchesVersion } from "../domain/generation-request.js";
 import { publicRunErrorMessage } from "./run-errors.js";
 
 interface BridgeRunner { generate(request: BridgeRequest): Promise<BridgeResult>; cleanupOrphanedSession?(request: BridgeOrphanCleanupRequest): Promise<string[]> }
-export interface GenerationConfig { dataRoot: string; runtimeByAgent: ReadonlyMap<string, string>; workspaceByAgent?: ReadonlyMap<string, string>; completedCacheLimit?: number; contextBudget?: ContextBudgetEstimator; operations?: SessionOperationCoordinator }
+export interface GenerationConfig { dataRoot: string; runtimeByAgent: ReadonlyMap<string, string>; workspaceByAgent?: ReadonlyMap<string, string>; completedCacheLimit?: number; contextBudget?: ContextBudgetEstimator; operations?: SessionOperationCoordinator; runRetentionDays?: number; runRetentionBackupConfirmed?: boolean }
 interface PanelGenerationApiTestHooks { createRunStore?(dataRoot: string): PanelRunStore }
 const MAX_GATEWAY_ATTACHMENT_BYTES = 15 * 1024 * 1024;
+
+function fullRun(record: StoredPanelRun | undefined): PanelRunRecord | undefined {
+  return record && !isPanelRunTombstone(record) ? record : undefined;
+}
 
 function latestEntryId(document: TranscriptDocument): string | null {
   const id = currentTranscriptBranch(document).entries.at(-1)?.id; return typeof id === "string" ? id : null;
@@ -108,7 +114,7 @@ export class PanelGenerationApi implements GenerationApi {
   async initialize(): Promise<void> {
     if (!this.initialization) this.initialization = (async () => {
       await this.runStore.initialize();
-      for (const record of await this.runStore.list()) {
+      for (const record of await this.runStore.listFullRunsForRecovery()) {
         if (terminalRunStatuses.has(record.status)) {
           if (record.cleanupPending && await this.cleanupOrphan(record)) await this.runStore.put({ ...record, sequence: record.sequence + 1, cleanupPending: false, updatedAt: new Date().toISOString() });
           continue;
@@ -119,7 +125,7 @@ export class PanelGenerationApi implements GenerationApi {
         else if (["materializing", "committing"].includes(record.status) && record.message !== undefined && record.plannedUserEntryId && record.stagedEntries) {
           try { await this.commitRecovered(record); }
           catch {
-            const latest = await this.runStore.get(record.runId) ?? record;
+            const latest = fullRun(await this.runStore.get(record.runId)) ?? record;
             const recovered = latest.plannedUserEntryId ? await this.committedRevision(latest.recordId, latest.plannedUserEntryId) : undefined;
             const cleaned = await this.cleanupOrphan(latest);
             if (recovered) await this.runStore.put(this.scrub({ ...latest, sequence: latest.sequence + 1, status: "completed", updatedAt: now, finishedAt: now, revision: recovered, cleanupPending: !cleaned }));
@@ -133,9 +139,21 @@ export class PanelGenerationApi implements GenerationApi {
         } else { const cleaned = await this.cleanupOrphan(record); await this.runStore.put(this.scrub({ ...record, sequence: record.sequence + 1, status: "failed", updatedAt: now, finishedAt: now, cleanupPending: !cleaned,
           error: { code: "RUN_ORPHANED_AFTER_RESTART", message: "服务重启后无法安全恢复该任务，请重新发送。" } })); }
       }
+      try { await this.maintainRunsInternal(); }
+      catch { process.stderr.write("[ark-panel] run retention maintenance failed (RUN_RETENTION_MAINTENANCE_FAILED)\n"); }
       await this.maintainAttachments(true);
     })();
     await this.initialization;
+  }
+
+  async maintainRuns(): Promise<void> {
+    await this.initialize();
+    await this.maintainRunsInternal();
+  }
+
+  private async maintainRunsInternal(): Promise<void> {
+    await this.runStore.retireTerminalRuns({ retentionDays: this.config.runRetentionDays ?? 0,
+      backupConfirmed: this.config.runRetentionBackupConfirmed === true });
   }
 
   /** Reclaim abandoned uploads and references not represented by a durable transcript.
@@ -170,11 +188,19 @@ export class PanelGenerationApi implements GenerationApi {
     let accepted: PanelRunRecord;
     try {
       const existing = await this.runStore.get(runId);
-      if (existing) { if (existing.recordId !== recordId || !generationRequestFingerprintMatches({ recordId, message, expectedRevision, attachmentIds, requestOutputs }, existing.requestHash)) throw new Error("IDEMPOTENCY_KEY_REUSED"); return { ...this.visible(existing), newlyCreated: false }; }
+      if (existing) {
+        const matcherVersion = existing.fingerprintMatcherVersion ?? compatibleGenerationRequestFingerprintMatcherVersion;
+        if (existing.recordId !== recordId || !generationRequestFingerprintMatchesVersion(
+          { recordId, message, expectedRevision, attachmentIds, requestOutputs }, existing.requestHash, matcherVersion)) {
+          throw new Error("IDEMPOTENCY_KEY_REUSED");
+        }
+        return { ...this.visible(existing), newlyCreated: false };
+      }
       const active = await this.runStore.activeForRecord(recordId);
       if (active) throw new Error("SESSION_BUSY");
       const now = new Date().toISOString(), plannedUserEntryId = randomUUID();
-      accepted = { version: 1, runId, recordId, requestHash, sequence: 1, status: "accepted", createdAt: now, updatedAt: now, message,
+      accepted = { version: 1, runId, recordId, requestHash, fingerprintMatcherVersion: currentGenerationRequestFingerprintMatcherVersion,
+        sequence: 1, status: "accepted", createdAt: now, updatedAt: now, message,
         plannedUserEntryId, ...(attachmentIds.length ? { attachmentIds: [...attachmentIds] } : {}), ...(requestOutputs ? { requestOutputs: true } : {}),
         ...(expectedRevision ? { expectedRevision } : {}) };
       await this.runStore.put(accepted); this.plannedUserIds.set(runId, plannedUserEntryId);
@@ -212,8 +238,9 @@ export class PanelGenerationApi implements GenerationApi {
   async abortRun(runId: string): Promise<PublicPanelRun | undefined> {
     await this.initialize(); const record = await this.runStore.get(runId); if (!record) return undefined;
     if (terminalRunStatuses.has(record.status) || ["aborting", "committing", "committed"].includes(record.status)) return this.visible(record);
-    if (record.plannedUserEntryId) { const revision = await this.committedRevision(record.recordId, record.plannedUserEntryId); if (revision) return this.visible(await this.transition(record, { status: "completed", finishedAt: new Date().toISOString(), revision })); }
-    this.abortRequested.add(runId); const updated = await this.transition(record, { status: "aborting" });
+    const active = fullRun(record); if (!active) return this.visible(record);
+    if (active.plannedUserEntryId) { const revision = await this.committedRevision(active.recordId, active.plannedUserEntryId); if (revision) return this.visible(await this.transition(active, { status: "completed", finishedAt: new Date().toISOString(), revision })); }
+    this.abortRequested.add(runId); const updated = await this.transition(active, { status: "aborting" });
     this.abort(runId);
     return this.visible(updated);
   }
@@ -223,20 +250,20 @@ export class PanelGenerationApi implements GenerationApi {
     try {
       if (this.abortRequested.has(accepted.runId)) throw new Error("BRIDGE_ABORTED");
       const result = await this.generate(accepted.recordId, message, new AbortController().signal, accepted.runId, expectedRevision, attachmentIds, requestOutputs);
-      current = (await this.runStore.get(accepted.runId)) ?? current;
+      current = fullRun(await this.runStore.get(accepted.runId)) ?? current;
       current = await this.transition(current, { status: "completed", finishedAt: new Date().toISOString(), ...(result.revision ? { revision: result.revision } : {}),
         ...(result.runtimeAgentId ? { runtimeAgentId: result.runtimeAgentId } : {}), ...(result.temporarySessionId ? { temporarySessionId: result.temporarySessionId } : {}),
         ...(result.gatewayRunId ? { gatewayRunId: result.gatewayRunId } : {}) });
       if (current.cleanupPending) void this.cleanupCompletedRun(current.runId);
     } catch (error) {
-      let recoverable = await this.runStore.get(accepted.runId);
+      let recoverable = fullRun(await this.runStore.get(accepted.runId));
       const committed = recoverable?.plannedUserEntryId ? await this.committedRevision(recoverable.recordId, recoverable.plannedUserEntryId) : undefined;
       if (recoverable && committed) { await this.transition(recoverable, { status: "completed", finishedAt: new Date().toISOString(), revision: committed }); return; }
       if (recoverable?.stagedEntries && recoverable.message !== undefined && recoverable.plannedUserEntryId && !["aborting", "aborted"].includes(recoverable.status)) {
         try { await this.commitRecovered(recoverable); return; }
         catch (recoveryError) { process.stderr.write(`[ark-panel] staged run commit failed runId=${accepted.runId}: ${recoveryError instanceof Error ? recoveryError.message : String(recoveryError)}\n`); }
       }
-      recoverable = await this.runStore.get(accepted.runId);
+      recoverable = fullRun(await this.runStore.get(accepted.runId));
       const committedAfterRecovery = recoverable?.plannedUserEntryId ? await this.committedRevision(recoverable.recordId, recoverable.plannedUserEntryId) : undefined;
       if (recoverable && committedAfterRecovery) { await this.transition(recoverable, { status: "completed", finishedAt: new Date().toISOString(), revision: committedAfterRecovery }); return; }
       const gatewayCode = error instanceof GatewayRunError ? error.code : error instanceof GatewayControlError ? error.code : undefined;
@@ -246,7 +273,7 @@ export class PanelGenerationApi implements GenerationApi {
         ["SESSION_BUSY", "REVISION_CONFLICT", "PANEL_SESSION_NOT_FOUND", "RUNTIME_NOT_CONFIGURED", "IDEMPOTENCY_KEY_REUSED", "SLASH_COMMANDS_UNSUPPORTED",
           "ATTACHMENTS_INVALID", "ATTACHMENTS_TOO_LARGE", "ATTACHMENT_ALREADY_ASSIGNED", "ATTACHMENT_NOT_OWNED_BY_SESSION", "GATEWAY_ATTACHMENT_TRANSPORT_UNAVAILABLE"].includes(error.message) ? error.message : "RUN_FAILED");
       if (!aborted) this.logRunFailure(accepted, recoverable, error, code);
-      current = (await this.runStore.get(accepted.runId)) ?? current;
+      current = fullRun(await this.runStore.get(accepted.runId)) ?? current;
       current = await this.transition(current, { status: aborted ? "aborted" : "failed", finishedAt: new Date().toISOString(),
         error: { code, message: error instanceof ContextBudgetExceededError ? error.message : publicRunErrorMessage(code) } });
     } finally { this.plannedUserIds.delete(accepted.runId); this.abortRequested.delete(accepted.runId); }
@@ -265,7 +292,7 @@ export class PanelGenerationApi implements GenerationApi {
     const previous = this.transitionTails.get(record.runId) ?? Promise.resolve(); let release!:()=>void;
     const currentTail = new Promise<void>(resolve=>{release=resolve}), queued = previous.then(()=>currentTail); this.transitionTails.set(record.runId, queued); await previous;
     try {
-      const latest = await this.runStore.get(record.runId) ?? record;
+      const latest = fullRun(await this.runStore.get(record.runId)) ?? record;
       if (terminalRunStatuses.has(latest.status)) return latest;
       const legal: Record<PanelRunRecord["status"], readonly PanelRunRecord["status"][]> = {
         accepted: ["accepted", "running", "aborting", "failed"], running: ["running", "materializing", "committing", "aborting", "failed", "aborted"],
@@ -280,7 +307,7 @@ export class PanelGenerationApi implements GenerationApi {
     } finally { release(); if (this.transitionTails.get(record.runId) === queued) this.transitionTails.delete(record.runId); }
   }
 
-  private visible(record: PanelRunRecord): PublicPanelRun {
+  private visible(record: StoredPanelRun): PublicPanelRun {
     const visible = publicRun(record), stream = this.streams.get(record.runId)?.snapshot();
     return stream && !terminalRunStatuses.has(record.status) ? { ...visible, stream } : visible;
   }
@@ -290,7 +317,7 @@ export class PanelGenerationApi implements GenerationApi {
     const previous = this.streamTails.get(runId) ?? Promise.resolve();
     const task = previous.then(async () => {
       const record = await this.runStore.get(runId);
-      if (!record || terminalRunStatuses.has(record.status) || record.status === "aborting" || this.abortRequested.has(runId)) return;
+      if (!record || isPanelRunTombstone(record) || terminalRunStatuses.has(record.status) || record.status === "aborting" || this.abortRequested.has(runId)) return;
       const current = this.streams.get(runId) ?? new RunStreamProjector();
       const change = current.apply(event);
       if (change.conflict) process.stderr.write(`[ark-panel] stream sequence conflict runId=${runId}${event.type === "connection" ? "" : ` sequence=${event.upstreamSeq}`}\n`);
@@ -341,9 +368,9 @@ export class PanelGenerationApi implements GenerationApi {
 
   private async cleanupCompletedRun(runId: string): Promise<void> {
     try {
-      const record = await this.runStore.get(runId); if (!record?.cleanupPending || !terminalRunStatuses.has(record.status)) return;
+      const record = fullRun(await this.runStore.get(runId)); if (!record?.cleanupPending || !terminalRunStatuses.has(record.status)) return;
       const cleaned = await this.cleanupOrphan(record); if (!cleaned) return;
-      const latest = await this.runStore.get(runId); if (!latest?.cleanupPending || !terminalRunStatuses.has(latest.status)) return;
+      const latest = fullRun(await this.runStore.get(runId)); if (!latest?.cleanupPending || !terminalRunStatuses.has(latest.status)) return;
       await this.runStore.put({ ...latest, sequence: latest.sequence + 1, cleanupPending: false, updatedAt: new Date().toISOString() });
     } catch (error) {
       process.stderr.write(`[ark-panel] deferred cleanup failed runId=${runId}: ${error instanceof Error ? error.message : String(error)}\n`);
@@ -407,7 +434,7 @@ export class PanelGenerationApi implements GenerationApi {
         sizeBytes: stored.manifest.size, disposition: "input" });
       const userEntry: JsonObject = { type: "message", id: userId, parentId: latestEntryId(document), timestamp: now,
         message: { role: "user", content: userContent, timestamp: Date.now() } };
-      const managedBeforeBridge = await this.runStore.get(runId); if (managedBeforeBridge) await this.transition(managedBeforeBridge, { status: "running", baseRevision: beforeRevision, baseParentEntryId: latestEntryId(document) });
+      const managedBeforeBridge = fullRun(await this.runStore.get(runId)); if (managedBeforeBridge) await this.transition(managedBeforeBridge, { status: "running", baseRevision: beforeRevision, baseParentEntryId: latestEntryId(document) });
       const result = await this.bridge.generate({ runtimeAgentId, historyThroughPreviousRun: openClawHistory, latestUserMessage: message || "请查看随消息提供的附件。",
         latestUserEntryId: userId, idempotencyKey: runId,
         ...(storedAttachments.length ? { attachments: storedAttachments.map(({ stored, bytes }) => ({ fileName: stored.manifest.fileName,
@@ -419,27 +446,27 @@ export class PanelGenerationApi implements GenerationApi {
           ...(metadata.reasoningLevel ? { reasoningLevel: metadata.reasoningLevel } : {}) }, signal,
         deferSuccessfulCleanup: true,
         lifecycle: async event => await this.recordBridgeLifecycle(runId, event), stream: event => this.enqueueBridgeStream(runId, event), cleanupFailed: async () => {
-          const current = await this.runStore.get(runId); if (current) await this.transition(current, { cleanupPending: true });
+          const current = fullRun(await this.runStore.get(runId)); if (current) await this.transition(current, { cleanupPending: true });
         } });
-      const preCommitState = await this.runStore.get(runId); if (signal.aborted || preCommitState?.status === "aborting") throw new Error("BRIDGE_ABORTED");
+      const preCommitState = fullRun(await this.runStore.get(runId)); if (signal.aborted || preCommitState?.status === "aborting") throw new Error("BRIDGE_ABORTED");
       const materializedEntries = (preCommitState?.stagedEntries ?? result.entries) as JsonObject[];
       const committedEntries = [...document.entries, userEntry, ...materializedEntries];
       const committedWithoutUsage: TranscriptDocument = { header: document.header, entries: committedEntries };
       const committed: TranscriptDocument = { header: headerWithContextUsage(document.header, result.contextUsage,
         latestEntryId(committedWithoutUsage) ?? undefined), entries: committedEntries };
-      const beforeCommit = await this.runStore.get(runId); const claim = beforeCommit ? await this.transition(beforeCommit, { status: "committing" }) : undefined;
+      const beforeCommit = fullRun(await this.runStore.get(runId)); const claim = beforeCommit ? await this.transition(beforeCommit, { status: "committing" }) : undefined;
       if (claim && claim.status !== "committing") throw new Error("BRIDGE_ABORTED");
       await assignSessionAttachments(this.config.dataRoot, agentId, recordId, attachmentIds, userId, "user");
       await commitPanelTranscript(this.config.dataRoot, metadata, committed);
       const afterStat = await lstat(transcriptPath); const revision = `${afterStat.size}:${afterStat.mtimeMs}`;
-      const afterCommit = await this.runStore.get(runId); if (afterCommit) await this.transition(afterCommit, { status: "committed", revision });
+      const afterCommit = fullRun(await this.runStore.get(runId)); if (afterCommit) await this.transition(afterCommit, { status: "committed", revision });
       return { runId, entries: materializedEntries, revision,
         runtimeAgentId, temporarySessionId: result.sessionId, gatewayRunId: result.runId };
     });
   }
 
   private async recordBridgeLifecycle(runId: string, event: BridgeLifecycleEvent): Promise<void> {
-    const current = await this.runStore.get(runId); if (!current) return;
+    const current = fullRun(await this.runStore.get(runId)); if (!current) return;
     if (current.status === "aborting" || terminalRunStatuses.has(current.status)) return;
     if (event.type === "temporary_session_created") await this.transition(current, { status: "running", runtimeAgentId: event.runtimeAgentId,
       temporarySessionId: event.sessionId, temporarySessionKey: event.sessionKey, temporaryTranscriptPath: event.transcriptPath });

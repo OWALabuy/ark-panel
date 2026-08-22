@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { generationRequestFingerprint, generationRequestFingerprintMatches,
+import { compatibleGenerationRequestFingerprintMatcherVersion, currentGenerationRequestFingerprintMatcherVersion,
+  generationRequestFingerprint, generationRequestFingerprintMatches, generationRequestFingerprintMatchesVersion,
   type GenerationRequestIdentity } from "../src/domain/generation-request.js";
 
 test("generation request fingerprint 保持既有 durable golden vectors", () => {
@@ -50,4 +51,19 @@ test("generation request fingerprint 仅为无附件无产出请求兼容早期 
   assert.equal(generationRequestFingerprintMatches({ ...request, attachmentIds: ["att_fixture"] }, legacy), false);
   assert.equal(generationRequestFingerprintMatches({ ...request, requestOutputs: true }, legacy), false);
   assert.equal(generationRequestFingerprintMatches({ ...request, expectedRevision: "different" }, legacy), false);
+});
+
+test("versioned fingerprint matcher 严格区分 current 与 legacy 兼容语义", () => {
+  const request = { recordId: "panel_fixture", message: "hello" } satisfies GenerationRequestIdentity;
+  const current = generationRequestFingerprint(request);
+  const legacy = "7719d1290bca44758cb9b4800f5067cac0072c346b968bfb7b95554cd1d4ae0e";
+  assert.equal(generationRequestFingerprintMatchesVersion(request, current,
+    currentGenerationRequestFingerprintMatcherVersion), true);
+  assert.equal(generationRequestFingerprintMatchesVersion(request, legacy,
+    currentGenerationRequestFingerprintMatcherVersion), false);
+  assert.equal(generationRequestFingerprintMatchesVersion(request, current,
+    compatibleGenerationRequestFingerprintMatcherVersion), true);
+  assert.equal(generationRequestFingerprintMatchesVersion(request, legacy,
+    compatibleGenerationRequestFingerprintMatcherVersion), true);
+  assert.equal(generationRequestFingerprintMatchesVersion(request, current, "future-v2"), false);
 });

@@ -9,7 +9,8 @@ import { PanelGenerationApi } from "../src/server/generation-api.js";
 import { ConservativeContextBudget } from "../src/domain/context-budget.js";
 import type { BridgeRequest } from "../src/gateway/adapter.js";
 import { listSessionAttachments, readSessionAttachmentBytes, storeSessionAttachment } from "../src/storage/attachments.js";
-import { PanelRunStore, type PanelRunRecord } from "../src/server/run-store.js";
+import { isPanelRunTombstone, PanelRunStore, publicRun, type PanelRunRecord } from "../src/server/run-store.js";
+import { currentGenerationRequestFingerprintMatcherVersion, generationRequestFingerprint } from "../src/domain/generation-request.js";
 import { deferred, tempFixture, waitFor, withTimeout, writeThenFailBeforeDirectorySync } from "./test-helpers.js";
 import { GatewayControlError } from "../src/gateway/stream-client.js";
 
@@ -223,6 +224,53 @@ test("既有 requestOutputs false 与早期无附件 durable 指纹仍可幂等�
   await assert.rejects(api.create("panel_fixture", "hello", runId, "different-revision"), /IDEMPOTENCY_KEY_REUSED/);
   await assert.rejects(api.create("panel_fixture", "hello", legacyRunId, undefined, ["att_fixture"]), /IDEMPOTENCY_KEY_REUSED/);
   await assert.rejects(api.create("panel_fixture", "hello", legacyRunId, undefined, [], true), /IDEMPOTENCY_KEY_REUSED/);
+});
+
+test("Generation API 在 backup gate 后退休终态且 tombstone 永久保持幂等与终态订阅", async t => {
+  const root = await tempFixture(t, "generation-retention-");
+  const runId = "37373737-3737-4737-8737-373737373737", recordId = "panel_retired_fixture";
+  const request = { recordId, message: "fixed fictional request", attachmentIds: [] as string[], requestOutputs: false };
+  const finishedAt = "2026-06-01T00:00:00.000Z";
+  const stored: PanelRunRecord = { version: 1, runId, recordId, requestHash: generationRequestFingerprint(request),
+    fingerprintMatcherVersion: currentGenerationRequestFingerprintMatcherVersion, sequence: 5, status: "completed",
+    createdAt: "2026-05-31T23:59:00.000Z", startedAt: "2026-05-31T23:59:01.000Z",
+    updatedAt: finishedAt, finishedAt, revision: "fixture-revision" };
+  const store = new PanelRunStore(root); await store.put(stored);
+  const before = publicRun(stored); let bridgeCalls = 0;
+  const unconfirmed = new PanelGenerationApi({ async generate() { bridgeCalls++; throw new Error("bridge must not run"); } },
+    { dataRoot: root, runtimeByAgent: new Map(), runRetentionDays: 30 });
+  await unconfirmed.initialize();
+  assert.equal(isPanelRunTombstone((await store.get(runId))!), false);
+  await assert.rejects(unconfirmed.maintainRuns(), /RUN_RETENTION_BACKUP_CONFIRMATION_REQUIRED/);
+
+  const api = new PanelGenerationApi({ async generate() { bridgeCalls++; throw new Error("bridge must not run"); } },
+    { dataRoot: root, runtimeByAgent: new Map(), runRetentionDays: 30, runRetentionBackupConfirmed: true });
+  await api.initialize();
+  const retired = await store.get(runId); assert.ok(retired && isPanelRunTombstone(retired));
+  assert.deepEqual(publicRun(retired), before);
+  const retry = await api.create(recordId, request.message, runId, undefined, [], false);
+  assert.equal(retry.newlyCreated, false); assert.deepEqual(retry, { ...before, newlyCreated: false });
+  assert.equal(bridgeCalls, 0);
+  await assert.rejects(api.create(recordId, "different", runId), /IDEMPOTENCY_KEY_REUSED/);
+  assert.deepEqual(await api.get(runId), before); assert.deepEqual(await api.abortRun(runId), before);
+  const snapshots: unknown[] = []; const unsubscribe = await api.subscribe(runId, run => snapshots.push(run));
+  assert.equal(typeof unsubscribe, "function"); assert.deepEqual(snapshots, [before]);
+});
+
+test("retired failed run 只由稳定错误码重建公开错误，不保留原始诊断", async t => {
+  const root = await tempFixture(t, "generation-retired-error-");
+  const runId = "38383838-3838-4838-8838-383838383838", recordId = "panel_failed_fixture";
+  const request = { recordId, message: "fixed failed request", attachmentIds: [] as string[], requestOutputs: false };
+  const store = new PanelRunStore(root); await store.put({ version: 1, runId, recordId,
+    requestHash: generationRequestFingerprint(request), fingerprintMatcherVersion: currentGenerationRequestFingerprintMatcherVersion,
+    sequence: 3, status: "failed", createdAt: "2026-05-01T00:00:00.000Z", updatedAt: "2026-05-01T00:01:00.000Z",
+    finishedAt: "2026-05-01T00:01:00.000Z", error: { code: "PRIVATE_FIXTURE_CODE", message: "private fixture diagnostic" } });
+  const api = new PanelGenerationApi({ async generate() { throw new Error("bridge must not run"); } },
+    { dataRoot: root, runtimeByAgent: new Map(), runRetentionDays: 30, runRetentionBackupConfirmed: true });
+  await api.initialize();
+  assert.deepEqual((await api.get(runId))?.error, { code: "RUN_FAILED", message: "生成失败，请稍后重试。" });
+  const tombstone = await store.get(runId); assert.ok(tombstone && isPanelRunTombstone(tombstone));
+  assert.equal(JSON.stringify(tombstone).includes("private fixture"), false);
 });
 
 test("revision 冲突在调用 bridge 前被拒绝", async t => {
