@@ -51,6 +51,7 @@ export class CompactionLiveProbeError extends Error {
 export interface CompactionProbeObservation {
   compacted: boolean;
   reason?: unknown;
+  upstreamCompacted?: unknown;
   createCalls: number;
   compactCalls: number;
   sendCalls: number;
@@ -61,8 +62,9 @@ export interface CompactionProbeObservation {
 }
 
 export function classifyCompactionProbeObservation(observation: CompactionProbeObservation): string | null {
-  if (!observation.compacted) return observation.reason === "NO_EFFECTIVE_REDUCTION" ?
-    "PROBE_NO_EFFECTIVE_REDUCTION" : "PROBE_COMPACTION_NOT_ACCEPTED";
+  if (!observation.compacted) return observation.upstreamCompacted === true && observation.reason === "NO_EFFECTIVE_REDUCTION" ?
+    "PROBE_PANEL_NO_EFFECTIVE_REDUCTION" : "PROBE_COMPACTION_NOT_ACCEPTED";
+  if (observation.upstreamCompacted !== true) return "PROBE_COMPACTION_PROVENANCE_INVALID";
   if (observation.createCalls !== 1 || observation.compactCalls !== 1 || observation.sendCalls !== 0 ||
     observation.deleteCalls !== 1 || observation.usageCalls !== 2) return "PROBE_CALL_COUNTS_INVALID";
   const preUsage = observation.preUsage, postUsage = observation.postUsage;
@@ -203,6 +205,7 @@ async function inspectEmptyWorkspace(path: string, expected?: WorkspaceIdentity)
 
 class RecordingCompactionClient implements GatewayClient {
   created: CreatedSession | undefined; preUsage: OpenClawContextUsage | undefined; postUsage: OpenClawContextUsage | undefined;
+  upstreamCompacted: boolean | undefined;
   createCalls = 0; compactCalls = 0; sendCalls = 0; deleteCalls = 0; usageCalls = 0;
   constructor(private readonly client: GatewayClient, private readonly request: CompactionLiveProbeRequest,
     private readonly root: LiveProbeRootIdentity, private readonly inspectCreated: NonNullable<CompactionLiveProbeDependencies["inspectCreated"]>,
@@ -238,6 +241,7 @@ class RecordingCompactionClient implements GatewayClient {
     this.compactCalls++;
     this.usageCalls++; this.preUsage = await this.client.sessionContextUsage?.(this.request.agentId, sessionKey);
     const result = await this.client.compactSession?.(sessionKey); if (!result) throw new CompactionLiveProbeError("PROBE_COMPACTION_UNSUPPORTED");
+    this.upstreamCompacted = result.compacted;
     return result;
   }
   async sessionContextUsage(runtimeAgentId: string, sessionKey: string) {
@@ -304,6 +308,7 @@ export async function runCompactionLiveProbe(request: CompactionLiveProbeRequest
     const initial = await loadPanelSession(panel.path, PANEL_AGENT_ID, RECORD_ID), initialStat = await lstat(transcriptPath);
     const initialRevision = `${initialStat.size}:${initialStat.mtimeMs}`, result = await api.compact(RECORD_ID, initialRevision);
     const observationError = classifyCompactionProbeObservation({ compacted: result.compacted, reason: result.reason,
+      upstreamCompacted: client.upstreamCompacted,
       createCalls: client.createCalls,
       compactCalls: client.compactCalls, sendCalls: client.sendCalls, deleteCalls: client.deleteCalls, usageCalls: client.usageCalls,
       ...(client.preUsage ? { preUsage: client.preUsage } : {}), ...(client.postUsage ? { postUsage: client.postUsage } : {}) });
