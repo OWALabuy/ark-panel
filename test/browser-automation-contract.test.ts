@@ -62,6 +62,7 @@ test("browser harness preserves primary failures and diagnoses bounded cleanup",
   };
   const worstCleanup = evaluate("CLEANUP_WORST_CASE_MS");
   const margin = evaluate("CLEANUP_MARGIN_MS");
+  assert.ok(evaluate("FIREFOX_SESSION_START_MS") > evaluate("WAIT_MS"));
   assert.ok(evaluate("CLEANUP_HOOK_MS") >= worstCleanup + margin);
   assert.ok(evaluate("DESKTOP_WATCHDOG_MS") + worstCleanup + margin < evaluate("DESKTOP_TEST_TIMEOUT_MS"));
   assert.ok(evaluate("MOBILE_WATCHDOG_MS") + worstCleanup + margin < evaluate("MOBILE_TEST_TIMEOUT_MS"));

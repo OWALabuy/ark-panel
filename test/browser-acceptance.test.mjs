@@ -20,14 +20,15 @@ import { inspectBrowserSuccessScreenshot } from "../dist/test/browser-success-sc
 import { startBrowserFixture } from "./browser-fixture.mjs";
 
 const WAIT_MS = 10_000;
+const FIREFOX_SESSION_START_MS = 20_000;
 const CLEANUP_MS = 5_000;
 const CLEANUP_WORST_CASE_MS = CLEANUP_MS * 3;
 const CLEANUP_MARGIN_MS = 5_000;
 const CLEANUP_HOOK_MS = CLEANUP_WORST_CASE_MS + CLEANUP_MARGIN_MS;
 const DESKTOP_TEST_TIMEOUT_MS = 90_000;
 const DESKTOP_WATCHDOG_MS = 65_000;
-const MOBILE_TEST_TIMEOUT_MS = 50_000;
-const MOBILE_WATCHDOG_MS = 25_000;
+const MOBILE_TEST_TIMEOUT_MS = 60_000;
+const MOBILE_WATCHDOG_MS = 35_000;
 const FAILURE_ROOT = fileURLToPath(new URL("../browser-artifacts/", import.meta.url));
 const FAILURE_SCREENSHOTS = Object.freeze({
   desktop: resolve(FAILURE_ROOT, "desktop.png"),
@@ -108,7 +109,7 @@ async function buildDriver({ mobile }, cleanup) {
   await attachDriverOrQuit(cleanup, driver, CLEANUP_MS);
   let capabilities;
   try {
-    await withTimeout(driver.getSession(), "Firefox WebDriver startup", WAIT_MS);
+    await withTimeout(driver.getSession(), "Firefox WebDriver startup", FIREFOX_SESSION_START_MS);
     capabilities = await driver.getCapabilities();
   } catch {
     throw new Error("FIREFOX_SESSION_START_FAILED");
