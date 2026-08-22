@@ -103,9 +103,10 @@ reviewed panel-owned memory workflow, and manual durable long-context strategy a
 configuration contract gives scratch and eligible chats the same workspace/bootstrap/tool policy,
 while only eligible chats enter panel-managed consolidation; whether a particular runtime actually
 injects and recalls memory remains unknown pending #48. Compaction never deletes the full panel
-transcript and is not automatic. Terminal run records
-are currently retained indefinitely to preserve idempotency; a retention policy requires a separate
-long-lived tombstone design. The detailed boundary lives in [the memory-module decision](docs/decisions/panel-memory.md).
+transcript and is not automatic. Full terminal run records are retained for 30 days by default, then
+retired into one of 256 fixed idempotency-tombstone shards. Those minimal tombstones are retained
+indefinitely, so an old key can never execute again without retaining one file per run. The detailed
+boundary lives in the [implementation specification](docs/implementation-spec.md).
 OpenClaw compatibility remains version-gated maintenance. Real runtime, bootstrap, memory, proxy/TLS,
 and deployed SSE status remains unknown pending the controlled #48 acceptance recorded in the current
 matrix; dated evidence is not a timeless guarantee. The experience-feature rationale lives in
@@ -147,6 +148,7 @@ export PANEL_PORT='8790'
 export PANEL_CONTEXT_HISTORY_BUDGET_TOKENS='100000'
 export PANEL_GATEWAY_RUN_TIMEOUT_MS='1800000'
 export PANEL_RUN_WATCHER_GRACE_MS='30000'
+export PANEL_RUN_RETENTION_DAYS='30'
 # Optional: disable live preview while retaining durable generation and SSE lifecycle events.
 export PANEL_OPENCLAW_STREAMING='1'
 
@@ -169,6 +171,8 @@ export PANEL_MEMORY_RUNTIMES='{
 Uploaded files live under `PANEL_DATA_DIR/files` in content-addressed private storage and are included in normal backups. Office files are deliberately not converted: OpenClaw receives the original file and the model may inspect it with its own Python/skill tooling. OpenClaw's run artifacts are always collected without changing the user message. Only when the composer’s per-turn “Need files” toggle is enabled does the server create `.openclaw/tmp/ark-panel/<run-id>/outputs` below the configured workspace and append its output instruction to that turn sent to the runtime. Collected files are copied into panel storage before the temporary directory is removed. Symlinks, hardlinks, special files, path escapes, excessive file counts, and excessive sizes are rejected.
 
 Long-running agent work defaults to a 30-minute OpenClaw execution limit (`PANEL_GATEWAY_RUN_TIMEOUT_MS`). The panel then waits an additional 30 seconds (`PANEL_RUN_WATCHER_GRACE_MS`) for the terminal trajectory event, so an upstream timeout or abort is reported accurately instead of being hidden by a simultaneous panel timeout.
+
+`PANEL_RUN_RETENTION_DAYS` is an integer from `0` to `36500`, defaulting to `30`. After that many days, a full terminal run is replaced by a minimal entry in one of 256 fixed tombstone shards; tombstones remain indefinitely to preserve idempotency. Set the value to `0` to stop future retirement. This does not restore records already retired. A completed and verified offline backup of `PANEL_DATA_DIR` must exist before the first full run is replaced and deleted. For the first controlled start with retention enabled, set `PANEL_RUN_RETENTION_MIGRATION_CONFIRM=verified-offline-pre-gc-backup-v1`; the panel records a durable migration barrier, after which remove this one-time variable. Any other declared value is rejected. An older binary can be recovered only by restoring that pre-GC backup, not by pointing it at a data directory that already contains tombstone shards.
 
 The panel reuses one server-side control WebSocket to the local OpenClaw Gateway while keeping browsers on the panel's authenticated SSE endpoint; the Gateway credential is never sent to a browser. For the pinned OpenClaw `2026.6.11`, the connection uses `gateway-client/backend`, role `operator`, and requests exactly `operator.read`, `operator.write`, and `operator.admin`; it rejects a `hello` grant that is missing, duplicates, or adds a scope. Read covers status/catalog/session observation and artifact collection, write covers temporary-session creation, send (including Base64 attachments), and abort, and admin covers session overrides, compaction, and deletion. An explicit, versioned RPC allowlist rejects every unreviewed method locally before a frame is sent.
 

@@ -42,6 +42,7 @@ export PANEL_PORT='8790'
 export PANEL_CONTEXT_HISTORY_BUDGET_TOKENS='100000'
 export PANEL_GATEWAY_RUN_TIMEOUT_MS='1800000'
 export PANEL_RUN_WATCHER_GRACE_MS='30000'
+export PANEL_RUN_RETENTION_DAYS='30'
 
 export PANEL_READ_AGENTS='{
   "assistant":{"label":"Assistant","sessionsRoot":"/srv/openclaw/agents/assistant/sessions"}
@@ -224,7 +225,35 @@ npm run backup -- backup "$PANEL_DATA_DIR" /srv/backups/ark-panel before-upgrade
 npm run backup -- verify /srv/backups/ark-panel/before-upgrade
 ```
 
-每份备份含逐文件大小/SHA-256 和空目录清单的 `manifest.json`。工具拒绝 symlink、特殊文件、路径越界、源/目标重叠、已有同名备份，以及超过清单、条目、单文件或总字节上限的输入；先在备份根下完成权限为 `0700/0600` 的临时树并同步，再原子改名发布。恢复使用目标名锁避免并发操作，在实际复制时逐文件再次核对大小和哈希，并复核目标父目录身份；恢复目标仍必须不存在。
+每份备份含逐文件大小/SHA-256 和空目录清单的 `manifest.json`。工具拒绝 symlink、特殊文件、路径越界、源/目标重叠、已有同名备份，以及超过 20000 个条目、单文件 256 MiB 或合计 4 GiB 的输入；先在备份根下完成权限为 `0700/0600` 的临时树并同步，再原子改名发布。恢复使用目标名锁避免并发操作，在实际复制时逐文件再次核对大小和哈希，并复核目标父目录身份；恢复目标仍必须不存在。
+
+### 终态 run 保留与回滚
+
+`PANEL_RUN_RETENTION_DAYS` 默认 `30`，接受 `0` 到 `36500` 的整数。完整终态 run 到期后，
+维护任务把最小幂等 tombstone 无限期保留在 256 个固定分片中，再删除对应独立 run 文件。
+服务启动恢复完成后执行首批维护，之后每 6 小时串行维护；批次不会重叠。设为 `0` 只会
+停止后续退休，已经写入分片的 tombstone 不会恢复为完整记录。
+
+固定 256 个分片只限制 inode 数；永久幂等条目的总字节仍会随历史 run 线性增长。分片或
+总容量触及安全上限（每分片 16384 条或 8 MiB，全部分片合计 2 GiB）时，退休会失败
+关闭，保留对应完整 run 且不会删除已有 tombstone。这时必须先评审新的版本化格式和
+容量迁移方案。备份的 20000 条目、单文件 256 MiB、
+总计 4 GiB 上限同样适用，接近任一边界前必须扩展容量规划。
+
+从不含 tombstone 分片的版本升级时，必须在删除首个已转换的完整 run 前按上面的步骤
+停止服务并完成、验证一份离线 pre-GC 备份；若暂未准备好回滚备份，先显式设置
+`PANEL_RUN_RETENTION_DAYS=0`。
+首次以非零保留期受控启动时，临时设置且只接受以下精确确认值：
+
+```sh
+PANEL_RUN_RETENTION_MIGRATION_CONFIRM='verified-offline-pre-gc-backup-v1' npm start
+```
+
+若 durable migration barrier 尚不存在，缺少确认时不会退休；声明空值或任何其它值会
+拒绝启动且日志不回显该值。服务成功写入 barrier 后移除这个一次性环境变量，后续启动
+不再需要它；保留期为 `0` 时不会创建 barrier。一旦 GC 已经写入分片，旧 binary 不能
+安全打开该数据目录。回滚只能停止服务并恢复那份
+启用 GC 前的备份到新的数据目录；不要删除分片、把天数改为 `0`，或手工拼接新旧 run 文件。
 
 恢复永远写入一个不存在的新目录，校验全部文件后才原子就位，不覆盖现有数据：
 

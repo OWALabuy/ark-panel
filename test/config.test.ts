@@ -60,6 +60,27 @@ test("运行 timeout 使用长程默认值并校验独立 grace", async () => {
   assert.throws(() => parsePanelConfig({ ...auth, PANEL_RUN_WATCHER_GRACE_MS: "600001" }, moduleUrl), /PANEL_RUN_WATCHER_GRACE_MS/);
 });
 
+test("终态 run 保留期默认 30 天并严格限制为 0–36500 天", () => {
+  const defaults = parsePanelConfig(auth, moduleUrl);
+  assert.equal(defaults.runRetentionDays, 30);
+  assert.equal(defaults.runRetentionBackupConfirmed, false);
+  assert.equal(parsePanelConfig({ ...auth, PANEL_RUN_RETENTION_DAYS: "0" }, moduleUrl).runRetentionDays, 0);
+  assert.equal(parsePanelConfig({ ...auth, PANEL_RUN_RETENTION_DAYS: "36500" }, moduleUrl).runRetentionDays, 36_500);
+  for (const value of ["", "-1", "36501", "1.5", "1e2", "+1", " 30", "30 ", "NaN"]) {
+    assert.throws(() => parsePanelConfig({ ...auth, PANEL_RUN_RETENTION_DAYS: value }, moduleUrl), /PANEL_RUN_RETENTION_DAYS/);
+  }
+  const confirmed = parsePanelConfig({ ...auth,
+    PANEL_RUN_RETENTION_MIGRATION_CONFIRM: "verified-offline-pre-gc-backup-v1" }, moduleUrl);
+  assert.equal(confirmed.runRetentionBackupConfirmed, true);
+  for (const value of ["", "verified-offline-pre-gc-backup", "private-confirmation-canary"]) {
+    assert.throws(() => parsePanelConfig({ ...auth, PANEL_RUN_RETENTION_MIGRATION_CONFIRM: value }, moduleUrl), error => {
+      assert.ok(error instanceof Error); assert.match(error.message, /PANEL_RUN_RETENTION_MIGRATION_CONFIRM/);
+      if (value) assert.equal(error.message.includes(value), false);
+      return true;
+    });
+  }
+});
+
 test("默认请求边界只信任规范化的本机 HTTP Host 与 Origin", () => {
   const defaults = parsePanelConfig(auth, moduleUrl);
   assert.equal(defaults.host, "127.0.0.1"); assert.equal(defaults.publicOrigin, undefined);

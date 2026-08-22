@@ -112,9 +112,14 @@ committing、aborting 和终态转换只向前推进。服务重启从权威 run
 索引；无法证明可安全重放的上游 run 以孤儿失败结束，绝不盲目重发可能有工具副作用
 的请求。
 
-终态 run 目前无限期保留，以维持旧 idempotency key 的语义；终态记录会清除消息正文
-与模型输出，只保留指纹、终态、revision 和必要诊断。这是当前限制。引入保留期之前
-必须同时设计更长期 tombstone、迁移和回滚，不能直接 GC。
+完整终态 run 默认保留 30 天。到期记录在同 run 串行化边界内先写入按 runId hash
+分配的 256 个固定 tombstone 分片之一，确认分片持久化后才删除独立 run 文件。分片中的
+最小 tombstone 无限期保留指纹与脱敏终态，因此旧 idempotency key 不能重新执行，而
+inode 数不会随历史 run 无限增长。`PANEL_RUN_RETENTION_DAYS=0` 只停止后续退休，不恢复
+已退休记录。固定分片只限制 inode 数，最小幂等数据的总字节仍随历史 run 线性增长；
+分片或总容量触及安全上限时，维护失败关闭并保留完整 run 和既有 tombstone。首次启用
+需要精确的一次性备份确认，服务据此写入 durable migration barrier；旧 binary 必须恢复
+启用 GC 前的离线备份，不能直接打开含 tombstone 的数据根。
 
 Gateway 的 `chat` 与 `agent` / `session.tool` 事件只形成进程内临时预览，通过面板 SSE 转发。
 服务端把合法的上游 sequence 投影为单一 text/tool timeline：连续文本合并，tool start 固定

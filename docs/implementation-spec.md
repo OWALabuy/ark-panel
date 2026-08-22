@@ -262,9 +262,34 @@ run JSON 是权威状态。进程首次需要时扫描 run 根并构建单一 ac
 failure、未观察到 start 和 watcher timeout。清理前必须确认 terminal 且 no-active-run；
 无法确认时保留 artifact 与 `cleanupPending`。
 
-终态 run 当前无限期保留。记录不保留消息正文或模型输出，但会持续增长。任何 retention
-实现必须同时提供更长期 idempotency tombstone、迁移与回滚；当前不能直接删除旧终态
-记录。这是已知限制，而不是已排期能力。
+完整终态 run 默认保留 30 天，`PANEL_RUN_RETENTION_DAYS` 接受 `0` 到 `36500` 的整数，
+其中 `0` 禁止后续退休。服务在启动恢复完成后执行首批维护，之后每 6 小时以不可重入
+任务串行执行 run retirement 与附件维护。到期判定使用终态 `finishedAt`；非终态、缺少
+合法时间或仍有 `cleanupPending` 的记录不能退休。
+
+退休先把最小幂等信息写入按 runId hash 分配的 256 个固定、版本化 tombstone 分片之一，
+确认原子替换及目录 durability 后，才按已固定的文件身份删除独立完整 run 文件。每个
+run 的 put/create 与退休共享串行化边界；延迟 put 不能覆盖 tombstone。若进程在分片落盘
+后、完整文件删除前退出，重启只在两者身份与指纹完全一致时清理重复副本；任何冲突均
+失败关闭。维护按扫描数、退休数和耗时分批，不允许两个批次重叠。
+
+256 个分片只为 tombstone inode 数提供固定上限；永久幂等所需的总字节仍随 run 数线性
+增长。每个分片最多 16384 条且不超过 8 MiB，全部分片合计不超过 2 GiB；任一安全容量
+上限将被突破时，本批退休必须失败关闭：保留完整 run，不删除或截断任何已有 tombstone。
+继续扩容需要新的版本化格式、迁移与容量规划，不能静默提高边界。离线备份工具当前
+上限为 20000 个条目、单文件 256 MiB、合计 4 GiB，
+运维必须在接近边界前规划下一格式，而不能把备份成功当成无限容量保证。
+
+tombstone 无限期保留 run/record identity、请求指纹及 matcher version、脱敏终态、sequence、
+revision 与必要时间；不得保留消息、模型输出、附件、诊断正文、runtime/session 路径或
+原始错误文本。相同 idempotency key 与相同指纹返回原终态且不执行，指纹不同仍返回
+`IDEMPOTENCY_KEY_REUSED`。设为 `0` 不会把 tombstone 还原为完整记录。删除首个已转换的
+完整 run 前必须已经完成并验证离线 pre-GC 备份。第一次以非零保留期启用时，若 durable
+migration barrier 尚不存在，必须精确声明
+`PANEL_RUN_RETENTION_MIGRATION_CONFIRM=verified-offline-pre-gc-backup-v1`；缺失时退休失败
+关闭，声明空值或其它值则配置启动失败且不得回显该值。确认后原子写入 barrier，后续
+启动不再需要该环境变量；保留期为 `0` 时不创建 barrier。旧 binary 的唯一回滚路径是
+恢复该备份，禁止原地打开包含新分片格式的数据根。
 
 ## 7. Gateway WebSocket 契约
 
@@ -475,7 +500,7 @@ coverage、fixture browser 与 deployment dry-run 只证明仓库内确定性边
 
 当前明确限制：
 
-- 终态 run 无限期保留；尚无 retention + tombstone 回收策略；
+- 最小 run tombstone 为保持永久幂等而无限期保留；完整终态记录按配置的保留期退休；
 - 只支持 OpenClaw `2026.6.11`；升级前必须重验软耦合面；
 - active/reset 只读，不能从 panel 写回真实渠道会话；
 - 搜索只在选定 agent 内，普通/归档由当前视图决定，无 source-kind 筛选；

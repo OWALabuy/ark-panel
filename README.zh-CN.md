@@ -101,9 +101,9 @@ $$
 和手动持久长上下文策略均已提供。配置合同为 `scratch` 与 `eligible` 聊天采用相同的
 workspace/bootstrap/tool 策略，只有 `eligible` 进入面板沉淀流程；特定 runtime 是否
 实际注入并召回记忆在 #48 前未知。压缩不会删除面板完整 transcript，也不会自动静默
-执行。终态 run 目前无限期保留以维持
-幂等语义；回收策略必须另行设计长期 tombstone。详细边界见
-[记忆模块决定](docs/decisions/panel-memory.md)。OpenClaw 兼容性保持版本门禁。真实 runtime、
+执行。完整终态 run 默认保留 30 天，之后归入 256 个固定幂等 tombstone 分片之一。
+最小 tombstone 无限期保留，因此旧 key 永远不能再次执行，同时不会为每个 run 永久保留
+一个文件。详细边界见[实现规格说明](docs/implementation-spec.md)。OpenClaw 兼容性保持版本门禁。真实 runtime、
 bootstrap、memory、proxy/TLS 和部署后的 SSE 当前状态，在当前矩阵记录的 #48 受控验收
 完成前均为未知；日期化证据不是永久保证。体验功能的取舍理由见
 [体验功能决策记录](docs/decisions/ux-features.md)；详细的约束和验收标准见
@@ -144,6 +144,7 @@ export PANEL_PORT='8790'
 export PANEL_CONTEXT_HISTORY_BUDGET_TOKENS='100000'
 export PANEL_GATEWAY_RUN_TIMEOUT_MS='1800000'
 export PANEL_RUN_WATCHER_GRACE_MS='30000'
+export PANEL_RUN_RETENTION_DAYS='30'
 # 可选:关闭实时预览，同时保留持久的生成过程和 SSE 生命周期事件。
 export PANEL_OPENCLAW_STREAMING='1'
 
@@ -166,6 +167,8 @@ export PANEL_MEMORY_RUNTIMES='{
 上传的文件存放在 `PANEL_DATA_DIR/files` 下，采用内容寻址的私有存储，并纳入常规备份。Office 文件有意不做转换:OpenClaw 收到原始文件，模型可以用自己的 Python/技能工具去检视。面板始终收集 OpenClaw 的本轮运行产物，且不会为此改写用户消息。只有输入框本轮开启“需要文件”时，服务端才会在配置的工作区下创建 `.openclaw/tmp/ark-panel/<run-id>/outputs`，并把对应产出指令附加到发送给 runtime 的本轮消息。文件复制进面板存储后再删除临时目录。符号链接、硬链接、特殊文件、路径逃逸、过多的文件数量和过大的体积都会被拒绝。
 
 长时间运行的智能体工作默认有 30 分钟的 OpenClaw 执行上限(`PANEL_GATEWAY_RUN_TIMEOUT_MS`)。面板随后会额外等待 30 秒(`PANEL_RUN_WATCHER_GRACE_MS`)以接收终止的轨迹事件，这样上游的超时或中止能被准确报告，而不会被面板同时发生的超时所掩盖。
+
+`PANEL_RUN_RETENTION_DAYS` 必须是 `0` 到 `36500` 的整数，默认 `30`。完整终态 run 到期后会被替换为 256 个固定 tombstone 分片之一的最小条目；tombstone 为保持幂等而无限期保留。设为 `0` 只停止后续退休，不会恢复已经退休的记录。删除首个已转换的完整 run 前，必须已经完成并验证 `PANEL_DATA_DIR` 的离线 pre-GC 备份。首次受控启动 retention 时设置 `PANEL_RUN_RETENTION_MIGRATION_CONFIRM=verified-offline-pre-gc-backup-v1`；面板写入 durable migration barrier 后立即移除这个一次性变量，声明任何其它值都会拒绝启动。旧版程序禁止原地打开已经包含 tombstone 分片的数据目录，只能恢复该备份。
 
 面板复用服务器端一条到本机 OpenClaw Gateway 的控制 WebSocket，同时让浏览器只连接面板已认证的 SSE 端点；Gateway 凭据绝不会发送到浏览器。对固定适配的 OpenClaw `2026.6.11`，连接身份为 `gateway-client/backend`、角色为 `operator`，且只请求 `operator.read`、`operator.write`、`operator.admin` 这三个 scope；`hello` 授权缺项、重复或多出任何 scope 都会被拒绝。read 用于状态/目录/session 观察和 artifact 收集，write 用于创建临时 session、发送消息（包括 Base64 附件）与停止，admin 用于 session override、压缩和删除。显式、版本化的 RPC 允许列表会在发帧前本地拒绝任何未经评审的方法。
 

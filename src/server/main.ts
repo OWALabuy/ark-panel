@@ -16,6 +16,7 @@ import { PanelAttachmentApi } from "./attachment-api.js";
 import { PanelMemoryApi } from "./memory-api.js";
 import { PanelMemoryConsolidationApi } from "./memory-consolidation-api.js";
 import { MemoryConsolidationStore } from "../storage/memory-consolidation.js";
+import { startGenerationMaintenance, type GenerationMaintenanceHandle } from "./generation-maintenance.js";
 
 const config = parsePanelConfig(process.env, import.meta.url); await validateAndInitializeConfig(config);
 const contextBudget = new ConservativeContextBudget(config.contextHistoryBudgetTokens);
@@ -35,7 +36,7 @@ const operations = new SessionOperationCoordinator();
 const experienceAgentIds = new Set([...config.readAgents.map(agent => agent.agentId), ...config.runtimes.keys()]);
 const experience = config.dataRoot ? new ExperienceStore(config.dataRoot, [...experienceAgentIds]) : undefined;
 let generationApi: PanelGenerationApi | undefined;
-let attachmentMaintenance: NodeJS.Timeout | undefined;
+let generationMaintenance: GenerationMaintenanceHandle | undefined;
 const gatewayControlRequired = Boolean(config.dataRoot && (config.readAgents.length || config.runtimes.size || config.memoryRuntimes.size));
 const gatewayAuth = gatewayControlRequired ? await loadGatewayStreamAuth(process.env, true) : undefined;
 const gatewayConnection = gatewayAuth ? new OpenClawStreamObserver({ ...gatewayAuth, requestTimeoutMs: 15_000,
@@ -52,12 +53,11 @@ if (config.dataRoot && config.runtimes.size) {
   const workspaceByAgent = new Map<string, string>();
   for (const [agentId, value] of config.runtimes) runtimeByAgent.set(agentId, value.runtimeAgentId);
   for (const [agentId, value] of config.runtimes) if (value.workspaceRoot) workspaceByAgent.set(agentId, value.workspaceRoot);
-  generationApi = new PanelGenerationApi(bridge,
-    { dataRoot: config.dataRoot, runtimeByAgent, workspaceByAgent, contextBudget, operations });
+  const generationConfig = { dataRoot: config.dataRoot, runtimeByAgent, workspaceByAgent, contextBudget, operations,
+    runRetentionDays: config.runRetentionDays, runRetentionBackupConfirmed: config.runRetentionBackupConfirmed };
+  generationApi = new PanelGenerationApi(bridge, generationConfig);
   await generationApi.initialize();
-  attachmentMaintenance = setInterval(() => generationApi?.maintainAttachments().catch(error =>
-    process.stderr.write(`[ark-panel] attachment maintenance failed: ${String(error)}\n`)), 6 * 60 * 60 * 1000);
-  attachmentMaintenance.unref();
+  generationMaintenance = startGenerationMaintenance(generationApi);
 }
 const commandApi = config.dataRoot && readApi ? new PanelCommandApi(config.dataRoot, config.readAgents.map(agent => agent.agentId), {
   models: async () => (await gateway.listModels()).models,
@@ -96,7 +96,7 @@ server.listen(config.port, config.host, () => process.stdout.write(`会话面板
 let stopping = false;
 function shutdown(signal: string): void {
   if (stopping) return; stopping = true; process.stdout.write(`收到 ${signal}，停止接受新连接\n`);
-  if (attachmentMaintenance) clearInterval(attachmentMaintenance);
+  generationMaintenance?.stop();
   gatewayConnection?.stop();
   const deadline = setTimeout(() => process.exit(1), 10_000); deadline.unref();
   server.close((error) => { clearTimeout(deadline); if (error) { process.stderr.write(`${error.message}\n`); process.exitCode = 1; } });

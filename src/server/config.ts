@@ -14,11 +14,21 @@ export interface PanelConfig {
   memoryRuntimes: Map<string, MemoryRuntimeConfig>;
   contextHistoryBudgetTokens: number;
   gatewayRunTimeoutMs: number; runWatcherGraceMs: number;
+  runRetentionDays: number;
+  runRetentionBackupConfirmed: boolean;
 }
 
 function boundedInteger(value: string | undefined, fallback: number, name: string, minimum: number, maximum: number): number {
   const parsed = Number(value ?? String(fallback));
   if (!Number.isInteger(parsed) || parsed < minimum || parsed > maximum) throw new Error(`${name} 必须是 ${minimum}–${maximum} 之间的整数毫秒值`);
+  return parsed;
+}
+
+function boundedIntegerDays(value: string | undefined, fallback: number, name: string, maximum: number): number {
+  const source = value ?? String(fallback);
+  if (!/^(0|[1-9]\d*)$/.test(source)) throw new Error(`${name} 必须是 0–${maximum} 之间的整数天数`);
+  const parsed = Number(source);
+  if (!Number.isSafeInteger(parsed) || parsed > maximum) throw new Error(`${name} 必须是 0–${maximum} 之间的整数天数`);
   return parsed;
 }
 
@@ -65,6 +75,12 @@ export function parsePanelConfig(env: NodeJS.ProcessEnv, moduleUrl: string): Pan
   if (!Number.isInteger(contextHistoryBudgetTokens) || contextHistoryBudgetTokens < 1024) throw new Error("PANEL_CONTEXT_HISTORY_BUDGET_TOKENS 必须是至少 1024 的整数");
   const gatewayRunTimeoutMs = boundedInteger(env.PANEL_GATEWAY_RUN_TIMEOUT_MS, 30 * 60_000, "PANEL_GATEWAY_RUN_TIMEOUT_MS", 1_000, 24 * 60 * 60_000);
   const runWatcherGraceMs = boundedInteger(env.PANEL_RUN_WATCHER_GRACE_MS, 30_000, "PANEL_RUN_WATCHER_GRACE_MS", 100, 10 * 60_000);
+  const runRetentionDays = boundedIntegerDays(env.PANEL_RUN_RETENTION_DAYS, 30, "PANEL_RUN_RETENTION_DAYS", 36_500);
+  const runRetentionConfirmation = env.PANEL_RUN_RETENTION_MIGRATION_CONFIRM;
+  if (runRetentionConfirmation !== undefined && runRetentionConfirmation !== "verified-offline-pre-gc-backup-v1") {
+    throw new Error("PANEL_RUN_RETENTION_MIGRATION_CONFIRM 确认值无效");
+  }
+  const runRetentionBackupConfirmed = runRetentionConfirmation !== undefined;
   const read = jsonObject(env.PANEL_READ_AGENTS, "PANEL_READ_AGENTS"), runtime = jsonObject(env.PANEL_AGENT_RUNTIMES, "PANEL_AGENT_RUNTIMES"), memoryRuntime = jsonObject(env.PANEL_MEMORY_RUNTIMES, "PANEL_MEMORY_RUNTIMES");
   const readAgents = Object.entries(read).map(([agentId, value]) => {
     if (typeof value.sessionsRoot !== "string" || (value.label !== undefined && typeof value.label !== "string")) throw new Error("PANEL_READ_AGENTS 格式错误");
@@ -91,7 +107,8 @@ export function parsePanelConfig(env: NodeJS.ProcessEnv, moduleUrl: string): Pan
   return { username: env.PANEL_USERNAME!, passwordHash: env.PANEL_PASSWORD_HASH!, sessionSecret: env.PANEL_SESSION_SECRET!, secureCookie,
     host: "127.0.0.1", port, publicDir: env.PANEL_PUBLIC_DIR ? resolve(env.PANEL_PUBLIC_DIR) : fileURLToPath(new URL("../../../src/frontend/", moduleUrl)),
     ...(env.PANEL_DATA_DIR ? { dataRoot: resolve(env.PANEL_DATA_DIR) } : {}), mock: env.PANEL_MOCK_DATA === "1", readAgents, runtimes, contextHistoryBudgetTokens,
-    ...(external ? { publicOrigin: external.origin } : {}), trustedHosts, allowedOrigins, gatewayRunTimeoutMs, runWatcherGraceMs, memoryRuntimes };
+    ...(external ? { publicOrigin: external.origin } : {}), trustedHosts, allowedOrigins, gatewayRunTimeoutMs, runWatcherGraceMs, runRetentionDays,
+    runRetentionBackupConfirmed, memoryRuntimes };
 }
 
 async function safeDirectory(path: string, label: string): Promise<string> {
