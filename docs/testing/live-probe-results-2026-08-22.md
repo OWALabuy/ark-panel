@@ -139,6 +139,23 @@ explicit wildcard deny and passed the exact-empty effective-tools gate.
 
 ## Bootstrap and memory continuity (#48)
 
+At ark-panel `a45b6ec`, a new disposable target `panel-runtime-probe-memory-native` used the pinned
+native OpenClaw transcript contract and bounded cleanup for the generated skill-prompt cache. The
+target had zero bindings, configured catalog coverage for `browser`/`canvas`/`memory_search`, and an
+effective tool set of exactly `["memory_search"]`. One probe send reached terminal completion. In
+the same run window, Gateway logged a sanitized embeddings `429 insufficient_quota`; the fixed probe
+result was:
+
+```json
+{"schemaVersion":1,"probe":"runtime-acceptance","status":"failed","errorCode":"PROBE_MEMORY_RESULT_INVALID","cleanupCode":null}
+```
+
+The successful cleanup removed the temporary session and generated cache. The dedicated Gateway
+was stopped, the exact disposable agent was deleted, and follow-up checks found no probe root,
+listener on port 19879, or matching process. The quota diagnostic is consistent with the missing
+result marker, but the generic probe code does not prove that it was the only cause. This is not
+proof for any configured #48 target, so #48 remains open and the model call was not retried.
+
 The isolated target `panel-runtime-probe-memory-live` had zero bindings, a single fixed fictional
 memory canary and an effective tool set of exactly `["memory_search"]`. One real model run completed,
 but the authoritative added transcript did not contain the required unique direct chain of one
