@@ -4,7 +4,8 @@ This is dated evidence, not a timeless compatibility guarantee.
 
 - ark-panel commits: initial isolated probes at `f9f20d461b775797c1f4fddd32e6bb97f6504ed2`;
   staged diagnostic reruns at `299e80a9efbfe13cddc555e7a1faf68aacccd0dc` and
-  `a9285217468a5eebd3ea969735a0ed750e8d16bb`
+  `a9285217468a5eebd3ea969735a0ed750e8d16bb`; provenance-confirmed rerun at
+  `8b6d35d3a7303d9934f2be92bbe92ccc5d2903ee`
 - OpenClaw: `2026.6.11 (e085fa1)`
 - Gateway: temporary loopback listener on an otherwise unused port, started with `umask 077`
 - configuration: built from an empty file with an allowlist of model/provider, local Gateway,
@@ -30,6 +31,24 @@ connection contract, but not a different OpenClaw version, remote Gateway, addit
 reduced-scope connection.
 
 ## Compaction revision and usage (#21)
+
+Commit `8b6d35d3a7303d9934f2be92bbe92ccc5d2903ee` added an internal boolean recording
+whether the raw OpenClaw compact result was accepted; the boolean never enters probe output. A new
+isolated agent then repeated the fixed one-compact, zero-send scenario and returned:
+
+```json
+{"schemaVersion":1,"probe":"compaction","status":"failed","errorCode":"PROBE_PANEL_NO_EFFECTIVE_REDUCTION","cleanupCode":null}
+```
+
+This fixed code is emitted only when the raw OpenClaw result was `compacted: true`, the appended
+compaction entry passed bridge verification, and `PanelCompactionApi` then returned the exact
+panel-owned `NO_EFFECTIVE_REDUCTION` reason. The live result therefore confirms that the conservative
+panel comparison rejected this particular fixed candidate because it did not strictly reduce the
+effective context. The original transcript and revision remained authoritative. #21 remains open
+because its acceptance requires an actually reduced, committed revision and matching fresh reload;
+this fixed fictional scenario did not produce one. Cleanup again removed the runtime session and
+probe panel root, stopped the Gateway, deleted the exact temporary agent, removed the known
+plugin-skill links, deleted the validated private state root, and left no listener or probe root.
 
 The final diagnostic commit `a9285217468a5eebd3ea969735a0ed750e8d16bb` recognizes the exact
 reason string `NO_EFFECTIVE_REDUCTION`; missing and other reason values stay folded into the generic
