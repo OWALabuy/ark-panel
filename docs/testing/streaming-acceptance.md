@@ -64,8 +64,13 @@ Gateway 认证；创建一次性 session 后还要求 effective tool inventory *
 同一次调用的 sanitized terminal result shape 和权威 trajectory terminal；没有固定
 `250ms` sleep，也不会重发。
 
-`maxToolCalls=1` 是观察后的失败关闭界限，不是工具沙箱：第二个 start 被观察时，调用
-可能已经开始。因此只有经明确授权的专用、零绑定 agent 才能运行。输出只含固定 shape
+临时 Gateway 必须以 `umask 077` 启动；sessions 根不得包含 session/artifact，只允许
+owner-only、普通单链接且内容精确为空对象的 OpenClaw `sessions.json`。
+
+`maxToolCalls=1` 和预期 args 都是观察后的失败关闭界限，不是执行前工具沙箱：错误命令或
+第二个 start 被观察时，调用可能已经开始。因此当前入口不得直接在宿主运行；必须先增加
+执行前 exact-command enforcement，或把整个临时 Gateway 放入仅暴露探针临时根的 disposable
+OS/container sandbox。专用、零绑定 agent 和人工授权本身不能替代这条边界。输出只含固定 shape
 种类、计数和字节数；不含配置/root、Gateway URL、凭据、session/run/call ID、tool 名、
 prompt、args、result/stdout 值、动态 key、hash 或 artifact 名。失败只输出固定错误码。
 直到一次获授权的实际运行产生日期化证据前，upstream result schema 仍是 `unknown`，

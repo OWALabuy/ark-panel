@@ -63,12 +63,15 @@ interface FixtureOverrides {
   postTotalTokens?: number;
   postFresh?: boolean;
   postContextTokens?: number;
+  emptyRegistryBefore?: boolean;
+  emptyRegistryAfterCleanup?: boolean;
 }
 
 async function fixture(t: import("node:test").TestContext, overrides: FixtureOverrides = {}) {
   const root = await tempFixture(t, "compaction-live-probe-"), sessionsRoot = join(root, "agents", request.agentId, "sessions");
   const configPath = join(root, "openclaw.json"), panelRootParent = join(root, "panel-roots"), workspaceRoot = join(root, "workspace");
   await mkdir(sessionsRoot, { recursive: true, mode: 0o700 });
+  if (overrides.emptyRegistryBefore) await writeFile(join(sessionsRoot, "sessions.json"), "{}", { mode: 0o600 });
   await mkdir(panelRootParent, { mode: 0o700 });
   await mkdir(workspaceRoot, { mode: 0o700 });
   await writeFile(configPath, JSON.stringify({ gateway: { mode: "local" }, bindings: [],
@@ -97,7 +100,8 @@ async function fixture(t: import("node:test").TestContext, overrides: FixtureOve
     async send() { calls.push("send"); throw new Error("send forbidden"); }, async waitForCompletion() {},
     async abort() { calls.push("abort"); if (overrides.abortFails) throw new Error("private abort failure"); },
     async deleteSession(key) { calls.push("delete"); assert.equal(key, sessionKey);
-      if (overrides.deleteFails) throw new Error("private delete failure"); await rm(transcriptPath); }
+      if (overrides.deleteFails) throw new Error("private delete failure"); await rm(transcriptPath);
+      if (overrides.emptyRegistryAfterCleanup) await writeFile(join(sessionsRoot, "sessions.json"), "{}", { mode: 0o600 }); }
   };
   const dependencies = { env: { PANEL_ALLOW_COMPACTION_LIVE_PROBE: overrides.gate ?? "1" }, client };
   return { request: actualRequest, dependencies, calls, root };
@@ -114,6 +118,20 @@ test("fake transport drives the production compaction chain with same-session fr
   assert.deepEqual(value.calls, ["version", "version", "create", "effective-tools", "pre-usage", "compact", "post-usage", "version", "delete"]);
   assert.deepEqual((await readdir(value.root)).sort(), ["agents", "openclaw.json", "panel-roots", "workspace"]);
   assert.deepEqual(await readdir(value.request.panelRootParent), []);
+});
+
+test("compaction cleanup accepts only the canonical empty OpenClaw session registry", async t => {
+  for (const overrides of [{ emptyRegistryBefore: true, emptyRegistryAfterCleanup: true },
+    { emptyRegistryAfterCleanup: true }] satisfies FixtureOverrides[]) {
+    const value = await fixture(t, overrides);
+    assert.equal((await runCompactionLiveProbe(value.request, value.dependencies)).status, "passed");
+    assert.deepEqual(await readdir(value.request.sessionsRoot), ["sessions.json"]);
+  }
+  const invalid = await fixture(t); await writeFile(join(invalid.request.sessionsRoot, "sessions.json"),
+    JSON.stringify({ private: "fixture" }), { mode: 0o600 });
+  await assert.rejects(runCompactionLiveProbe(invalid.request, invalid.dependencies),
+    (error: unknown) => (error as CompactionLiveProbeError).code === "PROBE_ROOT_CONTENTS_UNSAFE");
+  assert.equal(invalid.calls.includes("create"), false);
 });
 
 test("gate and version reject before create; effective-tools failure cleans before handoff", async t => {

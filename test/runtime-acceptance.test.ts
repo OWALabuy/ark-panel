@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmod, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 import type { GatewayClient } from "../src/gateway/adapter.js";
+import { liveProbeRuntimeSnapshot } from "../src/gateway/live-probe-preflight.js";
 import { RuntimeAcceptanceError, parseRuntimeAcceptanceArguments, runRuntimeAcceptance,
   workspaceSnapshot, type RuntimeAcceptanceDependencies, type RuntimeAcceptanceRequest } from "../src/gateway/runtime-acceptance.js";
 import { tempFixture } from "./test-helpers.js";
@@ -48,12 +49,15 @@ test("compiled CLI rejects invalid arguments without leaking paths, credentials,
 async function fixture(t: import("node:test").TestContext, overrides: { gate?: string; tools?: string[]; waitFails?: boolean;
   configuredTools?: string[]; bootstrapNames?: string[]; rootIdentityMismatch?: boolean; resultText?: string;
   resultBlocks?: boolean; preexistingRootFile?: boolean;
+  emptyRegistryBefore?: boolean; emptyRegistryAfterCleanup?: boolean; invalidRegistryBefore?: boolean;
   transcriptMutation?: "assistant-result" | "duplicate-result" | "unmatched-result" | "out-of-order" } = {}) {
   const root = await tempFixture(t, "runtime-acceptance-"), workspaceRoot = join(root, "workspace");
   const sessionsRoot = join(root, "agents", agentId, "sessions"), configPath = join(root, "openclaw.json");
   await mkdir(join(workspaceRoot, "memory"), { recursive: true, mode: 0o700 });
   await mkdir(sessionsRoot, { recursive: true, mode: 0o700 });
   if (overrides.preexistingRootFile) await writeFile(join(sessionsRoot, "preexisting.jsonl"), "fixture\n", { mode: 0o600 });
+  if (overrides.emptyRegistryBefore || overrides.invalidRegistryBefore) await writeFile(join(sessionsRoot, "sessions.json"),
+    overrides.invalidRegistryBefore ? JSON.stringify({ private: "fixture" }) : "{}", { mode: 0o600 });
   await writeFile(join(workspaceRoot, "memory", "ark-panel-runtime-acceptance.md"),
     "# Fictional ark-panel runtime acceptance canary\n\nARK_PANEL_RUNTIME_ACCEPTANCE_QUERY_V1\nARK_PANEL_RUNTIME_ACCEPTANCE_RESULT_V1\n",
     { mode: 0o600 });
@@ -85,7 +89,8 @@ async function fixture(t: import("node:test").TestContext, overrides: { gate?: s
       return { runId }; },
     async waitForCompletion() { calls.push("wait"); if (overrides.waitFails) throw new Error("unknown outcome"); },
     async abort(_key, runId) { calls.push(`abort:${runId ?? "none"}`); },
-    async deleteSession() { calls.push("delete"); deletedTranscript = await readFile(transcriptPath, "utf8"); await rm(transcriptPath); }
+    async deleteSession() { calls.push("delete"); deletedTranscript = await readFile(transcriptPath, "utf8"); await rm(transcriptPath);
+      if (overrides.emptyRegistryAfterCleanup) await writeFile(join(sessionsRoot, "sessions.json"), "{}", { mode: 0o600 }); }
   };
   let rootChecks = 0;
   const dependencies: RuntimeAcceptanceDependencies = { env: { PANEL_ALLOW_RUNTIME_ACCEPTANCE: overrides.gate ?? "1" }, client,
@@ -169,10 +174,37 @@ test("TOCTOU rechecks stop before create and before materialization", async t =>
 test("an isolated runtime requires an empty sessions root and accepts text-block tool results", async t => {
   const dirty = await fixture(t, { preexistingRootFile: true });
   await assert.rejects(runRuntimeAcceptance(dirty.request, dirty.dependencies),
-    (error: unknown) => (error as RuntimeAcceptanceError).code === "PROBE_ROOT_NOT_EMPTY");
+    (error: unknown) => (error as RuntimeAcceptanceError).code === "PROBE_ROOT_CONTENTS_UNSAFE");
   assert.equal(dirty.calls.some(call => call.startsWith("create:")), false);
   const blocks = await fixture(t, { resultBlocks: true });
   assert.equal((await runRuntimeAcceptance(blocks.request, blocks.dependencies)).status, "passed");
+});
+
+test("runtime registry snapshot is bounded and detects path replacement during its read", async t => {
+  const root = await tempFixture(t, "runtime-registry-snapshot-");
+  const registry = join(root, "sessions.json");
+  await writeFile(registry, `${" ".repeat(1_024)}{}`, { mode: 0o600 });
+  await assert.rejects(liveProbeRuntimeSnapshot(root),
+    (error: unknown) => (error as { code?: string }).code === "PROBE_ROOT_TOO_LARGE");
+
+  await writeFile(registry, "{}", { mode: 0o600 });
+  await assert.rejects(liveProbeRuntimeSnapshot(root, undefined, { async afterRegistryRead(path) {
+    const moved = join(root, "sessions.original.json");
+    await rename(path, moved); await writeFile(path, "{}", { mode: 0o600 }); await rm(moved);
+  } }), (error: unknown) => (error as { code?: string }).code === "PROBE_ROOT_CHANGED");
+});
+
+test("an owner-only empty OpenClaw session registry is normalized but nonempty registry state fails closed", async t => {
+  const existing = await fixture(t, { emptyRegistryBefore: true, emptyRegistryAfterCleanup: true });
+  assert.equal((await runRuntimeAcceptance(existing.request, existing.dependencies)).status, "passed");
+  assert.deepEqual(await readdir(existing.request.sessionsRoot), ["sessions.json"]);
+  const created = await fixture(t, { emptyRegistryAfterCleanup: true });
+  assert.equal((await runRuntimeAcceptance(created.request, created.dependencies)).status, "passed");
+  assert.deepEqual(await readdir(created.request.sessionsRoot), ["sessions.json"]);
+  const invalid = await fixture(t, { invalidRegistryBefore: true });
+  await assert.rejects(runRuntimeAcceptance(invalid.request, invalid.dependencies),
+    (error: unknown) => (error as RuntimeAcceptanceError).code === "PROBE_ROOT_CONTENTS_UNSAFE");
+  assert.equal(invalid.calls.some(call => call.startsWith("create:")), false);
 });
 
 test("gate and exact-tool mismatch reject before send; unknown outcome aborts once without retry", async t => {

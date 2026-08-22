@@ -1,11 +1,14 @@
 import { createHash } from "node:crypto";
-import { constants } from "node:fs";
-import { open, realpath } from "node:fs/promises";
-import { isAbsolute, resolve, sep } from "node:path";
+import { constants, type BigIntStats } from "node:fs";
+import { lstat, open, readdir, realpath } from "node:fs/promises";
+import { isAbsolute, join, resolve, sep } from "node:path";
 import type { CreatedSession } from "./adapter.js";
 
 export interface LiveProbeRootIdentity { dev: bigint; ino: bigint }
 export interface LiveProbeConfigIdentity { dev: bigint; ino: bigint; size: bigint; mtimeNs: bigint; digest: string }
+export interface LiveProbeRuntimeSnapshotDependencies { afterRegistryRead?(path: string): Promise<void> }
+
+const MAX_EMPTY_REGISTRY_BYTES = 1_024n;
 
 export class LiveProbePreflightError extends Error {
   constructor(readonly code: string) { super(code); this.name = "LiveProbePreflightError"; }
@@ -80,6 +83,46 @@ export async function inspectLiveProbeCreatedSession(created: CreatedSession, se
   const handle = await open(created.transcriptPath, constants.O_RDONLY | constants.O_NOFOLLOW);
   try { if (!(await handle.stat()).isFile()) throw fail("PROBE_CREATED_SESSION_INVALID"); }
   finally { await handle.close(); }
+}
+
+function sameFileIdentity(left: BigIntStats, right: BigIntStats): boolean {
+  return left.isFile() && right.isFile() && left.dev === right.dev && left.ino === right.ino && left.size === right.size &&
+    left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs && left.nlink === right.nlink && left.uid === right.uid &&
+    left.mode === right.mode;
+}
+
+export async function liveProbeRuntimeSnapshot(root: string, fail: Failure = defaultFailure,
+  dependencies: LiveProbeRuntimeSnapshotDependencies = {}): Promise<readonly never[]> {
+  for (const name of (await readdir(root)).sort()) {
+    const path = join(root, name), before = await lstat(path, { bigint: true });
+    if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1n ||
+      (typeof process.getuid === "function" && before.uid !== BigInt(process.getuid())) || (before.mode & 0o077n) !== 0n) {
+      throw fail("PROBE_ROOT_CONTENTS_UNSAFE");
+    }
+    if (name !== "sessions.json") throw fail("PROBE_ROOT_CONTENTS_UNSAFE");
+    if (before.size <= 0n || before.size > MAX_EMPTY_REGISTRY_BYTES) throw fail("PROBE_ROOT_TOO_LARGE");
+    const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      const stat = await handle.stat({ bigint: true });
+      if (!sameFileIdentity(before, stat)) throw fail("PROBE_ROOT_CHANGED");
+      const contents = Buffer.alloc(Number(stat.size)); let offset = 0;
+      while (offset < contents.length) {
+        const { bytesRead } = await handle.read(contents, offset, contents.length - offset, offset);
+        if (bytesRead === 0) throw fail("PROBE_ROOT_CHANGED");
+        offset += bytesRead;
+      }
+      await dependencies.afterRegistryRead?.(path);
+      const after = await handle.stat({ bigint: true }), atPath = await lstat(path, { bigint: true });
+      if (!sameFileIdentity(stat, after) || !sameFileIdentity(stat, atPath)) throw fail("PROBE_ROOT_CHANGED");
+      let registry: unknown;
+      try { registry = JSON.parse(contents.toString("utf8")) as unknown; }
+      catch { throw fail("PROBE_ROOT_CONTENTS_UNSAFE"); }
+      if (!registry || typeof registry !== "object" || Array.isArray(registry) || Object.keys(registry).length !== 0) {
+        throw fail("PROBE_ROOT_CONTENTS_UNSAFE");
+      }
+    } finally { await handle.close(); }
+  }
+  return [];
 }
 
 export function liveProbeCreatedIdentityValid(created: CreatedSession, sessionsRoot: string, agentId: string): boolean {

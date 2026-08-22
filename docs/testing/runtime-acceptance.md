@@ -18,8 +18,10 @@
 1. 目标 agent ID、`openclaw.json`、目标 agent 的 `sessions` 根和 workspace 根均已明确；
 2. `openclaw.json` 中 `bindings` 精确为 `[]`，且 `agents.list` 恰有一个目标 agent，workspace
    精确指向上述目录；目标没有任何 channel/cron/外部消息入口；
-3. 两个根均由当前用户拥有、不可被 group/other 访问、不是 symlink；sessions 根必须是该探针
-   独占且在执行前精确为空，不能含其他 session、archive 或 metadata；
+3. 两个根均由当前用户拥有、不可被 group/other 访问、不是 symlink；临时 Gateway 必须以
+   `umask 077` 启动，sessions 根必须是该探针独占且不含其他 session、archive 或 metadata。
+   OpenClaw 可保留一个 owner-only、普通单链接且 JSON 内容精确为空对象的 `sessions.json`；
+   探针把这个空 registry 归一化为空状态，任何非空/额外键、宽权限或其它文件仍失败关闭；
 4. workspace 已由操作者预置普通私有文件
    `memory/ark-panel-runtime-acceptance.md`，内容精确为：
 

@@ -15,9 +15,12 @@ through fresh read objects. It never selects an existing panel record and never 
 Do not run this command until a human has explicitly authorized the exact agent, config, sessions
 root, empty workspace, and empty private panel-root parent. The target agent must be dedicated to
 this probe, have zero channel bindings, and expose an effective tool inventory of exactly `[]`.
-All four path inputs must be absolute, canonical, privately owned, non-overlapping paths. The
-sessions root and workspace must be empty before the run. The strict config must contain exactly
-one matching agent entry whose workspace is that exact path; the newly created transcript must be
+All four path inputs must be absolute, canonical, privately owned, non-overlapping paths. Start the
+temporary Gateway under `umask 077`. The sessions root must contain no session or artifact; OpenClaw
+may retain one owner-only, single-link regular `sessions.json` whose JSON value is exactly an empty
+object, which the probe normalizes as empty. Any nonempty registry, extra key, permissive mode, or
+other file fails closed. The workspace must be empty before the run. The strict config must contain
+exactly one matching agent entry whose workspace is that exact path; the newly created transcript must be
 empty and belong to the returned session before the probe replaces it with fictional history.
 
 ```sh
@@ -50,8 +53,8 @@ A pass requires all of the following from one created session and one compact ca
 - a fresh `SessionReadIndex` / `SessionReadData` reload whose revision and current-tip usage match
   the committed result;
 - zero send calls, one create/compact/delete, an unchanged empty workspace, an unchanged runtime
-  root snapshot after constrained cleanup, and identity-checked removal of the probe-owned panel
-  root.
+  root snapshot after constrained cleanup (with only the canonical empty registry normalized away),
+  and identity-checked removal of the probe-owned panel root.
 
 Stdout contains only the fixed report schema, booleans and fictional token counts. Stderr contains
 only fixed error and cleanup codes from the CLI; neither output includes paths, credentials,

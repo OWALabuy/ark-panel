@@ -16,7 +16,7 @@ import { SUPPORTED_OPENCLAW_VERSION, type CreatedSession, type GatewayClient } f
 import { unregisterAndClean } from "./artifact-cleanup.js";
 import { BridgeService } from "./bridge-service.js";
 import { inspectLiveProbeConfig, inspectLiveProbeCreatedSession, inspectLiveProbeRoot, liveProbeCreatedIdentityValid,
-  type LiveProbeConfigIdentity, type LiveProbeRootIdentity } from "./live-probe-preflight.js";
+  liveProbeRuntimeSnapshot, type LiveProbeConfigIdentity, type LiveProbeRootIdentity } from "./live-probe-preflight.js";
 import { FileBridgeMaterializer } from "./materializer.js";
 
 const SCENARIO = "panel-compaction-v1";
@@ -153,17 +153,6 @@ async function ownedPanelRoot(parent: string): Promise<OwnedPanelRoot> {
   } };
 }
 
-interface RootEntryIdentity { name: string; dev: bigint; ino: bigint; size: bigint; mtimeNs: bigint; kind: "file" | "directory" | "other" }
-async function runtimeSnapshot(root: string): Promise<readonly RootEntryIdentity[]> {
-  const values: RootEntryIdentity[] = [];
-  for (const name of (await readdir(root)).sort()) {
-    const stat = await lstat(join(root, name), { bigint: true });
-    values.push({ name, dev: stat.dev, ino: stat.ino, size: stat.size, mtimeNs: stat.mtimeNs,
-      kind: stat.isFile() ? "file" : stat.isDirectory() ? "directory" : "other" });
-  }
-  return values;
-}
-
 interface WorkspaceIdentity { dev: bigint; ino: bigint }
 async function inspectEmptyWorkspace(path: string, expected?: WorkspaceIdentity): Promise<WorkspaceIdentity> {
   const canonical = resolve(path);
@@ -266,7 +255,8 @@ export async function runCompactionLiveProbe(request: CompactionLiveProbeRequest
     canonicalWorkspace.startsWith(`${canonicalRuntimeRoot}/`) || canonicalRuntimeRoot.startsWith(`${canonicalWorkspace}/`) ||
     canonicalPanelParent === canonicalWorkspace || canonicalPanelParent.startsWith(`${canonicalWorkspace}/`) ||
     canonicalWorkspace.startsWith(`${canonicalPanelParent}/`)) throw new CompactionLiveProbeError("PROBE_PANEL_PARENT_UNSAFE");
-  const beforeRuntime = await runtimeSnapshot(request.sessionsRoot), createRoot = dependencies.createOwnedPanelRoot ?? ownedPanelRoot;
+  const snapshotRuntime = () => liveProbeRuntimeSnapshot(request.sessionsRoot, code => new CompactionLiveProbeError(code));
+  const beforeRuntime = await snapshotRuntime(), createRoot = dependencies.createOwnedPanelRoot ?? ownedPanelRoot;
   if (beforeRuntime.length !== 0) throw new CompactionLiveProbeError("PROBE_RUNTIME_NOT_EMPTY");
   let panel: OwnedPanelRoot | undefined, primary: unknown, report: CompactionLiveProbeReport | undefined, cleanupCode: string | null = null;
   try {
@@ -318,7 +308,7 @@ export async function runCompactionLiveProbe(request: CompactionLiveProbeRequest
   finally {
     try {
       await inspectRoot(request.sessionsRoot, request.agentId, rootIdentity);
-      if (!isDeepStrictEqual(await runtimeSnapshot(request.sessionsRoot), beforeRuntime)) throw new CompactionLiveProbeError("PROBE_RUNTIME_RESIDUALS");
+      if (!isDeepStrictEqual(await snapshotRuntime(), beforeRuntime)) throw new CompactionLiveProbeError("PROBE_RUNTIME_RESIDUALS");
       await inspectEmptyWorkspace(request.workspaceRoot, workspaceIdentity);
     } catch { cleanupCode = "PROBE_RUNTIME_CLEANUP_FAILED"; }
     if (panel) {

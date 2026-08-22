@@ -7,7 +7,7 @@ import type { CreatedSession, GatewayClient } from "./adapter.js";
 import { unregisterAndClean } from "./artifact-cleanup.js";
 import { FileBridgeMaterializer } from "./materializer.js";
 import { inspectLiveProbeConfig, inspectLiveProbeCreatedSession, inspectLiveProbeRoot, liveProbeCreatedIdentityValid,
-  type LiveProbeConfigIdentity, type LiveProbeRootIdentity } from "./live-probe-preflight.js";
+  liveProbeRuntimeSnapshot, type LiveProbeConfigIdentity, type LiveProbeRootIdentity } from "./live-probe-preflight.js";
 import type { JsonObject } from "../domain/transcript.js";
 
 const VERSION = "2026.6.11";
@@ -21,8 +21,6 @@ const BOOTSTRAP = ["AGENTS.md", "TOOLS.md", "SOUL.md", "USER.md", "MEMORY.md"] a
 const REQUIRED_CONFIGURED_TOOLS = ["browser", "canvas", "memory_search"] as const;
 const MAX_WORKSPACE_FILES = 1_000;
 const MAX_WORKSPACE_BYTES = 16 * 1024 * 1024;
-const MAX_RUNTIME_FILES = 1_000;
-const MAX_RUNTIME_BYTES = 64 * 1024 * 1024;
 
 export interface RuntimeAcceptanceRequest {
   agentId: string; configPath: string; sessionsRoot: string; workspaceRoot: string; expectedVersion: string;
@@ -48,7 +46,6 @@ export class RuntimeAcceptanceError extends Error {
 
 export interface WorkspaceIdentity { dev: bigint; ino: bigint }
 export interface WorkspaceSnapshot { fileCount: number; hash: string }
-interface RootEntry { name: string; dev: bigint; ino: bigint; size: bigint; mtimeNs: bigint; digest: string }
 
 export interface RuntimeAcceptanceDependencies {
   env: NodeJS.ProcessEnv;
@@ -169,27 +166,6 @@ async function inspectCanary(workspaceRoot: string): Promise<void> {
   finally { await handle.close(); }
 }
 
-async function rootSnapshot(root: string): Promise<readonly RootEntry[]> {
-  const values: RootEntry[] = []; let bytes = 0;
-  for (const name of (await readdir(root)).sort()) {
-    const path = join(root, name), before = await lstat(path, { bigint: true });
-    if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1n ||
-      (typeof process.getuid === "function" && before.uid !== BigInt(process.getuid())) || (before.mode & 0o077n) !== 0n) {
-      throw new RuntimeAcceptanceError("PROBE_ROOT_CONTENTS_UNSAFE");
-    }
-    const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
-    try {
-      const stat = await handle.stat({ bigint: true });
-      if (!stat.isFile() || stat.dev !== before.dev || stat.ino !== before.ino || stat.nlink !== 1n) throw new RuntimeAcceptanceError("PROBE_ROOT_CHANGED");
-      const contents = await handle.readFile(); bytes += contents.length;
-      if (values.length >= MAX_RUNTIME_FILES || bytes > MAX_RUNTIME_BYTES) throw new RuntimeAcceptanceError("PROBE_ROOT_TOO_LARGE");
-      values.push({ name, dev: stat.dev, ino: stat.ino, size: stat.size, mtimeNs: stat.mtimeNs,
-        digest: createHash("sha256").update(contents).digest("hex") });
-    } finally { await handle.close(); }
-  }
-  return values;
-}
-
 function object(value: unknown): JsonObject | undefined {
   return value && typeof value === "object" && !Array.isArray(value) ? value as JsonObject : undefined;
 }
@@ -276,7 +252,8 @@ export async function runRuntimeAcceptance(request: RuntimeAcceptanceRequest,
   const configIdentity = await inspectConfig(request.configPath, request.agentId, undefined, request.workspaceRoot);
   const rootIdentity = await inspectRoot(request.sessionsRoot, request.agentId), workspaceIdentity = await checkWorkspace(request.workspaceRoot);
   await inspectCanary(request.workspaceRoot); const beforeWorkspace = await probeWorkspaceSnapshot(request.workspaceRoot);
-  const beforeRoot = await rootSnapshot(request.sessionsRoot);
+  const snapshotRoot = () => liveProbeRuntimeSnapshot(request.sessionsRoot, code => new RuntimeAcceptanceError(code));
+  const beforeRoot = await snapshotRoot();
   if (beforeRoot.length !== 0) throw new RuntimeAcceptanceError("PROBE_ROOT_NOT_EMPTY");
   await inspectConfig(request.configPath, request.agentId, configIdentity, request.workspaceRoot);
   if (await dependencies.client.version() !== request.expectedVersion) throw new RuntimeAcceptanceError("PROBE_VERSION_MISMATCH");
@@ -345,7 +322,7 @@ export async function runRuntimeAcceptance(request: RuntimeAcceptanceRequest,
     try {
       await inspectConfig(request.configPath, request.agentId, configIdentity, request.workspaceRoot);
       await inspectRoot(request.sessionsRoot, request.agentId, rootIdentity);
-      if (!isDeepStrictEqual(await rootSnapshot(request.sessionsRoot), beforeRoot)) throw new Error();
+      if (!isDeepStrictEqual(await snapshotRoot(), beforeRoot)) throw new Error();
     } catch { cleanupCode ??= "PROBE_CLEANUP_FAILED"; }
     try {
       await checkWorkspace(request.workspaceRoot, workspaceIdentity); await inspectCanary(request.workspaceRoot);
