@@ -26,6 +26,25 @@ test("bridge 成功和失败都先注销并清理", async t => {
   }
 });
 
+test("模型完成后的 bridge 失败只记录稳定阶段，不泄露原始错误或请求内容", async t => {
+  const root = await tempFixture(t, "bridge-post-model-diagnostic-");
+  const id = "10101010-1010-4010-8010-101010101010";
+  const created: CreatedSession = { sessionId: id, sessionKey: "agent:runtime:private-key", transcriptPath: join(root, `${id}.jsonl`) };
+  await writeFile(join(root, `${id}.jsonl.deleted.fixture`), "x");
+  const client: GatewayClient = { async version() { return "2026.6.11"; }, async createSession() { return created; },
+    async send() { return { runId: "run" }; }, async waitForCompletion() {}, async abort() {}, async deleteSession() {} };
+  const materializer: BridgeMaterializer = { async replaceCreatedTranscript() { return 0; },
+    async readNewEntries() { throw new Error("private prompt and path fixture"); }, verifyAndStripSubmittedUser(entries) { return entries; } };
+  const diagnostics: Readonly<Record<string, unknown>>[] = [];
+  const service = new BridgeService(client, materializer, new Map([["runtime", root]]), undefined, undefined, new Map(),
+    event => diagnostics.push(event));
+  await assert.rejects(service.generate({ runtimeAgentId: "runtime", historyThroughPreviousRun: { header: { type: "session" }, entries: [] },
+    latestUserMessage: "private request fixture", latestUserEntryId: "private-panel-id", idempotencyKey: "fixture-run" }), /private prompt/);
+  assert.deepEqual(diagnostics, [{ event: "bridge_post_model_failed", panelRunId: "fixture-run",
+    runtimeAgentId: "runtime", stage: "read_new_entries" }]);
+  assert.doesNotMatch(JSON.stringify(diagnostics), /prompt|path|request|private-key|panel-id/);
+});
+
 test("bridge 在临时 session 清理前汇总本轮 artifact 与专属 outputs", async t => {
   const sessions = await mkdtemp(join(tmpdir(), "bridge-output-sessions-")); const workspace = await mkdtemp(join(tmpdir(), "bridge-output-workspace-"));
   t.after(() => Promise.all([rm(sessions, { recursive: true, force: true }), rm(workspace, { recursive: true, force: true })]));

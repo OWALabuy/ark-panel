@@ -224,8 +224,9 @@ durable failed，不写 transcript；accepted 表示服务端已接管任务，�
    临时预览按合法 upstream sequence 形成有序 text/tool timeline。连续文本合并，同一 tool
    的完成/失败更新原始卡片且不移动；精确重复不增加 stream revision，乱序/重连重放收敛
    到同一结果，相同 sequence 的冲突事件失败关闭。无效或缺失 sequence 不得静默归零。
-5. 完成后从 runtime transcript 读取新增 entry，核验新增 user entry 与请求一致并跳过，
-   再验证完整 assistant/tool/custom 组。
+5. 完成后从 runtime transcript 读取新增 entry，按固定 OpenClaw `2026.6.11` 的
+   `chat.send` 文本投影（NFC、控制字符过滤、首尾裁剪）核验新增 user entry 并跳过，
+   再验证完整 assistant/tool/custom 组。panel 权威 user entry 仍保存未经该投影改写的原文。
 6. 新 entries 先写入可恢复 run record；随后以临时文件、`fsync`、rename 原子提交完整
    panel transcript。
 7. transcript 提交后写 completed snapshot；再执行官方注销和受限清理。

@@ -7,6 +7,7 @@ import type { OpenClawContextUsage } from "../domain/context-usage.js";
 
 interface StreamObserver { observe(sessionKey: string, listener: GatewayStreamListener): Promise<() => void> }
 interface AttachmentSender { send(sessionKey: string, message: string, idempotencyKey: string, attachments: readonly NonNullable<BridgeRequest["attachments"]>[number][]): Promise<{ runId: string }> }
+type DiagnosticSink = (event: Readonly<Record<string, unknown>>) => void;
 
 function submittedMessage(message: string, outputCapture?: PreparedOutputCapture): string {
   if (!outputCapture) return message;
@@ -17,7 +18,8 @@ export class BridgeService {
   constructor(private readonly client: GatewayClient, private readonly materializer: BridgeMaterializer,
     private readonly allowedRuntimeRoots: ReadonlyMap<string, string>, private readonly streamObserver?: StreamObserver,
     private readonly attachmentSender?: AttachmentSender,
-    private readonly runtimeRootIdentities: ReadonlyMap<string, { dev: bigint; ino: bigint }> = new Map()) {}
+    private readonly runtimeRootIdentities: ReadonlyMap<string, { dev: bigint; ino: bigint }> = new Map(),
+    private readonly diagnose: DiagnosticSink = event => process.stderr.write(`${JSON.stringify(event)}\n`)) {}
 
   private cleanupIdentity(runtimeAgentId: string): { expectedRuntimeRootIdentity?: { dev: bigint; ino: bigint } } {
     const identity = this.runtimeRootIdentities.get(runtimeAgentId);
@@ -110,6 +112,8 @@ export class BridgeService {
     mark("version");
     let created: CreatedSession | undefined; let runId: string | undefined; let primaryError: unknown;
     let abortPromise: Promise<void> | undefined; let entriesStaged = false; let cleanupSafe = true; let sendAttempted = false;
+    let postModelStage: "read_new_entries" | "verify_new_entries" | "read_context_usage" |
+      "collect_outputs" | "enforce_output_limits" | "stage_entries" | undefined;
     let unsubscribeStream: (() => void) | undefined; let outputCapture: PreparedOutputCapture | undefined;
     const abortCreated = (): Promise<void> => abortPromise ??= created ? this.client.abort(created.sessionKey, runId, created.sessionId) : Promise.resolve();
     try {
@@ -159,12 +163,18 @@ export class BridgeService {
       }
       finally { request.signal?.removeEventListener("abort", abort); }
       if (request.signal?.aborted) throw new Error("BRIDGE_ABORTED");
+      postModelStage = "read_new_entries";
       const added = await this.materializer.readNewEntries(created, before);
+      postModelStage = "verify_new_entries";
       const entries = this.materializer.verifyAndStripSubmittedUser(added, gatewayMessage, request.latestUserEntryId);
+      postModelStage = "read_context_usage";
       const contextUsage = await this.contextUsage(request.runtimeAgentId, created.sessionKey);
+      postModelStage = "collect_outputs";
       const outputs = [...(this.client.collectRunArtifacts ? await this.client.collectRunArtifacts(created.sessionKey, runId) : []),
         ...(outputCapture ? await collectOutputDirectory(outputCapture) : [])];
+      postModelStage = "enforce_output_limits";
       enforceOutputLimits(outputs, outputCapture?.maxFiles, outputCapture?.maxTotalBytes);
+      postModelStage = "stage_entries";
       await request.lifecycle?.({ type: "entries_materialized", entries, ...(outputs.length ? { outputs } : {}),
         ...(contextUsage ? { contextUsage } : {}) });
       mark("read_and_stage");
@@ -173,6 +183,8 @@ export class BridgeService {
         ...(contextUsage ? { contextUsage } : {}) };
     } catch (error) {
       primaryError = error;
+      if (postModelStage) this.diagnose({ event: "bridge_post_model_failed", panelRunId: request.idempotencyKey,
+        runtimeAgentId: request.runtimeAgentId, stage: postModelStage });
       if (created) {
         try { await abortCreated(); }
         catch (abortError) {

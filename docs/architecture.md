@@ -101,8 +101,9 @@ attachment block 直接交给上游。
    上下文预算；失败写入终态 run，但不写 transcript。
 4. Gateway 创建一次性、无渠道绑定的 runtime session；面板物化此前已完成的权威
    transcript，并通过 `sessions.send` 提交本轮消息。
-5. 完成后读取并验证本轮完整 entry 组。entries 先进入可恢复 run 记录，再以原子
-   文件替换提交 panel transcript。
+5. 完成后读取并验证本轮完整 entry 组。新增 user entry 按固定 OpenClaw `2026.6.11`
+   的 `chat.send` 文本投影核验并跳过，panel 权威 user entry 仍保留浏览器原文。其余
+   entries 先进入可恢复 run 记录，再以原子文件替换提交 panel transcript。
 6. 官方注销与受限 artifact 清理在结果安全接住后执行；无法证明运行已终止时保留
    `cleanupPending`，不能删除仍可能被上游写入的文件。
 

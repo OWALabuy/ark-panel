@@ -13,6 +13,15 @@ function textOfUser(entry: JsonObject): string | undefined {
     .filter((text): text is string => typeof text === "string").join("");
 }
 
+function openClawTranscriptUserText(message: string): string {
+  let output = "";
+  for (const char of message.normalize("NFC")) {
+    const code = char.charCodeAt(0);
+    if (code === 9 || code === 10 || code === 13 || code >= 32 && code !== 127) output += char;
+  }
+  return output.trim();
+}
+
 function object(value: unknown): JsonObject | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value as JsonObject : undefined;
 }
@@ -111,8 +120,23 @@ export class FileBridgeMaterializer implements BridgeMaterializer {
     await atomicWrite(created.transcriptPath, serializeTranscript(document)); return history.entries.length;
   }
   async readNewEntries(created: CreatedSession, previousEntryCount: number): Promise<JsonObject[]> {
-    const document = parseTranscript(await readFile(created.transcriptPath, "utf8"));
-    if (document.entries.length <= previousEntryCount) throw new Error("gateway 没有追加完整 run");
+    let text: string;
+    try { text = await readFile(created.transcriptPath, "utf8"); }
+    catch (error) {
+      this.diagnose({ event: "generation_materialization_rejected", reason: "TRANSCRIPT_READ_FAILED" });
+      throw error;
+    }
+    let document: TranscriptDocument;
+    try { document = parseTranscript(text); }
+    catch (error) {
+      this.diagnose({ event: "generation_materialization_rejected", reason: "TRANSCRIPT_INVALID" });
+      throw error;
+    }
+    if (document.entries.length <= previousEntryCount) {
+      this.diagnose({ event: "generation_materialization_rejected", reason: "NO_COMPLETE_RUN",
+        previousEntryCount, actualEntryCount: document.entries.length });
+      throw new Error("gateway 没有追加完整 run");
+    }
     return document.entries.slice(previousEntryCount);
   }
   async readAndVerifyCompaction(created: CreatedSession, history: TranscriptDocument): Promise<JsonObject> {
@@ -162,12 +186,29 @@ export class FileBridgeMaterializer implements BridgeMaterializer {
   }
   verifyAndStripSubmittedUser(entries: JsonObject[], expectedMessage: string, panelUserEntryId: string): JsonObject[] {
     const userIndexes = entries.flatMap((entry, index) => textOfUser(entry) === undefined ? [] : [index]);
-    if (userIndexes.length !== 1 || textOfUser(entries[userIndexes[0]!]!) !== expectedMessage) throw new Error("gateway 新增的 user entry 与提交消息不一致");
+    if (userIndexes.length !== 1) {
+      this.diagnose({ event: "generation_materialization_rejected", reason: "SUBMITTED_USER_COUNT_MISMATCH",
+        entryCount: entries.length, userEntryCount: userIndexes.length });
+      throw new Error("gateway 新增的 user entry 与提交消息不一致");
+    }
+    if (textOfUser(entries[userIndexes[0]!]!) !== openClawTranscriptUserText(expectedMessage)) {
+      this.diagnose({ event: "generation_materialization_rejected", reason: "SUBMITTED_USER_TEXT_MISMATCH",
+        entryCount: entries.length, userEntryCount: userIndexes.length });
+      throw new Error("gateway 新增的 user entry 与提交消息不一致");
+    }
     const gatewayUserId = entries[userIndexes[0]!]!.id;
-    if (typeof gatewayUserId !== "string") throw new Error("gateway user entry 缺少 id");
+    if (typeof gatewayUserId !== "string") {
+      this.diagnose({ event: "generation_materialization_rejected", reason: "SUBMITTED_USER_ID_MISSING",
+        entryCount: entries.length });
+      throw new Error("gateway user entry 缺少 id");
+    }
     const runEntries = entries.filter((_, index) => index !== userIndexes[0]).map((entry) =>
       entry.parentId === gatewayUserId ? { ...entry, parentId: panelUserEntryId } : entry);
-    if (!runEntries.some((entry) => entry.type === "message")) throw new Error("run 没有 message entry");
+    if (!runEntries.some((entry) => entry.type === "message")) {
+      this.diagnose({ event: "generation_materialization_rejected", reason: "RUN_MESSAGE_ENTRY_MISSING",
+        entryCount: entries.length, runEntryCount: runEntries.length });
+      throw new Error("run 没有 message entry");
+    }
     return runEntries;
   }
 }

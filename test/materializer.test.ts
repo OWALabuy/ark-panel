@@ -36,6 +36,28 @@ test("移除 gateway 重复 user entry，并把第一层 parentId 接回 panel u
   assert.equal(result[1]?.parentId, "panel-user");
 });
 
+test("按固定 OpenClaw 规则规范化 user 文本后校验，同时不改写 panel 原文", () => {
+  const materializer = new FileBridgeMaterializer(), panelMessage = " \u0001Cafe\u0301\r\n";
+  const result = materializer.verifyAndStripSubmittedUser([
+    { type: "message", id: "gateway-user", parentId: null, message: { role: "user", content: "Caf\u00e9" } },
+    { type: "message", id: "assistant", parentId: "gateway-user", message: { role: "assistant", content: "ok" } }
+  ], panelMessage, "panel-user");
+  assert.equal(result.length, 1);
+  assert.equal(result[0]?.parentId, "panel-user");
+  assert.equal(panelMessage, " \u0001Cafe\u0301\r\n");
+});
+
+test("生成物化拒绝日志只记录稳定原因与计数", () => {
+  const events: unknown[] = [], materializer = new FileBridgeMaterializer(() => new Date(), event => events.push(event));
+  assert.throws(() => materializer.verifyAndStripSubmittedUser([
+    { type: "message", id: "private-user-id", message: { role: "user", content: "private prompt fixture" } },
+    { type: "custom", id: "private-entry-id", data: "private response fixture" }
+  ], "private prompt fixture", "private-panel-id"), /run 没有 message entry/);
+  assert.deepEqual(events, [{ event: "generation_materialization_rejected", reason: "RUN_MESSAGE_ENTRY_MISSING",
+    entryCount: 2, runEntryCount: 1 }]);
+  assert.doesNotMatch(JSON.stringify(events), /private|prompt|response|user-id|panel-id/);
+});
+
 test("只采纳保持完整历史前缀和合法 keepRecentTokens 边界的唯一 compaction", async t => {
   const root = await mkdtemp(join(tmpdir(), "panel-compact-materializer-")); t.after(() => rm(root, { recursive: true, force: true }));
   const created = { sessionId: "22222222-2222-4222-8222-222222222222", sessionKey: "agent:runtime:key",
