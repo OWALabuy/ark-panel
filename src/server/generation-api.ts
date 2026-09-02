@@ -335,7 +335,11 @@ export class PanelGenerationApi implements GenerationApi {
       const { document } = await loadPanelSession(this.config.dataRoot, agentId, recordId);
       if (!document.entries.some(entry => entry.id === userEntryId)) continue;
       const stat = await lstat(join(this.config.dataRoot, "sessions", agentId, recordId, "transcript.jsonl")); return `${stat.size}:${stat.mtimeMs}`;
-    } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    } catch (error) {
+      const missing = (error as NodeJS.ErrnoException).code === "ENOENT" ||
+        error instanceof Error && error.message === "PANEL_SESSION_NOT_FOUND";
+      if (!missing) throw error;
+    }
     return undefined;
   }
   private async commitRecovered(record: PanelRunRecord): Promise<void> {

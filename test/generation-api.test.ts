@@ -421,6 +421,36 @@ test("后台 run 保留稳定脱敏的 Gateway 控制错误", async t => {
   assert.doesNotMatch(JSON.stringify(run), /private fixture prompt/);
 });
 
+test("目标会话不属于首个配置 Agent 时 bridge 失败仍收敛为终态", async t => {
+  const root = await tempFixture(t, "generation-later-agent-failure-");
+  const metadata = await createPanelSession(root, "main", { header: { type: "session" }, entries: [] });
+  const api = new PanelGenerationApi({ async generate() { throw new Error("fixture post-run failure"); } },
+    { dataRoot: root, runtimeByAgent: new Map([["claude", "runtime-claude"], ["main", "runtime-main"]]) });
+  const runId = "15151515-1515-4515-8515-151515151515";
+  await api.create(metadata.recordId, "private fixture prompt", runId);
+  await waitFor(async () => (await api.get(runId))?.status === "failed", "later-agent bridge failure");
+  const run = await api.get(runId);
+  assert.deepEqual(run?.error, { code: "RUN_FAILED", message: "生成失败，请稍后重试。" });
+  assert.doesNotMatch(JSON.stringify(run), /private fixture prompt/);
+  assert.equal((await loadPanelSession(root, "main", metadata.recordId)).document.entries.length, 0);
+});
+
+test("目标会话不属于首个配置 Agent 时启动恢复会终结孤儿 run", async t => {
+  const root = await tempFixture(t, "generation-later-agent-recovery-");
+  const metadata = await createPanelSession(root, "main", { header: { type: "session" }, entries: [] });
+  const store = new PanelRunStore(root), now = new Date().toISOString();
+  const runId = "16161616-1616-4616-8616-161616161616";
+  await store.put({ version: 1, runId, recordId: metadata.recordId, requestHash: "fixture", sequence: 4, status: "running",
+    createdAt: now, updatedAt: now, message: "private fixture prompt", plannedUserEntryId: "17171717-1717-4717-8717-171717171717" });
+  const api = new PanelGenerationApi({ async generate() { throw new Error("must not replay"); } },
+    { dataRoot: root, runtimeByAgent: new Map([["claude", "runtime-claude"], ["main", "runtime-main"]]) });
+  await api.initialize();
+  const run = await api.get(runId);
+  assert.deepEqual(run?.error, { code: "RUN_ORPHANED_AFTER_RESTART", message: "服务重启后无法安全恢复该任务，请重新发送。" });
+  assert.doesNotMatch(JSON.stringify(run), /private fixture prompt/);
+  assert.equal((await loadPanelSession(root, "main", metadata.recordId)).document.entries.length, 0);
+});
+
 test("run 订阅先给快照、终态可重订阅，重启恢复 staged entries 而不重复调用模型", async t => {
   const root=await mkdtemp(join(tmpdir(),"generation-recover-"));t.after(()=>rm(root,{recursive:true,force:true}));
   const metadata=await createPanelSession(root,"claude",{header:{type:"session"},entries:[]});const gate=deferred();
